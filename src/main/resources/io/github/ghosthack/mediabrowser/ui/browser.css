@@ -1,0 +1,24 @@
+/*
+ * Browser-view overrides, attached to MainWindow's root (Parent stylesheets
+ * sit above the scene's theme overlay, and leave with the root when another
+ * view takes the window — the viewer's Info/Metadata panels keep the themed
+ * look).
+ *
+ * Borderless panels: strips the 1px box every theme draws around the four
+ * panel content controls (nav tree, file list, Info table, Metadata
+ * tree-table). Two mechanisms because the themes differ:
+ *  - the Cupertino (AtlantaFX) overlays use a real -fx-border-*
+ *    (their .edge-to-edge variant zeroes it) → -fx-border-width: 0;
+ *  - stock Modena (the Default theme, and whatever Plain Dark leaves to it)
+ *    paints the box — and the focus ring — as outer -fx-background-color
+ *    layers showing through 1px background insets → collapsing all insets
+ *    to 0 lets the innermost fill cover them.
+ */
+.tree-view,
+.list-view,
+.table-view,
+.tree-table-view {
+  -fx-border-width: 0;
+  -fx-background-insets: 0;
+  -fx-background-radius: 0;
+}

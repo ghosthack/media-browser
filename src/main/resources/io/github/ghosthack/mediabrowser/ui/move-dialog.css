@@ -1,0 +1,59 @@
+/*
+ * Move dialog styling. The three focus zones (INPUT / HISTORY / TREE) carry a
+ * 1px muted border that thickens to a 2px accent border when active; the inner
+ * padding shrinks by 1px in the active state so the total box size stays put and
+ * nothing jitters as focus cycles. Selection highlights are made visible even
+ * when the list/tree itself is unfocused (we keep keyboard focus off them and
+ * route arrows through the dialog, so their selection must still read clearly).
+ */
+
+.move-dialog {
+    -fx-background-color: -fx-background;
+}
+
+.move-header {
+    -fx-font-weight: bold;
+}
+
+.move-note {
+    -fx-font-style: italic;
+    -fx-text-fill: gray;
+}
+
+.move-field-label {
+    -fx-text-fill: gray;
+}
+
+.move-error {
+    -fx-text-fill: #c82828;
+}
+
+/* ---- Focus zones ---- */
+
+.move-zone {
+    -fx-border-color: #b4b4b4;
+    -fx-border-width: 1;
+    -fx-border-radius: 4;
+    -fx-padding: 7;
+}
+
+.move-zone-active {
+    -fx-border-color: #0a7aff;
+    -fx-border-width: 2;
+    -fx-border-radius: 4;
+    -fx-padding: 6;
+}
+
+/* ---- History list: keep the selection visible while unfocused ---- */
+
+.move-history .list-cell:filled:selected {
+    -fx-background-color: #0a7aff;
+    -fx-text-fill: white;
+}
+
+/* ---- Tree: the highlighted node reads regardless of focus ---- */
+
+.move-tree .tree-cell.move-tree-highlight {
+    -fx-background-color: #0a7aff;
+    -fx-text-fill: white;
+}

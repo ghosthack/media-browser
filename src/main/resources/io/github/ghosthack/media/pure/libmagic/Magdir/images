@@ -1,0 +1,435 @@
+# RAW still-image formats
+0	string	II\x1a\x00\x00\x00HEAPCCDR	Canon CIFF raw image data
+!:mime	image/x-canon-crw
+!:ext	crw
+
+0	string	II\x2a\x00\x10\x00\x00\x00CR	Canon CR2 raw image data
+!:mime	image/x-canon-cr2
+!:ext	cr2
+!:strength	+80
+
+0	string	FUJIFILMCCD-RAW	Fujifilm RAF raw image data
+!:mime	image/x-fuji-raf
+!:ext	raf
+
+128	string	DICM	DICOM medical imaging data
+!:mime	application/dicom
+!:ext	dcm/dicom/dic
+
+0	string	8BPS
+>18	ubelong	>0	Adobe Photoshop image data
+!:mime	image/vnd.adobe.photoshop
+!:ext	psd/psb/pdd
+>>4	beshort	1	\b, version 1
+>>4	beshort	2	\b, large document format
+
+0	ulelong	20000630	OpenEXR image data
+!:mime	image/x-exr
+!:ext	exr
+>4	ulelong&0x00000200	0	\b, scanline storage
+>4	ulelong&0x00000200	0x00000200	\b, tiled storage
+
+0	string	#?RADIANCE\n	Radiance HDR image data
+!:mime	image/vnd.radiance
+!:ext	hdr/pic
+
+0	string	icns	Mac OS X icon
+>4	ubelong	>0
+!:mime	image/x-icns
+!:ext	icns
+
+0	string	\x00\x00\x01\x00
+>4	uleshort	>0
+>>5	byte	0	Windows icon
+!:mime	image/vnd.microsoft.icon
+!:ext	ico
+
+0	string	\x00\x00\x02\x00
+>4	uleshort	>0
+>>5	byte	0	Windows cursor
+!:mime	image/x-win-bitmap
+!:ext	cur
+
+0	string	IC
+>6	ulelong&0xFF00FF00	=0	OS/2 icon
+!:mime	image/x-os2-ico
+!:ext	ico
+
+0	string	CI
+>14	ulelong	<65	OS/2
+!:mime	image/x-os2-ico
+!:ext	ico
+>>14	ulelong	12	\b 1.x color icon
+>>14	ulelong	64	\b 2.x color icon
+
+0	string	CP
+>10	ulelong	>0
+>>14	ulelong	12	OS/2 1.x color pointer
+!:mime	image/x-ibm-pointer
+!:ext	ptr
+>>14	ulelong	64	OS/2 2.x color pointer
+!:mime	image/x-ibm-pointer
+!:ext	ptr
+
+0	string	BA
+>2	ulelong	<0x004c5942	OS/2 graphic array
+!:mime	image/x-os2-graphics
+>>2	ulelong	x	\b, cbSize %u
+>>>6	ulelong	>0	\b, data offset %u
+>>>>10	uleshort	>0	\b, display %u
+>>>>>12	uleshort	>0	x %u
+>>>>>>14	string	BM	\b; 1st bitmap
+!:ext	bmp/bga
+>>>>>>14	string	CI	\b; 1st color icon
+!:ext	ico
+>>>>>>14	string	CP	\b; 1st color pointer
+!:ext	ico
+>>>>>>14	string	IC	\b; 1st icon
+!:ext	ico
+
+0	string	Xcur	X11 cursor
+!:mime	image/x-xcursor
+
+0	string	/*\x20
+>0	search/0xCE	/*\x20XPM\x20*/
+>>&0	search/1249	[]	XPM image data
+!:mime	image/x-xpixmap
+!:ext	xpm
+>0	default	x
+>>0	search/0x52	static\x20char\x20
+>>>&0	search/64	[]	XPM image data
+!:mime	image/x-xpixmap
+!:ext	xpm
+
+0	string	\x21\x20XPM2\x0a	XPM image data, version 2
+!:mime	image/x-xpixmap
+!:ext	xpm
+
+0	ubelong	>99
+>8	ubelong	<3
+>>12	ubelong	<33
+>>>4	ubelong	7
+>>>>96	ubelong	x	X-Window screen dump image data, version X11
+!:mime	image/x-xwindowdump
+!:ext	xwd/dmp
+>>>>>0	ubelong	>100
+>>>>>>100	byte	>0
+>>>>>>>100	string	x	\b, "%s"
+>>>>>>16	ubelong	x	\b, %dx
+>>>>>>20	ubelong	x	\b%dx
+>>>>>>12	ubelong	x	\b%d
+>>>>>>28	ubelong	>0	\b, order %u
+
+# PNG, GIF, TIFF, BMP, and portable bitmap families
+0	name	png-ihdr
+>0	ubelong	x	\b, %d x
+>4	ubelong	x	\b%d,
+>8	byte	x	\b%d-bit
+>9	byte	0	grayscale,
+>9	byte	2	\b/color RGB,
+>9	byte	3	colormap,
+>9	byte	4	gray+alpha,
+>9	byte	6	\b/color RGBA,
+>12	byte	0	non-interlaced
+>12	byte	1	interlaced
+
+0	string	\x89PNG\x0d\x0a\x1a\x0a\x00\x00\x00\x0DIHDR	PNG image data
+!:mime	image/png
+!:ext	png
+!:strength	+10
+>16	use	png-ihdr
+
+0	string	GIF8	GIF image data
+!:mime	image/gif
+!:ext	gif
+!:strength	+80
+>4	string	7a	\b, version 87a,
+>4	string	9a	\b, version 89a,
+>6	uleshort	>0	%d x
+>8	uleshort	>0	%d
+
+0	string	MM\x00\x2a
+>(4.L)	use	dng-ifd-be
+
+0	string	II\x2a\x00
+>(4.l)	use	dng-ifd-le
+
+0	string	MM\x00\x2a	TIFF image data, big-endian
+!:mime	image/tiff
+!:ext	tif/tiff
+>(4.L)	use	tiff-ifd-be
+
+0	string	II\x2a\x00	TIFF image data, little-endian
+!:mime	image/tiff
+!:ext	tif/tiff
+>(4.l)	use	tiff-ifd-le
+
+0	string	MM\x00\x2b	Big TIFF image data, big-endian
+!:mime	image/tiff
+!:ext	tif/tiff
+
+0	string	II\x2b\x00	Big TIFF image data, little-endian
+!:mime	image/tiff
+!:ext	tif/tiff
+
+0	name	dng-ifd-be
+>2	use	dng-entry-be
+
+0	name	dng-ifd-le
+>2	use	dng-entry-le
+
+0	name	dng-entry-be
+>0	beshort	0xc612	Digital Negative (DNG) image data, big-endian
+!:mime	image/x-adobe-dng
+!:ext	dng
+!:strength	+120
+>>12	use	dng-entry-be
+>12	default	x
+>>12	use	dng-entry-be
+
+0	name	dng-entry-le
+>0	uleshort	0xc612	Digital Negative (DNG) image data, little-endian
+!:mime	image/x-adobe-dng
+!:ext	dng
+!:strength	+120
+>>12	use	dng-entry-le
+>12	default	x
+>>12	use	dng-entry-le
+
+0	name	tiff-ifd-be
+>2	use	tiff-entry-be
+
+0	name	tiff-entry-be
+>0	beshort	0x103	\b, compression=
+>>4	belong	1
+>>>8	beshort	2	\bCCITT 1D
+>>>8	beshort	3	\bGroup 3 Fax
+>>>8	beshort	4	\bbi-level group 4
+>>>8	beshort	1	\bnone
+>>>8	beshort	5	\bLZW
+>>>8	beshort	6	\bJPEG (old)
+>>>8	beshort	7	\bJPEG
+>>>8	beshort	8	\bdeflate
+>>>8	beshort	9	\bJBIG, ITU-T T.85
+>>>8	beshort	0x000a	\bJBIG, ITU-T T.43
+>>>8	beshort	0x7ffe	\bNeXT RLE 2-bit
+>>>8	beshort	0x8005	\bPackBits (Macintosh RLE)
+>>>8	beshort	0x8029	\bThunderscan RLE
+>>>8	beshort	0x807f	\bRasterPadding (CT or MP)
+>>>8	beshort	0x8080	\bRLE (Line Work)
+>>>8	beshort	0x8081	\bRLE (High-Res Cont-Tone)
+>>>8	beshort	0x8082	\bRLE (Binary Line Work)
+>>>8	beshort	0x80b2	\bDeflate (PKZIP)
+>>>8	beshort	0x80b3	\bKodak DCS
+>>>8	beshort	0x8765	\bJBIG
+>>>8	beshort	0x8798	\bJPEG2000
+>>>8	beshort	0x8799	\bNikon NEF Compressed
+>>>8	default	x
+>>>>8	beshort	x	\b(unknown %#x)
+>>12	use	tiff-entry-be
+>0	beshort	0x106	\b, PhotometricInterpretation=
+>>8	clear	x
+>>8	beshort	0	\bWhiteIsZero
+>>8	beshort	1	\bBlackIsZero
+>>8	beshort	2	\bRGB
+>>8	beshort	3	\bRGB Palette
+>>8	beshort	4	\bTransparency Mask
+>>8	beshort	5	\bCMYK
+>>8	beshort	6	\bYCbCr
+>>8	beshort	8	\bCIELab
+>>8	default	x
+>>>8	beshort	x	\b(unknown=%#x)
+>>12	use	tiff-entry-be
+>0	beshort	0x112	\b, orientation=
+>>8	beshort	1	\bupper-left
+>>8	beshort	3	\blower-right
+>>8	beshort	6	\bupper-right
+>>8	beshort	8	\blower-left
+>>8	beshort	9	\bundefined
+>>8	default	x
+>>>8	beshort	x	\b[*%d*]
+>>12	use	tiff-entry-be
+>0	beshort	0x10d
+>>(8.L)	string	x	\b, DocumentName=%s
+>>12	use	tiff-entry-be
+>0	beshort	0x10e
+>>(8.L)	string	x	\b, ImageDescription=%s
+>>12	use	tiff-entry-be
+>0	beshort	0x10f
+>>(8.L)	string	x	\b, Make=%s
+>>12	use	tiff-entry-be
+>0	beshort	0x110
+>>(8.L)	string	x	\b, model=%s
+>>12	use	tiff-entry-be
+>0	beshort	0x131
+>>(8.L)	string	x	\b, Software=%s
+>>12	use	tiff-entry-be
+>0	beshort	0x132
+>>(8.L)	string	x	\b, DateTime=%s
+>>12	use	tiff-entry-be
+>0	beshort	0x13c
+>>(8.L)	string	x	\b, HostComputer=%s
+>>12	use	tiff-entry-be
+>0	beshort	0x8298
+>>(8.L)	string	x	\b, Copyright=%s
+>>12	use	tiff-entry-be
+>0	beshort	0x8825	\b, GPS-Data
+>>12	use	tiff-entry-be
+>12	default	x
+>>12	use	tiff-entry-be
+
+0	name	tiff-ifd-le
+>2	use	tiff-entry-le
+
+0	name	tiff-entry-le
+>0	uleshort	0x103	\b, compression=
+>>4	ulelong	1
+>>>8	uleshort	2	\bCCITT 1D
+>>>8	uleshort	3	\bGroup 3 Fax
+>>>8	uleshort	4	\bbi-level group 4
+>>>8	uleshort	1	\bnone
+>>>8	uleshort	5	\bLZW
+>>>8	uleshort	6	\bJPEG (old)
+>>>8	uleshort	7	\bJPEG
+>>>8	uleshort	8	\bdeflate
+>>>8	uleshort	9	\bJBIG, ITU-T T.85
+>>>8	uleshort	0x000a	\bJBIG, ITU-T T.43
+>>>8	uleshort	0x7ffe	\bNeXT RLE 2-bit
+>>>8	uleshort	0x8005	\bPackBits (Macintosh RLE)
+>>>8	uleshort	0x8029	\bThunderscan RLE
+>>>8	uleshort	0x807f	\bRasterPadding (CT or MP)
+>>>8	uleshort	0x8080	\bRLE (Line Work)
+>>>8	uleshort	0x8081	\bRLE (High-Res Cont-Tone)
+>>>8	uleshort	0x8082	\bRLE (Binary Line Work)
+>>>8	uleshort	0x80b2	\bDeflate (PKZIP)
+>>>8	uleshort	0x80b3	\bKodak DCS
+>>>8	uleshort	0x8765	\bJBIG
+>>>8	uleshort	0x8798	\bJPEG2000
+>>>8	uleshort	0x8799	\bNikon NEF Compressed
+>>>8	default	x
+>>>>8	uleshort	x	\b(unknown %#x)
+>>12	use	tiff-entry-le
+>0	uleshort	0x106	\b, PhotometricInterpretation=
+>>8	clear	x
+>>8	uleshort	0	\bWhiteIsZero
+>>8	uleshort	1	\bBlackIsZero
+>>8	uleshort	2	\bRGB
+>>8	uleshort	3	\bRGB Palette
+>>8	uleshort	4	\bTransparency Mask
+>>8	uleshort	5	\bCMYK
+>>8	uleshort	6	\bYCbCr
+>>8	uleshort	8	\bCIELab
+>>8	default	x
+>>>8	uleshort	x	\b(unknown=%#x)
+>>12	use	tiff-entry-le
+>0	uleshort	0x112	\b, orientation=
+>>8	uleshort	1	\bupper-left
+>>8	uleshort	3	\blower-right
+>>8	uleshort	6	\bupper-right
+>>8	uleshort	8	\blower-left
+>>8	uleshort	9	\bundefined
+>>8	default	x
+>>>8	uleshort	x	\b[*%d*]
+>>12	use	tiff-entry-le
+>0	uleshort	0x10d
+>>(8.l)	string	x	\b, DocumentName=%s
+>>12	use	tiff-entry-le
+>0	uleshort	0x10e
+>>(8.l)	string	x	\b, ImageDescription=%s
+>>12	use	tiff-entry-le
+>0	uleshort	0x10f
+>>(8.l)	string	x	\b, Make=%s
+>>12	use	tiff-entry-le
+>0	uleshort	0x110
+>>(8.l)	string	x	\b, model=%s
+>>12	use	tiff-entry-le
+>0	uleshort	0x131
+>>(8.l)	string	x	\b, Software=%s
+>>12	use	tiff-entry-le
+>0	uleshort	0x132
+>>(8.l)	string	x	\b, DateTime=%s
+>>12	use	tiff-entry-le
+>0	uleshort	0x13c
+>>(8.l)	string	x	\b, HostComputer=%s
+>>12	use	tiff-entry-le
+>0	uleshort	0x8298
+>>(8.l)	string	x	\b, Copyright=%s
+>>12	use	tiff-entry-le
+>0	uleshort	0x8825	\b, GPS-Data
+>>12	use	tiff-entry-le
+>12	default	x
+>>12	use	tiff-entry-le
+
+0	string	BM	PC bitmap
+>14	ulelong	12	\b, OS/2 1.x format
+!:mime	image/bmp
+!:ext	bmp
+>14	ulelong	16	\b, OS/2 2.x format
+!:mime	image/bmp
+!:ext	bmp
+>14	ulelong	40	\b, Windows 3.x format
+!:mime	image/bmp
+!:ext	bmp
+>>18	ulelong	x	\b, %d x
+>>>22	ulelong	x	%d
+>>>>28	uleshort	x	x %d
+>>>>>30	ulelong	1	\b, RLE 8-bit/pixel compression
+>>>>>30	ulelong	2	\b, RLE 4-bit/pixel compression
+>>>>>30	ulelong	3	\b, Huffman 1D compression
+>>>>>30	ulelong	6	\b, RGBA bit field masks
+>>>>>30	default	x
+>>>>>>30	ulelong	>0	\b, %u compression
+>14	ulelong	52	\b, Adobe Photoshop
+!:mime	image/bmp
+!:ext	bmp
+>14	ulelong	56	\b, Adobe Photoshop with alpha channel mask
+!:mime	image/bmp
+!:ext	bmp
+>14	ulelong	64	\b, OS/2 2.x format
+!:mime	image/bmp
+!:ext	bmp
+>14	ulelong	108	\b, Windows 95/NT4 and newer format
+!:mime	image/bmp
+!:ext	bmp
+>14	ulelong	124	\b, Windows 98/2000 and newer format
+!:mime	image/bmp
+!:ext	bmp
+
+0	search/1	P1
+>2	regex/2	[\040\t\f\r\n]	Netpbm image data
+>>0	string	P1	\b, bitmap
+!:strength	+65
+!:mime	image/x-portable-bitmap
+!:ext	pbm
+
+0	regex/4	P2[\040\t\f\r\n]	Netpbm image data, greymap
+!:strength	+65
+!:mime	image/x-portable-graymap
+!:ext	pgm
+
+0	regex/4	P3[\040\t\f\r\n]	Netpbm image data, pixmap
+!:strength	+65
+!:mime	image/x-portable-pixmap
+!:ext	ppm
+
+0	regex/4	P4[\040\t\f\r\n]	Netpbm image data, rawbits bitmap
+!:strength	+65
+!:mime	image/x-portable-bitmap
+!:ext	pbm
+
+0	regex/4	P5[\040\t\f\r\n]	Netpbm image data, rawbits greymap
+!:strength	+65
+!:mime	image/x-portable-greymap
+!:ext	pgm
+
+0	regex/4	P6[\040\t\f\r\n]	Netpbm image data, rawbits pixmap
+!:strength	+65
+!:mime	image/x-portable-pixmap
+!:ext	ppm/pnm
+
+0	string	P7
+>2	byte	!0xAB
+>>3	search/256/b	WIDTH	Netpbm PAM image file
+!:mime	image/x-portable-arbitrarymap
+!:ext	pam
+

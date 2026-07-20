@@ -1,0 +1,8 @@
+0	string	FLIF
+>4	string	\x3cH	FLIF image data
+!:mime	image/flif
+!:ext	flif
+>4	string	\x3eH	FLIF animation data
+!:mime	image/flif
+!:ext	flif
+

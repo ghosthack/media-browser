@@ -1,0 +1,64 @@
+/*
+ * The flat scrollbar styling is shared with the Viewer window; see
+ * scrollbar.css (imported here so both windows stay identical).
+ */
+@import "scrollbar.css";
+
+/*
+ * Toolbar: black background to match the window, with light text and a
+ * visible slider so the controls don't disappear against the black bar.
+ *
+ * The colours are looked-up colours, defaulted here on the mosaic root, so a
+ * theme can retint the bar despite this sheet outranking the scene-level
+ * theme overlay (this is a Parent stylesheet on the mosaic root): a theme
+ * rule that redefines them on .tool-bar wins the lookup, because resolution
+ * starts at the styled node before walking up to .mosaic-root (see
+ * plain-dark-gray.css).
+ */
+.mosaic-root {
+    -mosaic-toolbar-background: black;
+    -mosaic-slider-track: #3c3c3c;
+    -mosaic-slider-thumb: gray;
+    -mosaic-slider-thumb-active: #c0c0c0;
+}
+
+.tool-bar {
+    -fx-background-color: -mosaic-toolbar-background;
+    -fx-background-insets: 0;
+}
+
+/* Make labels ("Tile", the count) readable on black. */
+.tool-bar .label {
+    -fx-text-fill: #c0c0c0;
+}
+
+/*
+ * Location bar (its own strip under the toolbar, Mosaic ▸ Show Location Bar):
+ * shares the toolbar's looked-up background so a theme that retints the
+ * toolbar retints this strip with it (see plain-dark-gray.css).
+ */
+.mosaic-location-bar {
+    -fx-background-color: -mosaic-toolbar-background;
+}
+
+.mosaic-location-bar .label {
+    -fx-text-fill: #c0c0c0;
+}
+
+/* Slider: dark-gray track with a lighter gray thumb so it reads on black. */
+.slider .track {
+    -fx-background-color: -mosaic-slider-track;
+    -fx-background-insets: 0;
+    -fx-background-radius: 0;
+}
+
+.slider .thumb {
+    -fx-background-color: -mosaic-slider-thumb;
+    -fx-background-insets: 0;
+    -fx-background-radius: 2;
+}
+
+.slider .thumb:hover,
+.slider .thumb:pressed {
+    -fx-background-color: -mosaic-slider-thumb-active;
+}

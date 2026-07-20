@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.ghosthack</groupId>
+  <artifactId>media-browser</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>Media Browser</name>
+  <description>Pure-Java desktop media browser: JavaFX UI with selectable decode backends.</description>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>26</maven.compiler.release>
+    <javafx.version>24.0.2</javafx.version>
+    <lwjgl.version>3.4.1</lwjgl.version>
+    <twelvemonkeys.version>3.13.1</twelvemonkeys.version>
+    <!-- JavaCV (bundled FFmpeg) for the JAVACV / TWELVEMONKEYS_JAVACV backends.
+         ffmpeg/javacpp versions are pinned to the JavaCV release. -->
+    <javacv.version>1.5.13</javacv.version>
+    <!-- FFmpeg preset version that ships with JavaCV 1.5.13. The preset
+         coordinate is <ffmpeg-version>-<javacv-version>; verify it exists on
+         Central before bumping (it does not always match the upstream FFmpeg
+         release string). -->
+    <ffmpeg.version>8.0.1-1.5.13</ffmpeg.version>
+    <javacpp.version>1.5.13</javacpp.version>
+    <!-- jcodec (pure Java: H.264/MPEG/ProRes) for the TWELVEMONKEYS_JCODEC
+         backend's video path. No native; jcodec-javase adds AWTUtil. -->
+    <jcodec.version>0.2.5</jcodec.version>
+    <!-- Default LWJGL + JavaCPP native classifiers; overridden per-OS by the
+         profiles below (activated by os.family/os.arch). We deliberately use a
+         single-platform JavaCPP classifier (mirroring the LWJGL natives) rather
+         than org.bytedeco:ffmpeg-platform, which bundles every OS/arch native
+         (hundreds of MB). -->
+    <lwjgl.natives>natives-macos-arm64</lwjgl.natives>
+    <javacpp.platform>macosx-arm64</javacpp.platform>
+    <junit.version>5.11.4</junit.version>
+    <app.mainClass>io.github.ghosthack.mediabrowser.App</app.mainClass>
+    <!-- Mosaic thumbnail/UI telemetry knobs, forwarded to the forked javafx:run
+         JVM via the plugin <options> below. Override on the command line, e.g.
+         mvn javafx:run -Dmosaic.telemetry=true. Defaults keep it off. -->
+    <mosaic.telemetry>false</mosaic.telemetry>
+    <mosaic.telemetry.intervalMs>5000</mosaic.telemetry.intervalMs>
+    <mosaic.telemetry.fxStallMs>50</mosaic.telemetry.fxStallMs>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.openjfx</groupId>
+      <artifactId>javafx-controls</artifactId>
+      <version>${javafx.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.lwjgl</groupId>
+      <artifactId>lwjgl</artifactId>
+      <version>${lwjgl.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.lwjgl</groupId>
+      <artifactId>lwjgl-opengl</artifactId>
+      <version>${lwjgl.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.lwjgl</groupId>
+      <artifactId>lwjgl-glfw</artifactId>
+      <version>${lwjgl.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.lwjgl</groupId>
+      <artifactId>lwjgl</artifactId>
+      <version>${lwjgl.version}</version>
+      <classifier>${lwjgl.natives}</classifier>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.lwjgl</groupId>
+      <artifactId>lwjgl-opengl</artifactId>
+      <version>${lwjgl.version}</version>
+      <classifier>${lwjgl.natives}</classifier>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.lwjgl</groupId>
+      <artifactId>lwjgl-glfw</artifactId>
+      <version>${lwjgl.version}</version>
+      <classifier>${lwjgl.natives}</classifier>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- TwelveMonkeys ImageIO SPI plugins (pure Java, no native). They register
+         with javax.imageio so the JDK ImageIO sees them on the classpath. Used
+         by the TWELVEMONKEYS* backends for stills + animated GIF. imageio-batik
+         (SVG) and imageio-pdf are deliberately excluded as heavy. -->
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-jpeg</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-webp</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-tiff</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-bmp</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-psd</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-pnm</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-tga</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-icns</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-pcx</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-sgi</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-iff</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-pict</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-hdr</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.twelvemonkeys.imageio</groupId>
+      <artifactId>imageio-thumbsdb</artifactId>
+      <version>${twelvemonkeys.version}</version>
+    </dependency>
+    <!-- JavaCV: FFmpegFrameGrabber pull-decode over bundled FFmpeg natives.
+         We pull only the ffmpeg preset (not javacv-platform / opencv / etc.);
+         the natives are single-platform via the ${javacpp.platform} classifier
+         (see the per-OS profiles). FFmpeg preset is LGPL/GPL depending on the
+         build — record for distribution. -->
+    <dependency>
+      <groupId>org.bytedeco</groupId>
+      <artifactId>javacv</artifactId>
+      <version>${javacv.version}</version>
+      <exclusions>
+        <!-- Strip every non-FFmpeg bytedeco preset javacv drags in (opencv,
+             openblas, leptonica, tesseract, etc.); we only use FFmpeg. -->
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>opencv</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>openblas</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>flycapture</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>libdc1394</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>libfreenect</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>libfreenect2</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>librealsense</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>librealsense2</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>videoinput</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>artoolkitplus</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>flandmark</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>leptonica</artifactId></exclusion>
+        <exclusion><groupId>org.bytedeco</groupId><artifactId>tesseract</artifactId></exclusion>
+      </exclusions>
+    </dependency>
+    <!-- FFmpeg preset Java API (transitively pulled by javacv, pinned here for
+         clarity) + single-platform native. -->
+    <dependency>
+      <groupId>org.bytedeco</groupId>
+      <artifactId>ffmpeg</artifactId>
+      <version>${ffmpeg.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.bytedeco</groupId>
+      <artifactId>ffmpeg</artifactId>
+      <version>${ffmpeg.version}</version>
+      <classifier>${javacpp.platform}</classifier>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- JavaCPP runtime loader native (single-platform). -->
+    <dependency>
+      <groupId>org.bytedeco</groupId>
+      <artifactId>javacpp</artifactId>
+      <version>${javacpp.version}</version>
+      <classifier>${javacpp.platform}</classifier>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- jcodec: pure-Java pull-decode (FrameGrab) for H.264/MPEG/ProRes in
+         MP4/MOV/MKV, used video-only behind TwelveMonkeys in the
+         TWELVEMONKEYS_JCODEC backend. jcodec-javase provides AWTUtil
+         (Picture → BufferedImage). No native libraries. -->
+    <dependency>
+      <groupId>org.jcodec</groupId>
+      <artifactId>jcodec</artifactId>
+      <version>${jcodec.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.jcodec</groupId>
+      <artifactId>jcodec-javase</artifactId>
+      <version>${jcodec.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <!-- Pick the LWJGL native classifier for the host OS/arch. Each profile is
+       auto-activated by Maven's OS detection; -Dlwjgl.natives=... still wins. -->
+  <profiles>
+    <profile>
+      <id>lwjgl-natives-windows</id>
+      <activation><os><family>windows</family></os></activation>
+      <properties>
+        <lwjgl.natives>natives-windows</lwjgl.natives>
+        <javacpp.platform>windows-x86_64</javacpp.platform>
+      </properties>
+    </profile>
+    <profile>
+      <id>lwjgl-natives-macos-arm64</id>
+      <activation><os><family>mac</family><arch>aarch64</arch></os></activation>
+      <properties>
+        <lwjgl.natives>natives-macos-arm64</lwjgl.natives>
+        <javacpp.platform>macosx-arm64</javacpp.platform>
+      </properties>
+    </profile>
+    <profile>
+      <id>lwjgl-natives-macos-x64</id>
+      <activation><os><family>mac</family><arch>x86_64</arch></os></activation>
+      <properties>
+        <lwjgl.natives>natives-macos</lwjgl.natives>
+        <javacpp.platform>macosx-x86_64</javacpp.platform>
+      </properties>
+    </profile>
+    <profile>
+      <id>lwjgl-natives-linux</id>
+      <activation><os><family>unix</family><name>linux</name></os></activation>
+      <properties>
+        <lwjgl.natives>natives-linux</lwjgl.natives>
+        <javacpp.platform>linux-x86_64</javacpp.platform>
+      </properties>
+    </profile>
+  </profiles>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.14.0</version>
+        <configuration>
+          <!-- Vendored pure-Java decoders (io.github.ghosthack.media.pure.*)
+               use the incubating Vector API in av1/hevc/jpeg/spng. -->
+          <compilerArgs>
+            <arg>--add-modules</arg>
+            <arg>jdk.incubator.vector</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+        <configuration>
+          <!-- Same runtime module the app needs: the pure decoders' DSP
+               kernels (AvcDsp & co.) use the incubating Vector API. -->
+          <argLine>--add-modules jdk.incubator.vector</argLine>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.openjfx</groupId>
+        <artifactId>javafx-maven-plugin</artifactId>
+        <version>0.0.8</version>
+        <configuration>
+          <mainClass>${app.mainClass}</mainClass>
+          <options>
+            <option>--enable-native-access=javafx.graphics,ALL-UNNAMED</option>
+            <!-- Vendored pure-Java decoders use the incubating Vector API -->
+            <option>--add-modules=jdk.incubator.vector</option>
+            <!-- LWJGL's memory utilities still use sun.misc.Unsafe -->
+            <option>--sun-misc-unsafe-memory-access=allow</option>
+            <!-- Glass window handles for MacWindowResizable (chromeless mode) -->
+            <option>--add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED</option>
+            <!-- Stage -> Glass peer for MacWindowFrame (native overscan maximize) -->
+            <option>--add-exports=javafx.graphics/com.sun.javafx.stage=ALL-UNNAMED</option>
+            <option>--add-exports=javafx.graphics/com.sun.javafx.tk.quantum=ALL-UNNAMED</option>
+            <!-- Mosaic telemetry: interpolated from the properties above; the
+                 forked JVM does not inherit Maven's -D properties otherwise. -->
+            <option>-Dmosaic.telemetry=${mosaic.telemetry}</option>
+            <option>-Dmosaic.telemetry.intervalMs=${mosaic.telemetry.intervalMs}</option>
+            <option>-Dmosaic.telemetry.fxStallMs=${mosaic.telemetry.fxStallMs}</option>
+          </options>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

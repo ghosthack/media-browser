@@ -1,0 +1,56 @@
+# RIFF family
+0	string	RIFF	RIFF (little-endian) data
+!:strength	+50
+>8	string	PAL\x20	\b, palette
+!:mime	application/x-riff
+!:ext	pal
+>8	string	RMID	\b, MIDI
+!:mime	audio/mid
+!:ext	rmi/rmid
+>8	string	RMMP	\b, multimedia movie
+!:mime	video/x-mmm
+!:ext	mmm
+>8	string	WAVE	\b, WAVE audio
+!:mime	audio/x-wav
+!:ext	wav/wave
+>>12	use	riff-walk
+>8	string	AVI\x20	\b, AVI
+!:mime	video/x-msvideo
+!:ext	avi/divx
+>8	string	WEBP	\b, Web/P image
+!:mime	image/webp
+!:ext	webp
+>>12	string	VP8\x20	\b, VP8 encoding
+>>12	string	VP8L	\b, lossless
+>>12	string	VP8X	\b, extended
+
+0	name	riff-walk
+>0	string	fmt\x20
+>>4	lelong	>15
+>>>8	use	riff-wave
+>0	string	LIST
+>>&(4.l+4)	use	riff-walk
+>0	string	DISP
+>>&(4.l+4)	use	riff-walk
+>0	string	bext
+>>&(4.l+4)	use	riff-walk
+>0	string	fact
+>>&(4.l+4)	use	riff-walk
+
+0	name	riff-wave
+>0	leshort	0x01	\b, Microsoft PCM
+>>2	leshort	1	\b, mono
+>>2	leshort	2	\b, stereo
+>0	leshort	0x55	\b, MPEG Layer 3
+>>2	leshort	1	\b, mono
+>>2	leshort	2	\b, stereo
+
+0	string	riff\x2E\x91\xCF\x11\xA5\xD6\x28\xDB\x04\xC1\x00\x00	Sony Wave64 RIFF data
+>24	string	wave\xF3\xAC\xD3\x11\x8C\xD1\x00\xC0\x4F\x8E\xDB\x8A	\b, WAVE 64 audio
+!:mime	audio/x-wav
+!:ext	w64
+
+0	string	RF64\xff\xff\xff\xffWAVEds64	MBWF/RF64 audio
+!:mime	audio/x-wav
+!:ext	rf64
+

@@ -1,0 +1,14 @@
+io.github.ghosthack.media.pure.facade.internal.entries.BmpDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.JpegDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.TiffDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.SpngDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.WebpDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.AvifDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.HeicDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.GifDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.JxlDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.RawDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.DngDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.IcnsDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.RadianceDecoderEntry
+io.github.ghosthack.media.pure.facade.internal.entries.ExrDecoderEntry
