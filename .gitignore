@@ -1,0 +1,39 @@
+# Maven build output
+target/
+
+# Downloaded tooling (jextract, etc.)
+tools/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IntelliJ IDEA
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Eclipse
+.classpath
+.project
+.settings/
+bin/
+
+# VS Code
+.vscode/
+
+# NetBeans
+nbproject/
+nbactions.xml
+
+# Logs
+*.log
+
+# Local Claude settings
+.claude/settings.local.json

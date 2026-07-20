@@ -1,0 +1,9 @@
+# Ordered curated Magdir fragments for MagicDetector.standard().
+# Source checkout: vendor/native-sources/file/magic/Magdir/
+# Files remain split by upstream fragment name, but each fragment still stays within the current parser subset.
+jpeg
+flif
+gimp
+images
+riff
+animation

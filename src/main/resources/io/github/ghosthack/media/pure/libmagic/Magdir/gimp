@@ -1,0 +1,6 @@
+0	string	gimp\x20xcf	GIMP XCF image data
+!:mime	image/x-xcf
+!:ext	xcf
+>9	string	file	\b, version 0
+>9	string	v	\b, version 1+
+

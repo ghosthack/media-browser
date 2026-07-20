@@ -1,0 +1,337 @@
+/* Plain Dark Gray — the Plain Dark theme with the whole background/border grey
+   ladder lifted from black (#000000 base) to dark gray (#333333 base). Every
+   step keeps the same relative contrast as plain-dark.css:
+   #000000→#333333, #0d0d0d→#404040, #1a1a1a→#4d4d4d, #2a2a2a→#5d5d5d,
+   #3a3a3a→#6d6d6d. Text colours are unchanged. */
+.root {
+    -fx-base: #333333;
+    -fx-background: #333333;
+    -fx-color: #333333;
+    -fx-control-inner-background: #333333;
+    -fx-control-inner-background-alt: #404040;
+    -fx-accent: #6d6d6d;
+    -fx-focus-color: #6d6d6d;
+    /* Idiomatic rgba() rather than #RRGGBBAA: Modena uses the faint focus
+       colour directly in -fx-background-color chains, so keep it a form every
+       JavaFX paint converter accepts. */
+    -fx-faint-focus-color: rgba(160, 160, 160, 0.12);
+    -fx-text-background-color: #bbbbbb;
+    -fx-text-inner-color: #bbbbbb;
+    -fx-text-fill: #bbbbbb;
+    -fx-mark-color: #bbbbbb;
+    -fx-mark-highlight-color: #bbbbbb;
+    /* Cell / selection looked-up colours. Modena builds these from
+       ladder()/derive() chains off -fx-accent; pinning them to flat values
+       means the cell and combo-box-popup rules that reference
+       -fx-selection-bar / -fx-cell-focus-inner-border always resolve to a
+       real Paint (avoids the "Could not resolve ..." / "String cannot be cast
+       to Paint" warnings Modena logs when a link in the chain is left
+       unresolved in a popup). */
+    -fx-selection-bar: #6d6d6d;
+    -fx-selection-bar-non-focused: #5d5d5d;
+    -fx-selection-bar-text: #ffffff;
+    -fx-cell-focus-inner-border: #6d6d6d;
+    -fx-cell-hover-color: #4d4d4d;
+    -fx-font-family: "System";
+    -fx-font-size: 12px;
+}
+
+.label {
+    -fx-text-fill: #bbbbbb;
+}
+
+#addressBarBox {
+    -fx-padding: 0 1 0 1;
+}
+
+.text-field {
+    -fx-text-fill: #bbbbbb;
+    -fx-background-color: #333333;
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+    -fx-highlight-fill: #6d6d6d;
+    -fx-highlight-text-fill: #bbbbbb;
+}
+
+.text-field:focused {
+    -fx-border-color: #6d6d6d;
+}
+
+/* .menu-button included alongside the buttons: MenuButton (the mosaic
+   toolbar's Filter, the viewer's loading menu, the metadata panel's Copy) is
+   not a .button, so without it Modena's gradient look sits next to the flat
+   buttons here. */
+.button, .toggle-button, .menu-button {
+    -fx-background-color: #333333;
+    -fx-text-fill: #bbbbbb;
+    -fx-border-color: #5d5d5d;
+}
+
+.button:hover, .toggle-button:hover, .menu-button:hover {
+    -fx-background-color: #6d6d6d;
+    -fx-text-fill: white;
+}
+
+.toggle-button:selected {
+    -fx-background-color: #4d4d4d;
+}
+
+.toggle-button:selected:hover {
+    -fx-background-color: #6d6d6d;
+    -fx-text-fill: white;
+}
+
+/* Open popup state, matching .toggle-button:selected. */
+.menu-button:showing {
+    -fx-background-color: #4d4d4d;
+}
+
+/* MenuButton renders its text through an inner .label node, so the generic
+   .label rule (#bbbbbb) outranks the -fx-text-fill inherited from the
+   hover/showing rules above; retint the label directly. */
+.menu-button:hover .label, .menu-button:showing .label {
+    -fx-text-fill: white;
+}
+
+.menu-bar {
+    -fx-background-color: #333333;
+}
+
+.menu-bar .label {
+    -fx-text-fill: #bbbbbb;
+}
+
+.menu {
+    -fx-background-color: #333333;
+}
+
+.menu:hover, .menu:focused, .menu:showing {
+    -fx-background-color: #4d4d4d;
+}
+
+.context-menu {
+    -fx-background-color: #333333;
+    -fx-border-color: #5d5d5d;
+}
+
+.menu-item {
+    -fx-background-color: transparent;
+}
+
+.menu-item:focused {
+    -fx-background-color: #6d6d6d;
+}
+
+.menu-item .label {
+    -fx-text-fill: #bbbbbb;
+}
+
+.menu-item:focused .label {
+    -fx-text-fill: white;
+}
+
+.tool-bar {
+    -fx-background-color: #333333;
+    -fx-border-color: #4d4d4d;
+    -fx-border-width: 0 0 1 0;
+}
+
+.separator .line {
+    -fx-border-color: #5d5d5d;
+}
+
+.split-pane {
+    -fx-background-color: #333333;
+}
+
+.split-pane-divider {
+    -fx-background-color: #4d4d4d;
+    -fx-padding: 0 1 0 1;
+}
+
+.tree-view {
+    -fx-background-color: #333333;
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+}
+
+.tree-view:focused {
+    -fx-border-color: #6d6d6d;
+}
+
+.tree-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: #bbbbbb;
+}
+
+.tree-cell:filled:selected:focused {
+    -fx-background-color: #6d6d6d;
+    -fx-text-fill: white;
+}
+
+.tree-cell:filled:selected:not(:focused) {
+    -fx-background-color: #5d5d5d;
+    -fx-text-fill: #dddddd;
+}
+
+.list-view {
+    -fx-background-color: #333333;
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+}
+
+.list-view:focused {
+    /* Match the panel background (.list-view above) rather than the usual focus
+       grey, so the file list shows no focus border. The 1px width is unchanged,
+       so the row content never shifts. */
+    -fx-border-color: #333333;
+}
+
+.list-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: #bbbbbb;
+}
+
+.list-cell:filled:selected:focused {
+    -fx-background-color: #6d6d6d;
+    -fx-text-fill: white;
+}
+
+.list-cell:filled:selected:not(:focused) {
+    -fx-background-color: #5d5d5d;
+    -fx-text-fill: #dddddd;
+}
+
+.list-cell:odd {
+    -fx-background-color: #404040;
+}
+
+.list-cell:odd:filled:selected:focused {
+    -fx-background-color: #6d6d6d;
+}
+
+.list-cell:odd:filled:selected:not(:focused) {
+    -fx-background-color: #5d5d5d;
+}
+
+/* ComboBox / ChoiceBox. Without these the only combo boxes in the app (the
+   Settings dialog) render with Modena's light look, and — more importantly —
+   their drop-down popup is styled entirely by Modena, whose cell rules build
+   -fx-background-color from -fx-selection-bar / -fx-cell-focus-inner-border
+   chains. Driving every popup colour from flat values below keeps those
+   fragile chains from being evaluated at all. */
+.combo-box-base,
+.choice-box {
+    -fx-background-color: #333333;
+    -fx-border-color: #5d5d5d;
+    -fx-border-width: 1;
+    -fx-mark-color: #bbbbbb;
+}
+
+.combo-box-base:hover,
+.choice-box:hover {
+    -fx-background-color: #4d4d4d;
+}
+
+.combo-box-base:focused,
+.choice-box:focused {
+    -fx-border-color: #6d6d6d;
+}
+
+.combo-box .list-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: #bbbbbb;
+    -fx-padding: 2 6 2 6;
+}
+
+.combo-box-popup > .list-view {
+    -fx-background-color: #5d5d5d, #333333;
+    -fx-background-insets: 0, 1;
+    -fx-effect: null;
+}
+
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell {
+    -fx-background-color: #333333;
+    -fx-text-fill: #bbbbbb;
+    -fx-padding: 4 8 4 8;
+}
+
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell:filled:hover,
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell:filled:selected,
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell:filled:selected:hover {
+    -fx-background-color: #6d6d6d;
+    -fx-text-fill: #ffffff;
+}
+
+.scroll-pane {
+    -fx-background-color: #333333;
+}
+
+.scroll-pane > .viewport {
+    -fx-background-color: #333333;
+}
+
+.scroll-bar {
+    -fx-background-color: transparent;
+    -fx-padding: 0 1 0 0;
+}
+
+.scroll-bar .thumb {
+    -fx-background-color: #8a8a8a;
+    -fx-background-radius: 4;
+}
+
+.scroll-bar .thumb:hover {
+    -fx-background-color: #a5a5a5;
+}
+
+.scroll-bar .track {
+    -fx-background-color: #404040;
+}
+
+.scroll-bar .increment-button,
+.scroll-bar .decrement-button {
+    -fx-background-color: #333333;
+}
+
+.scroll-bar .increment-arrow,
+.scroll-bar .decrement-arrow {
+    -fx-background-color: #aaaaaa;
+}
+
+#statusBar {
+    -fx-border-color: #333333;
+    -fx-border-width: 1 0 0 0;
+}
+
+.viewport {
+    -fx-background-color: #333333;
+}
+
+.status-bar {
+    -fx-padding: 4 8;
+    -fx-background-color: #444;
+}
+
+/* Mosaic toolbar. mosaic.css (a Parent stylesheet on the mosaic root, so it
+   outranks this scene-level overlay) paints its toolbar black to match the
+   black grid; on this theme's gray chrome that reads as a mismatched stripe.
+   Redefining its looked-up colours here on .tool-bar wins the lookup — colour
+   resolution starts at the styled node before walking up to the .mosaic-root
+   defaults. Values follow the theme ladder: bar = base #333333 (the border
+   stays the .tool-bar #4d4d4d above), track one step up at #4d4d4d, thumb
+   matching the scrollbar thumb #8a8a8a / #a5a5a5. Harmless no-ops on the
+   browser/viewer toolbars, where nothing references these colours. The
+   mosaic's location bar shares the background colour, so it is retinted
+   alongside the toolbar. */
+.tool-bar,
+.mosaic-location-bar {
+    -mosaic-toolbar-background: #333333;
+    -mosaic-slider-track: #4d4d4d;
+    -mosaic-slider-thumb: #8a8a8a;
+    -mosaic-slider-thumb-active: #a5a5a5;
+}
+
+.status-label {
+    -fx-text-fill: #ccc;
+}

@@ -1,0 +1,12 @@
+# Normalize all text files to LF in the repository and on checkout, on every
+# platform. This overrides a user's core.autocrlf=true (common on Windows), so
+# Git stops warning that "LF will be replaced by CRLF". Binary files are
+# auto-detected by text=auto and left untouched.
+* text=auto eol=lf
+
+# Be explicit for the file types in this repo.
+*.java   text eol=lf
+*.xml    text eol=lf
+*.md     text eol=lf
+*.sh     text eol=lf
+*.properties text eol=lf

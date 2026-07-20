@@ -1,0 +1,281 @@
+# QuickTime and BMFF families
+0	string	MOVI	Silicon Graphics movie file
+!:mime	video/x-sgi-movie
+!:ext	movie/movi
+
+4	string	moov	Apple QuickTime movie
+!:mime	video/quicktime
+!:ext	mov/qt
+>12	string	mvhd	\b movie (fast start)
+>12	string	mdra	\b URL
+>12	string	cmov	\b movie (fast start, compressed header)
+>12	string	rmra	\b multiple URLs
+
+4	string	mdat	Apple QuickTime movie (unoptimized)
+!:mime	video/quicktime
+!:ext	mov/qt
+
+4	string	wide	Apple QuickTime movie (unoptimized)
+!:mime	video/quicktime
+!:ext	mov/qt
+
+4	string	idsc	Apple QuickTime image (fast start)
+!:mime	image/x-quicktime
+!:ext	qtif/qti
+
+4	string	pckg	Apple QuickTime compressed archive
+!:mime	application/x-quicktime-player
+!:ext	qtl
+
+4	string	ftyp	ISO Media
+>8	string	qt\x20\x20	\b, Apple QuickTime (.MOV/QT)
+!:mime	video/quicktime
+!:ext	mov/qt
+>8	string	XAVC	\b, MPEG v4 system, Sony XAVC Codec
+!:mime	video/mp4
+!:ext	xavc/mp4
+>8	string	3g2	\b, MPEG v4 system, 3GPP2
+!:mime	video/3gpp2
+!:ext	3g2
+>8	string	3ge	\b, MPEG v4 system, 3GPP
+!:mime	video/3gpp
+!:ext	3gp
+>8	string	3gf	\b, MPEG v4 system, 3GPP file-delivery profile
+!:mime	video/3gpp
+!:ext	3gp
+>8	string	3gg	\b, MPEG v4 system, 3GPP General Profile
+!:mime	video/3gpp
+!:ext	3gp
+>8	string	3gh	\b, MPEG v4 system, 3GPP Adaptive Streaming Profile
+!:mime	video/3gpp
+!:ext	3gp
+>8	string	3gm	\b, MPEG v4 system, 3GPP Media Segment Profile
+!:mime	video/3gpp
+!:ext	3gp
+>8	string	3gp	\b, MPEG v4 system, 3GPP
+!:mime	video/3gpp
+!:ext	3gp
+>8	string	3gr	\b, MPEG v4 system, 3GPP Progressive Download Profile
+!:mime	video/3gpp
+!:ext	3gp
+>8	string	3gs	\b, MPEG v4 system, 3GPP Streaming Servers
+!:mime	video/3gpp
+!:ext	3gp
+>8	string	3gt	\b, MPEG v4 system, 3GPP Media Stream Recording Profile
+!:mime	video/3gpp
+!:ext	3gp
+>8	string	ARRI	\b, MPEG v4 system, ARRI Digital Camera
+!:mime	video/mp4
+!:ext	mp4
+>8	string	avc1	\b, MPEG v4 system, AVC video
+!:mime	video/mp4
+!:ext	mp4
+>8	string	bbxm	\b, Blinkbox Master File: H.264 video and LPCM audio
+!:mime	video/mp4
+!:ext	mp4
+>8	string	dash	\b, MPEG v4 system, Dynamic Adaptive Streaming over HTTP
+!:mime	video/mp4
+!:ext	mp4
+>8	string	dvr1	\b, DVB (.DVB) over RTP
+!:mime	video/vnd.dvb.file
+!:ext	dvb
+>8	string	emsg	\b, Event message box present
+!:mime	video/vnd.dvb.file
+!:ext	dvb
+>8	string	F4V\x20	\b, Video for Adobe Flash Player 9+ (.F4V)
+!:mime	video/mp4
+!:ext	f4v
+>8	string	F4P\x20	\b, Protected Video for Adobe Flash Player 9+ (.F4P)
+!:mime	video/mp4
+!:ext	f4p
+>8	string	F4A\x20	\b, Audio for Adobe Flash Player 9+ (.F4A)
+!:mime	audio/mp4
+!:ext	f4a
+>8	string	F4B\x20	\b, Audio Book for Adobe Flash Player 9+ (.F4B)
+!:mime	audio/mp4
+!:ext	f4b
+>8	string	iso\x20	\b, MP4 Base Media
+!:mime	video/mp4
+!:ext	mp4
+>8	string	isom	\b, MP4 Base Media
+!:mime	video/mp4
+!:ext	mp4
+>8	string	isml	\b, MP4 Base Media streaming manifest
+!:mime	video/mp4
+!:ext	ism/isml
+>8	string	J2P0	\b, JPEG 2000 Profile 0
+!:mime	image/jp2
+!:ext	jp2
+>8	string	J2P1	\b, JPEG 2000 Profile 1
+!:mime	image/jp2
+!:ext	jp2
+>8	string	JP2\x20	\b, JPEG 2000 Image (.JP2)
+!:mime	image/jp2
+!:ext	jp2
+>8	string	jpm\x20	\b, JPEG 2000 Compound Image (.JPM)
+!:mime	image/jpm
+!:ext	jpm
+>8	string	jpx\x20	\b, JPEG 2000 with extensions (.JPX)
+!:mime	image/jpx
+!:ext	jpx/jpf
+>8	string	KDDI	\b, 3GPP2 EZmovie for KDDI cellphones
+!:mime	video/3gpp2
+!:ext	3g2
+>8	string	M4A\x20	\b, Apple iTunes ALAC/AAC-LC (.M4A) Audio
+!:mime	audio/x-m4a
+!:ext	m4a
+>8	string	M4B\x20	\b, Apple iTunes ALAC/AAC-LC (.M4B) Audio Book
+!:mime	audio/mp4
+!:ext	m4b
+>8	string	M4P\x20	\b, Apple iTunes protected audio (.M4P)
+!:mime	video/mp4
+!:ext	m4p
+>8	string	M4V\x20	\b, Apple iTunes Video (.M4V)
+!:mime	video/x-m4v
+!:ext	m4v
+>8	string	M4VH	\b, Apple TV (.M4V)
+!:mime	video/x-m4v
+!:ext	m4v
+>8	string	M4VP	\b, Apple iPhone (.M4V)
+!:mime	video/x-m4v
+!:ext	m4v
+>8	string	mif1	\b, HEIF Image
+!:mime	image/heif
+!:ext	heif
+>8	string	msf1	\b, HEIF Image Sequence
+!:mime	image/heif-sequence
+!:ext	heif/heifs
+>8	string	heic	\b, HEIF Image (HEVC)
+!:mime	image/heic
+!:ext	heic
+>8	string	heix	\b, HEIF Image (HEVC Main 10)
+!:mime	image/heic
+!:ext	heic
+>8	string	hevc	\b, HEIF Image Sequence (HEVC)
+!:mime	image/heic-sequence
+!:ext	heic/heics
+>8	string	hevx	\b, HEIF Image Sequence (HEVC Main 10)
+!:mime	image/heic-sequence
+!:ext	heic/heics
+>8	string	heim	\b, HEIF Image (L-HEVC)
+!:mime	image/heif
+!:ext	heif
+>8	string	heis	\b, HEIF Image (L-HEVC)
+!:mime	image/heif
+!:ext	heif
+>8	string	avic	\b, HEIF Image (AVC)
+!:mime	image/heif
+!:ext	heif
+>8	string	hevm	\b, HEIF Image Sequence (L-HEVC)
+!:mime	image/heif-sequence
+!:ext	heif/heifs
+>8	string	hevs	\b, HEIF Image Sequence (L-HEVC)
+!:mime	image/heif-sequence
+!:ext	heif/heifs
+>8	string	avcs	\b, HEIF Image Sequence (AVC)
+!:mime	image/heif-sequence
+!:ext	heif/heifs
+>8	string	avif	\b, AVIF Image
+!:mime	image/avif
+!:ext	avif
+>8	string	avis	\b, AVIF Image Sequence
+!:mime	image/avif
+!:ext	avif
+>8	string	mj2s	\b, Motion JPEG 2000 simple profile
+!:mime	video/mj2
+!:ext	mj2/mjp2
+>8	string	mjp2	\b, Motion JPEG 2000 general profile
+!:mime	video/mj2
+!:ext	mj2/mjp2
+>8	string	MGSV	\b, Sony HMMP Motion JPEG 2000 profile
+!:mime	video/mj2
+!:ext	mj2/mjp2
+>8	string	mmp4	\b, MPEG-4 3GPP mobile profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	mobi	\b, MPEG-4 MOBI format
+!:mime	video/mp4
+!:ext	mp4
+>8	string	mp41	\b, MP4 v1
+!:mime	video/mp4
+!:ext	mp4
+>8	string	mp42	\b, MP4 v2
+!:mime	video/mp4
+!:ext	mp4
+>8	string	mqt\x20	\b, Sony and Mobile QuickTime (.MQV)
+!:mime	video/quicktime
+!:ext	mqv
+>8	string	MSNV	\b, MPEG-4 for Sony PSP
+!:mime	audio/mp4
+!:ext	mp4
+>8	string	NDAS	\b, Nero Digital AAC audio
+!:mime	audio/mp4
+!:ext	m4a/mp4
+>8	string	NDSC	\b, Nero Cinema Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	NDSH	\b, Nero HDTV Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	NDSM	\b, Nero Mobile Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	NDSP	\b, Nero Portable Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	NDSS	\b, Nero Standard Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	NDXC	\b, Nero AVC Cinema Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	NDXH	\b, Nero AVC HDTV Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	NDXM	\b, Nero AVC Mobile Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	NDXP	\b, Nero AVC Portable Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	NDXS	\b, Nero AVC Standard Profile
+!:mime	video/mp4
+!:ext	mp4
+>8	string	niko	\b, Nikon Digital Camera
+!:mime	video/mp4
+!:ext	mp4
+
+# EBML / WebM
+0	belong	0x1a45dfa3
+>4	search/4096	\x42\x82\x84webm	WebM
+!:mime	video/webm
+!:ext	webm
+
+# ASF with a video stream
+0	string	\x30\x26\xB2\x75\x8E\x66\xCF\x11\xA6\xD9\x00\xAA\x00\x62\xCE\x6C
+>16	search/4096	\xC0\xEF\x19\xBC\x4D\x5B\xCF\x11\xA8\xFD\x00\x80\x5F\x5C\x44\x2B	Windows Media Video
+!:mime	video/x-ms-wmv
+!:ext	wmv
+
+# Elementary video streams
+0	belong	0x00000001
+>4	byte&0x1F	0x07	JVT NAL sequence, H.264 video
+!:mime	video/h264
+!:ext	h264/264/avc
+
+0	belong&0xFFFFFF00	0x00000100
+>3	byte	0xBA	MPEG sequence
+!:mime	video/mpeg
+!:ext	vob/evo/mpg/mpeg
+>3	byte	0xBB	MPEG sequence, multiplex (missing pack header)
+!:mime	video/mpeg
+!:ext	mpg/mpeg
+>3	byte	0xB0	MPEG sequence, v4
+!:mime	video/mpeg4-generic
+!:ext	m4v/mp4v
+>3	byte	0xB5	MPEG sequence, v4
+!:mime	video/mpeg4-generic
+!:ext	m4v/mp4v
+>3	byte	0xB3	MPEG sequence
+!:mime	video/mpeg
+!:ext	mpg/mpeg

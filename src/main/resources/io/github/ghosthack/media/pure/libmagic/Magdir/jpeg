@@ -1,0 +1,74 @@
+# JPEG family and adjacent still-image formats
+0	belong	0xffd8fff7	JPEG-LS image data
+!:mime	image/jls
+!:ext	jls
+>0	use	jpeg-details
+
+0	belong&0xffffff00	0xffd8ff00	JPEG image data
+!:mime	image/jpeg
+!:ext	jpeg/jpg/jpe/jfif
+>0	use	jpeg-details
+
+0	name	jpeg-details
+>6	string	JFIF	\b, JFIF standard
+>>(4.S+4)	use	jpeg-segment
+>6	string	Exif	\b, Exif standard
+>>(4.S+4)	use	jpeg-segment
+>6	default	x
+>>(4.S+4)	use	jpeg-segment
+
+0	name	jpeg-segment
+>0	beshort	0xFFC0	\b, baseline
+>>(2.S+2)	use	jpeg-segment
+>0	beshort	0xFFC1	\b, extended sequential
+>>(2.S+2)	use	jpeg-segment
+>0	beshort	0xFFC2	\b, progressive
+>>(2.S+2)	use	jpeg-segment
+>0	beshort	0xFFFE	\b, comment segment
+>>(2.S+2)	use	jpeg-segment
+>0	beshort&0xFFE0	=0xFFE0
+>>(2.S+2)	use	jpeg-segment
+
+0	string	hsi1	JPEG image data, HSI proprietary
+!:mime	image/x-hsi
+!:ext	hsi/jpg
+
+0	string	\x00\x00\x00\x0C\x6A\x50\x20\x20\x0D\x0A\x87\x0A	JPEG 2000
+>20	string	\x6a\x70\x32\x20	\b, Part 1 (JP2)
+!:mime	image/jp2
+!:ext	jp2
+>20	string	\x6a\x70\x78\x20	\b, Part 2 (JPX)
+!:mime	image/jpx
+!:ext	jpf/jpx
+>20	string	\x6a\x70\x6d\x20	\b, Part 6 (JPM)
+!:mime	image/jpm
+!:ext	jpm
+>20	string	\x6d\x6a\x70\x32	\b, Part 3 (MJ2)
+!:mime	video/mj2
+!:ext	mj2/mjp2
+
+0	belong	0xff4fff51	JPEG 2000 codestream
+!:mime	image/x-jp2-codestream
+!:ext	jpc/j2c/j2k
+
+0	string	\x49\x49\xbc\x01	JPEG-XR Image
+!:mime	image/jxr
+!:ext	jxr/wdp/hdp
+>90	bequad	0x574D50484F544F00	\b, WMPHOTO signature
+>>98	byte&0x08	=0x08	\b, hard tiling
+>>99	byte&0x80	=0x80	\b, tiling present
+>>99	byte&0x40	=0x40	\b, codestream present
+>>99	byte&0x38	x	\b, spatial xform=
+>>99	byte&0x38	0x00	\bTL
+>>99	byte&0x38	0x08	\bBL
+>>99	byte&0x38	0x10	\bTR
+>>99	byte&0x38	0x18	\bBR
+
+0	string	\xff\x0a	JPEG XL codestream
+!:mime	image/jxl
+!:ext	jxl
+
+0	string	\x00\x00\x00\x0cJXL\x20\x0d\x0a\x87\x0a	JPEG XL container
+!:mime	image/jxl
+!:ext	jxl
+

@@ -1,0 +1,68 @@
+/*
+ * Flat scrollbar shared by the Mosaic and Viewer windows. Uses only three
+ * colors:
+ *   black     (#000000) — background / track
+ *   darkgray  (#3c3c3c) — thumb (visible against the black track)
+ *   gray      (#808080) — thumb hover / pressed
+ * No gradients, no rounding, no buttons — a deliberately flat look.
+ */
+
+.scroll-bar {
+    -fx-background-color: black;
+    -fx-background-insets: 0;
+    -fx-background-radius: 0;
+    -fx-padding: 0;
+}
+
+/*
+ * Give the bar an explicit breadth. Removing the increment/decrement buttons
+ * (below) otherwise collapses a vertical bar to zero width — invisible no
+ * matter what color the track is. The thumb/track fill this breadth.
+ */
+.scroll-bar:vertical {
+    -fx-pref-width: 12;
+    -fx-min-width: 12;
+}
+
+.scroll-bar:horizontal {
+    -fx-pref-height: 12;
+    -fx-min-height: 12;
+}
+
+.scroll-bar .track {
+    -fx-background-color: black;
+    -fx-background-insets: 0;
+    -fx-background-radius: 0;
+}
+
+.scroll-bar .track-background {
+    -fx-background-color: black;
+    -fx-background-insets: 0;
+    -fx-background-radius: 0;
+}
+
+.scroll-bar .thumb {
+    -fx-background-color: #3c3c3c;
+    -fx-background-insets: 0;
+    -fx-background-radius: 0;
+}
+
+.scroll-bar .thumb:hover,
+.scroll-bar .thumb:pressed {
+    -fx-background-color: gray;
+}
+
+/* Drop the increment/decrement arrow buttons entirely. */
+.scroll-bar .increment-button,
+.scroll-bar .decrement-button {
+    -fx-background-color: black;
+    -fx-background-insets: 0;
+    -fx-background-radius: 0;
+    -fx-padding: 0;
+}
+
+.scroll-bar .increment-arrow,
+.scroll-bar .decrement-arrow {
+    -fx-shape: " ";
+    -fx-padding: 0;
+}
