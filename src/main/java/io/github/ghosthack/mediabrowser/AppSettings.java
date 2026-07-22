@@ -244,7 +244,7 @@ public final class AppSettings {
                 props.getProperty(WINDOW_MODE_KEY), WindowMode.SINGLE);
         settings.startupLayout = StartupLayout.fromSettings(
                 props.getProperty(STARTUP_LAYOUT_KEY), legacyStartupLayout(props));
-        settings.mediaBackend = props.getProperty(BACKEND_KEY, "twelvemonkeys-javacv");
+        settings.mediaBackend = props.getProperty(BACKEND_KEY, "twelvemonkeys-ffmpeg-ffm");
         settings.detectionMode = props.getProperty(DETECTION_KEY, "extension");
         settings.theme = Theme.fromSettings(props.getProperty(THEME_KEY), Theme.PLAIN_DARK_GRAY);
         settings.thumbnailMaxEdge = parseBoundedInt(

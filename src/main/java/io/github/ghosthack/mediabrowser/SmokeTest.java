@@ -27,7 +27,7 @@ public final class SmokeTest {
 
     public static void main(String[] args) {
         var backend = MediaBackend.fromSettings(
-                System.getProperty("media.backend", "twelvemonkeys-javacv"));
+                System.getProperty("media.backend", "twelvemonkeys-ffmpeg-ffm"));
         try (MediaFacade facade = backend.create()) {
             System.out.println("backend: " + backend + " | native: " + facade.nativeVersions());
             for (String arg : args) {

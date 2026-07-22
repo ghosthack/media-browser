@@ -47,6 +47,17 @@ public enum MediaBackend {
     FFMPEG_WINDOWS("ffmpeg-windows", "Windows FFmpeg 8.x / libvips",
             ffmpegVips("ffm.bind.win.WindowsFfmpegBindings",
                     "ffm.bind.win.WindowsVipsBindings")),
+    // FFmpeg 8.x from the io.github.ghosthack:ffmpeg-ffm Maven artifact —
+    // natives ship in classifier jars and self-extract, no user-installed
+    // FFmpeg (docs/ffmpeg-bundled-backend.md). Stills still go through the
+    // platform's vips binding, picked by OS since the artifact covers FFmpeg only.
+    FFMPEG_BUNDLED("ffmpeg-bundled", "Bundled FFmpeg 8.x (Maven natives) / libvips",
+            ffmpegVips("ffm.bind.bundled.BundledFfmpegBindings", bundledVipsClass())),
+    // Bundled FFmpeg solo: stills AND video through the ffmpeg-ffm artifact —
+    // no libvips, nothing user-installed. Stills refine from FFmpeg's
+    // one-frame-video shape heuristically (see FfmpegFfmMediaFacade).
+    FFMPEG_FFM("ffmpeg-ffm", "Bundled FFmpeg (images + video)",
+            noArg("ffm.FfmpegFfmMediaFacade")),
     // 100% Apple: no FFmpeg/libvips fallback. Pass a fallback facade to
     // AppleMediaFacade instead if coverage for e.g. WebM/VP9 is wanted.
     APPLE("apple", "Apple (ImageIO / AVFoundation)",
@@ -67,6 +78,12 @@ public enum MediaBackend {
     TWELVEMONKEYS_JAVACV("twelvemonkeys-javacv", "TwelveMonkeys ImageIO + JavaCV video",
             videoFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade",
                     "javacv.JavaCvMediaFacade")),
+    // TwelveMonkeys stills/GIF + bundled FFmpeg (ffmpeg-ffm artifact) for
+    // video/audio — the JAVACV pairing with the FFM backend instead of
+    // bytedeco, and the natural default once ffmpeg-ffm is proven.
+    TWELVEMONKEYS_FFMPEG_FFM("twelvemonkeys-ffmpeg-ffm", "TwelveMonkeys ImageIO + bundled FFmpeg video",
+            videoFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade",
+                    "ffm.FfmpegFfmMediaFacade")),
     // TwelveMonkeys stills/GIF + jcodec (pure-Java H.264/MPEG/ProRes)
     // for video. jcodec declines other codecs (classify → empty), which
     // the 12M wrapper surfaces as unsupported.
@@ -119,6 +136,16 @@ public enum MediaBackend {
         String fallback = PKG + fallbackClass;
         return new Spec(List.of(facade, fallback),
                 () -> (MediaFacade) newInstance(facade, newInstance(fallback)));
+    }
+
+    /**
+     * The vips binding {@link #FFMPEG_BUNDLED} pairs with, by OS: Homebrew
+     * paths on macOS, DLL-name-off-PATH elsewhere (the least path-specific
+     * choice for Windows and anything else).
+     */
+    private static String bundledVipsClass() {
+        boolean mac = System.getProperty("os.name", "").toLowerCase().contains("mac");
+        return mac ? "ffm.bind.brew.BrewVipsBindings" : "ffm.bind.win.WindowsVipsBindings";
     }
 
     /** {@code FfmpegVipsMediaFacade} over a no-arg-constructed bindings pair. */
@@ -183,10 +210,22 @@ public enum MediaBackend {
     }
 
     /**
+     * The default backend: {@link #TWELVEMONKEYS_FFMPEG_FFM} — TwelveMonkeys
+     * stills plus the bundled-FFmpeg (ffmpeg-ffm artifact) video path, which
+     * behaves identically on macOS/Windows with nothing installed. In trees
+     * that omit {@code media/ffm} (the public source distribution, today) it
+     * degrades to {@link #TWELVEMONKEYS_JAVACV}, the same pairing over
+     * bytedeco's FFmpeg.
+     */
+    public static MediaBackend defaultBackend() {
+        return TWELVEMONKEYS_FFMPEG_FFM.isAvailable()
+                ? TWELVEMONKEYS_FFMPEG_FFM : TWELVEMONKEYS_JAVACV;
+    }
+
+    /**
      * Parses the persisted setting value; matches by {@code settingsValue}.
      * Unknown values — and backends whose classes are absent from this build —
-     * resolve to {@link #TWELVEMONKEYS_JAVACV}, the one backend that behaves
-     * identically on macOS/Windows/Linux with nothing installed.
+     * resolve to {@link #defaultBackend()}.
      */
     public static MediaBackend fromSettings(String value) {
         if (value != null) {
@@ -198,7 +237,7 @@ public enum MediaBackend {
                 }
             }
         }
-        return TWELVEMONKEYS_JAVACV;
+        return defaultBackend();
     }
 
     /** Builds the facade for this backend (loads native libraries). */

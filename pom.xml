@@ -37,6 +37,12 @@
          (hundreds of MB). -->
     <lwjgl.natives>natives-macos-arm64</lwjgl.natives>
     <javacpp.platform>macosx-arm64</javacpp.platform>
+    <!-- Bundled-FFmpeg backend (FFMPEG_BUNDLED): FFM stubs + self-extracting
+         from-source LGPL natives, built in ../ffmpeg-ffm and installed to the
+         local repository (not yet on Central). Classifier jars exist for
+         macos-arm64 and windows-x64 only. -->
+    <ffmpegffm.version>8.1.2-0.1.0</ffmpegffm.version>
+    <ffmpegffm.natives>macos-arm64</ffmpegffm.natives>
     <junit.version>5.11.4</junit.version>
     <app.mainClass>io.github.ghosthack.mediabrowser.App</app.mainClass>
     <!-- Mosaic thumbnail/UI telemetry knobs, forwarded to the forked javafx:run
@@ -212,6 +218,19 @@
       <classifier>${javacpp.platform}</classifier>
       <scope>runtime</scope>
     </dependency>
+    <!-- Bundled-FFmpeg backend: see the ffmpegffm.* properties above. -->
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>ffmpeg-ffm</artifactId>
+      <version>${ffmpegffm.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>ffmpeg-ffm-natives</artifactId>
+      <version>${ffmpegffm.version}</version>
+      <classifier>${ffmpegffm.natives}</classifier>
+      <scope>runtime</scope>
+    </dependency>
     <!-- jcodec: pure-Java pull-decode (FrameGrab) for H.264/MPEG/ProRes in
          MP4/MOV/MKV, used video-only behind TwelveMonkeys in the
          TWELVEMONKEYS_JCODEC backend. jcodec-javase provides AWTUtil
@@ -243,6 +262,7 @@
       <properties>
         <lwjgl.natives>natives-windows</lwjgl.natives>
         <javacpp.platform>windows-x86_64</javacpp.platform>
+        <ffmpegffm.natives>windows-x64</ffmpegffm.natives>
       </properties>
     </profile>
     <profile>
