@@ -30,9 +30,9 @@ import java.util.List;
  * {@link #fromSettings(String)}.</p>
  */
 public enum MediaBackend {
-    // Bundled FFmpeg solo: stills AND video through the ffmpeg-ffm artifact —
-    // no libvips, nothing user-installed. Stills refine from FFmpeg's
-    // one-frame-video shape heuristically (see FfmpegFfmMediaFacade).
+    // Bundled FFmpeg solo (the default): stills AND video through the
+    // ffmpeg-ffm artifact — nothing user-installed. Stills refine from
+    // FFmpeg's one-frame-video shape heuristically (see FfmpegFfmMediaFacade).
     FFMPEG_FFM("ffmpeg-ffm", "Bundled FFmpeg (images + video)",
             noArg("ffm.FfmpegFfmMediaFacade")),
     // 100% Apple: no FFmpeg/libvips fallback. Pass a fallback facade to
@@ -57,7 +57,9 @@ public enum MediaBackend {
                     "javacv.JavaCvMediaFacade")),
     // TwelveMonkeys stills/GIF + bundled FFmpeg (ffmpeg-ffm artifact) for
     // video/audio — the JAVACV pairing with the FFM backend instead of
-    // bytedeco, and the natural default once ffmpeg-ffm is proven.
+    // bytedeco. Was the default 2026-07-21..22; FFMPEG_FFM's faster JPEG
+    // decode won (docs/ffm-retirement-handoff.md), but this pairing keeps
+    // the wider ImageIO still-format coverage (PSD/ICO/CMYK exotics).
     TWELVEMONKEYS_FFMPEG_FFM("twelvemonkeys-ffmpeg-ffm", "TwelveMonkeys ImageIO + bundled FFmpeg video",
             videoFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade",
                     "ffm.FfmpegFfmMediaFacade")),
@@ -167,15 +169,17 @@ public enum MediaBackend {
     }
 
     /**
-     * The default backend: {@link #TWELVEMONKEYS_FFMPEG_FFM} — TwelveMonkeys
-     * stills plus the bundled-FFmpeg (ffmpeg-ffm artifact) video path, which
-     * behaves identically on macOS/Windows with nothing installed. In trees
-     * that omit {@code media/ffm} it degrades to
-     * {@link #TWELVEMONKEYS_JAVACV}, the same pairing over bytedeco's FFmpeg.
+     * The default backend: {@link #FFMPEG_FFM} — stills and video both through
+     * the bundled-FFmpeg (ffmpeg-ffm artifact) path, which behaves identically
+     * on macOS/Windows with nothing installed and decodes JPEG markedly faster
+     * than the ImageIO stills of the previous {@code TWELVEMONKEYS_FFMPEG_FFM}
+     * default (benchmark in docs/ffm-retirement-handoff.md; formats FFmpeg
+     * doesn't claim, e.g. PSD/ICO, need an explicit TwelveMonkeys-paired
+     * backend). In trees that omit {@code media/ffm} it degrades to
+     * {@link #TWELVEMONKEYS_JAVACV}, bundled-FFmpeg video over bytedeco.
      */
     public static MediaBackend defaultBackend() {
-        return TWELVEMONKEYS_FFMPEG_FFM.isAvailable()
-                ? TWELVEMONKEYS_FFMPEG_FFM : TWELVEMONKEYS_JAVACV;
+        return FFMPEG_FFM.isAvailable() ? FFMPEG_FFM : TWELVEMONKEYS_JAVACV;
     }
 
     /**

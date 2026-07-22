@@ -244,7 +244,7 @@ public final class AppSettings {
                 props.getProperty(WINDOW_MODE_KEY), WindowMode.SINGLE);
         settings.startupLayout = StartupLayout.fromSettings(
                 props.getProperty(STARTUP_LAYOUT_KEY), legacyStartupLayout(props));
-        settings.mediaBackend = props.getProperty(BACKEND_KEY, "twelvemonkeys-ffmpeg-ffm");
+        settings.mediaBackend = props.getProperty(BACKEND_KEY, "ffmpeg-ffm");
         settings.detectionMode = props.getProperty(DETECTION_KEY, "extension");
         settings.theme = Theme.fromSettings(props.getProperty(THEME_KEY), Theme.PLAIN_DARK_GRAY);
         settings.thumbnailMaxEdge = parseBoundedInt(
@@ -629,7 +629,7 @@ public final class AppSettings {
         this.startupLayout = startupLayout == null ? StartupLayout.MOSAIC_VIEWER : startupLayout;
     }
 
-    /** Native decode backend, e.g. {@code "twelvemonkeys-ffmpeg-ffm"} (default), {@code "ffmpeg-ffm"}, {@code "apple"}. */
+    /** Native decode backend, e.g. {@code "ffmpeg-ffm"} (default), {@code "twelvemonkeys-ffmpeg-ffm"}, {@code "apple"}. */
     public String mediaBackend() {
         return mediaBackend;
     }
