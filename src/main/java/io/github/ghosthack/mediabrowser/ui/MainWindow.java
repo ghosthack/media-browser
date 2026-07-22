@@ -1906,9 +1906,30 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var startupLayoutRow = new HBox(8,
                 new Label("Startup window layout:"), startupLayoutCombo);
         startupLayoutRow.setAlignment(Pos.CENTER_LEFT);
+        // Loading indicator: shared by the viewer viewport and the mosaic grid,
+        // hence a General setting rather than a per-window one.
+        var loadingIndicatorCombo = new ComboBox<LoadingIndicator>();
+        loadingIndicatorCombo.getItems().setAll(LoadingIndicator.values());
+        loadingIndicatorCombo.setValue(settings.viewerLoadingIndicator());
+        var loadingIndicatorRow = new HBox(8,
+                new Label("Loading indicator (viewer & mosaic):"), loadingIndicatorCombo);
+        loadingIndicatorRow.setAlignment(Pos.CENTER_LEFT);
+        // Grace period before the indicator appears: a decode landing within it
+        // never flashes one up. Pointless when the indicator is None, so disable
+        // the spinner there (mirrors the mosaic animation cycle-duration spinner).
+        var loadingDelaySpinner = new Spinner<Integer>(0, 5000,
+                settings.viewerLoadingIndicatorDelayMs(), 50);
+        loadingDelaySpinner.setEditable(true);
+        loadingDelaySpinner.setPrefWidth(100);
+        loadingDelaySpinner.disableProperty().bind(
+                loadingIndicatorCombo.valueProperty().isEqualTo(LoadingIndicator.NONE));
+        var loadingDelayRow = new HBox(8,
+                new Label("Show after (ms, 0 = at once):"), loadingDelaySpinner);
+        loadingDelayRow.setAlignment(Pos.CENTER_LEFT);
         var hint = new Label("Applies after restarting the application.");
         hint.setStyle("-fx-text-fill: gray;");
         var generalContent = new VBox(8, themeRow, backendRow, actionLogFileBox,
+                new Separator(), loadingIndicatorRow, loadingDelayRow,
                 new Separator(),
                 chromeBox, resizeBox, overscanBox, inWindowMenuBox, windowModeRow,
                 startupLayoutRow, hint);
@@ -1942,30 +1963,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         viewerStatusBox.setSelected(settings.viewerStatusBarVisible());
         var viewerDragBox = new CheckBox("Drag the viewer window from its viewport (the image area)");
         viewerDragBox.setSelected(settings.viewerDragViewport());
-        var loadingIndicatorCombo = new ComboBox<LoadingIndicator>();
-        loadingIndicatorCombo.getItems().setAll(LoadingIndicator.values());
-        loadingIndicatorCombo.setValue(settings.viewerLoadingIndicator());
-        var loadingIndicatorRow = new HBox(8,
-                new Label("Loading indicator:"), loadingIndicatorCombo);
-        loadingIndicatorRow.setAlignment(Pos.CENTER_LEFT);
-        // Grace period before the indicator appears: a decode landing within it
-        // never flashes one up. Pointless when the indicator is None, so disable
-        // the spinner there (mirrors the mosaic animation cycle-duration spinner).
-        var loadingDelaySpinner = new Spinner<Integer>(0, 5000,
-                settings.viewerLoadingIndicatorDelayMs(), 50);
-        loadingDelaySpinner.setEditable(true);
-        loadingDelaySpinner.setPrefWidth(100);
-        loadingDelaySpinner.disableProperty().bind(
-                loadingIndicatorCombo.valueProperty().isEqualTo(LoadingIndicator.NONE));
-        var loadingDelayRow = new HBox(8,
-                new Label("Show after (ms, 0 = at once):"), loadingDelaySpinner);
-        loadingDelayRow.setAlignment(Pos.CENTER_LEFT);
         var viewerHint = new Label("Startup defaults for the viewer window; "
                 + "also applied immediately.");
         viewerHint.setStyle("-fx-text-fill: gray;");
         var viewerContent = new VBox(8, viewerMenuBox, viewerToolbarBox,
-                viewerStatusBox, new Separator(), loadingIndicatorRow, loadingDelayRow,
-                new Separator(), viewerDragBox, viewerHint);
+                viewerStatusBox, new Separator(), viewerDragBox, viewerHint);
         viewerContent.setPadding(new Insets(12));
 
         // --- Mosaic tab: chrome visibility + grid layout/appearance -----------
@@ -2012,6 +2014,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var folderGridRow = new HBox(8,
                 new Label("Folder preview grid (N\u00d7N, 0 = folder glyph):"), folderGridSpinner);
         folderGridRow.setAlignment(Pos.CENTER_LEFT);
+        var folderGlyphCombo = new ComboBox<MosaicFolderGlyph>();
+        folderGlyphCombo.getItems().setAll(MosaicFolderGlyph.values());
+        folderGlyphCombo.setValue(settings.mosaicFolderGlyph());
+        var folderGlyphRow = new HBox(8, new Label("Folder glyph:"), folderGlyphCombo);
+        folderGlyphRow.setAlignment(Pos.CENTER_LEFT);
         var thumbnailsBox = new CheckBox("Show thumbnails in the mosaic");
         thumbnailsBox.setSelected(settings.mosaicThumbnailsVisible());
         var fillBox = new CheckBox("Crop tiles to fill (squares, no letterbox)");
@@ -2064,7 +2071,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var mosaicContent = new VBox(8, mosaicMenuBox, mosaicToolbarBox, mosaicStatusBox,
                 mosaicLocationBox, mosaicActionLogBox,
                 new Separator(), layoutTitle, tileSizeRow, marginRow, borderWidthRow,
-                borderColorRow, folderGridRow, thumbnailsBox, fillBox, seamlessBox,
+                borderColorRow, folderGridRow, folderGlyphRow, thumbnailsBox, fillBox,
+                seamlessBox,
                 new Separator(), renditionTitle, maxEdgeRow, budgetRow,
                 new Separator(), behaviourTitle, autoOpenBox, mosaicDragBox,
                 animationRow, animationPeriodRow, mosaicHint);
@@ -2131,6 +2139,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setWindowMode(windowModeCombo.getValue());
         settings.setStartupLayout(startupLayoutCombo.getValue());
         settings.setActionLogFileEnabled(actionLogFileBox.isSelected());
+        // Loading indicator: push live into the viewer; its property listener
+        // persists the choice (the same value the menu/toolbar picker edits) and
+        // the mosaic reads it from settings on each load. The delay gate has no
+        // live property — both windows read it from settings — so just store it.
+        viewer.loadingIndicatorProperty().set(loadingIndicatorCombo.getValue());
+        settings.setViewerLoadingIndicatorDelayMs(loadingDelaySpinner.getValue());
 
         // --- Browser: persist + drive the shared props this window binds to ----
         settings.setBrowserMenuBarVisible(browserMenuBox.isSelected());
@@ -2153,12 +2167,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         viewer.menuBarVisibleProperty().set(viewerMenuBox.isSelected());
         viewer.toolbarVisibleProperty().set(viewerToolbarBox.isSelected());
         viewer.statusBarVisibleProperty().set(viewerStatusBox.isSelected());
-        // Loading indicator: push live into the viewer; its property listener
-        // persists the choice (the same value the menu/toolbar picker edits). The
-        // delay gate has no live viewer property — the viewer reads it from
-        // settings on each load — so just store it; the dialog save persists it.
-        viewer.loadingIndicatorProperty().set(loadingIndicatorCombo.getValue());
-        settings.setViewerLoadingIndicatorDelayMs(loadingDelaySpinner.getValue());
 
         // --- Mosaic: persist, push chrome live, then apply layout/appearance ---
         settings.setMosaicMenuBarVisible(mosaicMenuBox.isSelected());
@@ -2189,8 +2197,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setMosaicPulsePeriodMs(animationPeriodSpinner.getValue());
         // Push the layout / appearance / selection changes live into the open
         // mosaic, and sync the Mosaic menu's folder-preview radios to the value.
+        // The folder glyph goes through the mosaic's property: its listener
+        // persists the choice, and the menu radios are bound to the same property.
         mosaic.applyLayoutSettings();
         folderPreviewGridProp.set(folderGridSpinner.getValue());
+        mosaic.folderGlyphProperty().set(folderGlyphCombo.getValue());
 
         // --- Keys: applied to the menu bar on the next start -------------------
         settings.setKeysModifier1(mod1Combo.getValue().token());
