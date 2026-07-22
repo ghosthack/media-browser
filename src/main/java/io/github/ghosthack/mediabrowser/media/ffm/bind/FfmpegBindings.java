@@ -15,8 +15,8 @@ import java.nio.file.Path;
  *
  * <p>This is what lets a single copy of the decode logic run against more than
  * one FFmpeg major version: the version-specific bits — the dylib load path,
- * struct offsets, and API drift such as {@code channels} (4.x) vs
- * {@code ch_layout.nb_channels} (5.x+) — live entirely in an implementation.</p>
+ * struct offsets, and API drift between FFmpeg majors (e.g. where the channel
+ * count lives) — live entirely in an implementation.</p>
  *
  * <p>Pointers are passed through as opaque {@link MemorySegment}s. Where a
  * struct field is itself a struct (e.g. {@code AVRational}) it is lifted to a
@@ -93,10 +93,10 @@ public interface FfmpegBindings {
      * The video stream's container/display rotation as clockwise quarter-turns
      * (0..3) to apply for an upright frame, read from its display-matrix coded
      * side data ({@code AV_PKT_DATA_DISPLAYMATRIX}). {@code 0} when the stream
-     * carries no rotation. Where that side data lives is the version delta the
-     * seam exists for ({@code AVStream.side_data} in 4.x,
-     * {@code AVCodecParameters.coded_side_data} in 7.x+); the matrix→turns math
-     * is shared in {@link Ffm#rotationQuarterTurnsFromSideData}.
+     * carries no rotation. Where that side data lives has moved across FFmpeg
+     * majors ({@code AVCodecParameters.coded_side_data} in 7.x+), which is why
+     * the read sits behind this seam; the matrix→turns math is shared in
+     * {@link Ffm#rotationQuarterTurnsFromSideData}.
      */
     int videoRotationQuarterTurnsCw(MemorySegment stream);
 
@@ -113,8 +113,8 @@ public interface FfmpegBindings {
     int parSampleRate(MemorySegment codecpar);
 
     /**
-     * Channel count. The whole point of the seam: 4.x reads
-     * {@code AVCodecParameters.channels}; 5.x+ reads {@code ch_layout.nb_channels}.
+     * Channel count — {@code ch_layout.nb_channels} in FFmpeg 5.x+ (the flat
+     * {@code channels} field this seam once bridged is gone from the API).
      */
     int parChannels(MemorySegment codecpar);
 

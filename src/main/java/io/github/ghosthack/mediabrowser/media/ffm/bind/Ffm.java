@@ -5,9 +5,6 @@ import io.github.ghosthack.mediabrowser.media.VideoRotation;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.nio.file.Path;
-import java.util.Locale;
-import java.util.Set;
 
 /**
  * Version-agnostic FFM helpers shared by every native binding implementation.
@@ -46,51 +43,6 @@ public final class Ffm {
      */
     public static MemorySegment allocateSwscaleBgraDst(Arena arena, int width, int height) {
         return arena.allocate((long) width * height * 4 + SWS_DST_TAIL_PADDING);
-    }
-
-    /**
-     * HEIF/AVIF-family filename extensions (lower-case, no dot) whose libvips
-     * loader is {@code heifload} — the one loader that wraps libheif and so
-     * enforces libheif's denial-of-service limits. Mirrors the still half of
-     * {@code ImageSequences}' image-sequence set.
-     */
-    private static final Set<String> HEIF_FAMILY_EXTENSIONS = Set.of(
-            "heic", "heif", "heics", "heifs", "hif",
-            "avif", "avifs", "avis");
-
-    /**
-     * The libvips "filename argument" for {@code file}: the path, plus any load
-     * options appended in the trailing {@code [key=value,...]} block that
-     * {@code vips_image_new_from_file} and {@code vips_thumbnail} parse off the
-     * end of the name.
-     *
-     * <p>For HEIF/AVIF-family containers this appends {@code [unlimited]} so
-     * libvips removes the libheif denial-of-service limits before decoding.
-     * Without it a perfectly valid photo can fail to open — libheif caps how
-     * many {@code meta}-box items it will parse, and an iPhone HEIC routinely
-     * carries more (e.g. {@code ipma box wants to define properties for 50
-     * items, but the security limit has been set to 16 items}). libvips exposes
-     * no per-limit knob on the loader, only this blanket {@code unlimited}
-     * flag, so that is the lever we pull — and only for the heif loader, so an
-     * ordinary JPEG/PNG keeps its decompression-bomb guards.</p>
-     */
-    public static String vipsLoadArg(Path file) {
-        String name = file.toString();
-        return isHeifFamily(file) ? name + "[unlimited]" : name;
-    }
-
-    private static boolean isHeifFamily(Path file) {
-        Path namePath = file.getFileName();
-        if (namePath == null) {
-            return false;
-        }
-        String fileName = namePath.toString();
-        int dot = fileName.lastIndexOf('.');
-        if (dot < 0 || dot == fileName.length() - 1) {
-            return false;
-        }
-        String ext = fileName.substring(dot + 1).toLowerCase(Locale.ROOT);
-        return HEIF_FAMILY_EXTENSIONS.contains(ext);
     }
 
     /** Allocates a one-slot pointer holder initialized to {@code target}. */
