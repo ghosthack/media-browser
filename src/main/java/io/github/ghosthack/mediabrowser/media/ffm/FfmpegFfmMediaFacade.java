@@ -4,6 +4,7 @@ import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
 import io.github.ghosthack.mediabrowser.media.Metadata;
+import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.Thumbnail;
 import io.github.ghosthack.mediabrowser.media.ThumbnailMode;
 import io.github.ghosthack.mediabrowser.media.VideoStream;
@@ -95,13 +96,30 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     public VisualResult loadVisual(Path file) {
         VisualResult result = av.firstFrameWithProbe(file, fileSize(file));
         MediaProbe refined = refineKind(result.probe(), file);
-        return refined == result.probe() ? result
+        VisualResult out = refined == result.probe() ? result
                 : new VisualResult(refined, result.frame());
+        return bakeJpegExif(file, out);
     }
 
     @Override
     public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
+        boolean jpeg = isJpeg(file);
+        if (jpeg) {
+            // libjpeg-turbo shrink-on-load fast path; declines (empty) fall
+            // through to the ordinary FFmpeg decode below.
+            var fast = TurboJpegStills.thumbnail(file, maxEdge, mode);
+            if (fast.isPresent()) {
+                return new Thumbnail(fast, MediaKind.IMAGE);
+            }
+        }
         Thumbnail thumb = av.thumbnail(file, maxEdge, mode);
+        if (jpeg && thumb.frame().isPresent()) {
+            int orientation = TurboJpegStills.exifOrientation(file);
+            if (orientation != 1) {
+                thumb = new Thumbnail(thumb.frame()
+                        .map(f -> RasterFrames.applyExifOrientation(f, orientation)), thumb.kind());
+            }
+        }
         if (thumb.kind() == MediaKind.VIDEO && STILL_EXTENSIONS.contains(extension(file))) {
             // The kind labels the result (e.g. the mosaic's video badge), so
             // refine still-extension files with one cheap header probe — an
@@ -155,6 +173,29 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                 probe.fileSize(), -1, probe.bitRate(),
                 probe.width(), probe.height(),
                 probe.videoCodec(), -1, null, -1, -1, probe.pixelDescription());
+    }
+
+    /**
+     * FFmpeg's mjpeg path surfaces no EXIF display matrix at probe time (the
+     * stream-side-data rotation seam only sees container matrices), so JPEG
+     * EXIF orientation is baked here — matching the vips/Apple/TwelveMonkeys
+     * facades' convention of handing the UI upright frames.
+     */
+    private static VisualResult bakeJpegExif(Path file, VisualResult result) {
+        if (!isJpeg(file) || result.frame().isEmpty()) {
+            return result;
+        }
+        int orientation = TurboJpegStills.exifOrientation(file);
+        if (orientation == 1) {
+            return result;
+        }
+        return new VisualResult(result.probe(),
+                result.frame().map(f -> RasterFrames.applyExifOrientation(f, orientation)));
+    }
+
+    private static boolean isJpeg(Path file) {
+        String ext = extension(file);
+        return "jpg".equals(ext) || "jpeg".equals(ext);
     }
 
     private static String extension(Path file) {

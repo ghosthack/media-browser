@@ -37,12 +37,17 @@
          (hundreds of MB). -->
     <lwjgl.natives>natives-macos-arm64</lwjgl.natives>
     <javacpp.platform>macosx-arm64</javacpp.platform>
-    <!-- Bundled-FFmpeg backend (FFMPEG_BUNDLED): FFM stubs + self-extracting
-         from-source LGPL natives, built in ../ffmpeg-ffm and installed to the
-         local repository (not yet on Central). Classifier jars exist for
-         macos-arm64 and windows-x64 only. -->
+    <!-- Bundled-FFmpeg backend (FFMPEG_FFM): FFM stubs + self-extracting
+         from-source LGPL natives, built in ../ffmpeg-ffm, on Maven Central.
+         Classifier jars exist for macos-arm64 and windows-x64 only. -->
     <ffmpegffm.version>8.1.2-0.1.0</ffmpegffm.version>
     <ffmpegffm.natives>macos-arm64</ffmpegffm.natives>
+    <!-- libjpeg-turbo JPEG-thumbnail fast path (TurboJpegStills): FFM stubs +
+         self-extracting natives, built in ../turbojpeg-ffm. Same platform
+         coverage as ffmpeg-ffm; absent natives disable the fast path at
+         runtime, they never break a build. -->
+    <turbojpegffm.version>3.2.0-0.1.0</turbojpegffm.version>
+    <turbojpegffm.natives>macos-arm64</turbojpegffm.natives>
     <junit.version>5.11.4</junit.version>
     <app.mainClass>io.github.ghosthack.mediabrowser.App</app.mainClass>
     <!-- Mosaic thumbnail/UI telemetry knobs, forwarded to the forked javafx:run
@@ -231,6 +236,19 @@
       <classifier>${ffmpegffm.natives}</classifier>
       <scope>runtime</scope>
     </dependency>
+    <!-- TurboJPEG fast path: see the turbojpegffm.* properties above. -->
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>turbojpeg-ffm</artifactId>
+      <version>${turbojpegffm.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>turbojpeg-ffm-natives</artifactId>
+      <version>${turbojpegffm.version}</version>
+      <classifier>${turbojpegffm.natives}</classifier>
+      <scope>runtime</scope>
+    </dependency>
     <!-- jcodec: pure-Java pull-decode (FrameGrab) for H.264/MPEG/ProRes in
          MP4/MOV/MKV, used video-only behind TwelveMonkeys in the
          TWELVEMONKEYS_JCODEC backend. jcodec-javase provides AWTUtil
@@ -263,6 +281,7 @@
         <lwjgl.natives>natives-windows</lwjgl.natives>
         <javacpp.platform>windows-x86_64</javacpp.platform>
         <ffmpegffm.natives>windows-x64</ffmpegffm.natives>
+        <turbojpegffm.natives>windows-x64</turbojpegffm.natives>
       </properties>
     </profile>
     <profile>
