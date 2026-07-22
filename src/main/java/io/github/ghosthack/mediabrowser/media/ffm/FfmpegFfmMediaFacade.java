@@ -34,8 +34,7 @@ import java.util.Set;
  * stay {@link MediaKind#VIDEO} and play in the viewer.</p>
  *
  * <p>HEIC/AVIF decode natively here (FFmpeg 8 demuxes HEIF; AV1 stills go
- * through the statically linked dav1d), which the vips-paired facade routes to
- * libvips instead.</p>
+ * through the statically linked dav1d).</p>
  */
 public final class FfmpegFfmMediaFacade implements MediaFacade {
 
@@ -44,8 +43,17 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff",
             "avif", "heic", "heif");
 
-    /** AV container/stream extensions — shared with the vips-paired facade. */
-    private static final Set<String> AV_EXTENSIONS = FfmpegVipsMediaFacade.AV_EXTENSIONS;
+    /** AV container/stream extensions FFmpeg should claim (video and audio). */
+    private static final Set<String> AV_EXTENSIONS = Set.of(
+            "mp4", "m4v", "m4s", "mkv", "webm", "avi", "mov", "qt", "wmv", "asf",
+            "flv", "f4v", "divx", "mpg", "mpeg", "m2v", "mpv",
+            "ts", "m2ts", "mts", "ogv", "ogm", "3gp", "3g2", "vob", "mxf", "nut",
+            "dv", "rm",
+            "mp3", "mp2", "m4a", "aac", "flac", "ogg", "oga", "opus", "wav", "wma",
+            "aiff", "aif", "ape", "mka", "ac3", "dts", "amr", "caf", "au", "ra",
+            "mpc", "wv", "tta", "spx", "dsf",
+            // GIF: animated GIF plays through the FFmpeg gif demuxer.
+            "gif");
 
     private final FfmpegBindings ffmpeg;
     private final FfmpegAv av;

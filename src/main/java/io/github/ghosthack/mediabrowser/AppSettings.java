@@ -629,7 +629,7 @@ public final class AppSettings {
         this.startupLayout = startupLayout == null ? StartupLayout.MOSAIC_VIEWER : startupLayout;
     }
 
-    /** Native decode backend, e.g. {@code "pure"} (default), {@code "ffmpeg-macports"}, {@code "apple"}. */
+    /** Native decode backend, e.g. {@code "twelvemonkeys-ffmpeg-ffm"} (default), {@code "ffmpeg-ffm"}, {@code "apple"}. */
     public String mediaBackend() {
         return mediaBackend;
     }

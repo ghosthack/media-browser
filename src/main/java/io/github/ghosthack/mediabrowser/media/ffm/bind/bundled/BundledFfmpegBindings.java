@@ -1,6 +1,5 @@
 package io.github.ghosthack.mediabrowser.media.ffm.bind.bundled;
 
-// DELTA-vsMACPORTS: ffi.brew.ffmpeg (Homebrew FFmpeg 8.x) rather than ffi.ffmpeg.
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVChannelLayout;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVCodecParameters;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVDictionaryEntry;
@@ -25,9 +24,10 @@ import java.nio.file.Path;
  * {@link FfmpegBindings} backed by the {@code io.github.ghosthack:ffmpeg-ffm}
  * Maven artifact: FFmpeg 8.x stubs whose natives ship in per-platform
  * classifier jars and self-extract at first use — no user-installed FFmpeg
- * (docs/ffmpeg-bundled-backend.md). Derived from {@code BrewFfmpegBindings};
- * the only behavioural delta is {@code AVERROR_EAGAIN}, chosen at runtime
- * because this class runs on every platform.
+ * (docs/ffmpeg-bundled-backend.md). Derived from the retired Homebrew-install
+ * {@code BrewFfmpegBindings} (see docs/ffm-retirement-handoff.md); the only
+ * behavioural delta is {@code AVERROR_EAGAIN}, chosen at runtime because this
+ * class runs on every platform.
  */
 public final class BundledFfmpegBindings implements FfmpegBindings {
 
@@ -193,9 +193,6 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
 
     @Override
     public int parChannels(MemorySegment codecpar) {
-        // DELTA-vsMACPORTS: FFmpeg 5.x+ moved the channel count out of the flat
-        // AVCodecParameters.channels field into the nested AVChannelLayout
-        // ch_layout. Verify these accessor names against the generated stubs —
         // jextract emits AVCodecParameters.ch_layout(struct) as a slice and
         // AVChannelLayout.nb_channels(slice) as an int.
         MemorySegment chLayout = AVCodecParameters.ch_layout(codecpar);

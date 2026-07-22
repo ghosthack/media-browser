@@ -8,13 +8,10 @@ import java.util.List;
 /**
  * Selectable media decode backend.
  *
- * <p>{@link #FFMPEG_MACPORTS}, {@link #FFMPEG_BREW} and {@link #FFMPEG_WINDOWS}
- * all run the same FFmpeg + libvips decode logic through
- * {@code FfmpegVipsMediaFacade}; they differ only in which native libraries it
- * binds to (a {@code io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegBindings} /
- * {@code VipsBindings} pair) — MacPorts FFmpeg 4.x / libvips 8.x under
- * {@code /opt/local}, Homebrew FFmpeg 8.x under {@code /opt/homebrew}, or
- * Windows FFmpeg 8.x / libvips loaded by DLL name off {@code PATH}.</p>
+ * <p>{@link #FFMPEG_FFM} decodes everything (stills included) through the
+ * bundled-FFmpeg ffmpeg-ffm artifact alone. The user-install FFmpeg/libvips
+ * wirings that once sat beside it are retired — see
+ * {@code docs/ffm-retirement-handoff.md}.</p>
  *
  * <p>{@link #APPLE} uses Apple's ImageIO/AVFoundation exclusively (images,
  * video, and audio) with no FFmpeg/libvips dependency; {@link #WINDOWS_NATIVE}
@@ -33,26 +30,6 @@ import java.util.List;
  * {@link #fromSettings(String)}.</p>
  */
 public enum MediaBackend {
-    FFMPEG_MACPORTS("ffmpeg-macports", "MacPorts FFmpeg 4.x / libvips 8.x",
-            ffmpegVips("ffm.bind.macports.MacPortsFfmpegBindings",
-                    "ffm.bind.macports.MacPortsVipsBindings")),
-    // Homebrew FFmpeg 8.x / libvips, bound to /opt/homebrew via the
-    // ffi.brew.{ffmpeg,vips} stubs (regenerate with jextract/gen-bindings.sh brew).
-    FFMPEG_BREW("ffmpeg-brew", "Homebrew FFmpeg 8.x / libvips",
-            ffmpegVips("ffm.bind.brew.BrewFfmpegBindings",
-                    "ffm.bind.brew.BrewVipsBindings")),
-    // Windows FFmpeg 8.x / libvips, bound by DLL name off PATH via the
-    // ffi.win.{ffmpeg,vips} stubs (derived from the brew 8.x set; see
-    // docs/windows-ffmpeg-backend.md).
-    FFMPEG_WINDOWS("ffmpeg-windows", "Windows FFmpeg 8.x / libvips",
-            ffmpegVips("ffm.bind.win.WindowsFfmpegBindings",
-                    "ffm.bind.win.WindowsVipsBindings")),
-    // FFmpeg 8.x from the io.github.ghosthack:ffmpeg-ffm Maven artifact —
-    // natives ship in classifier jars and self-extract, no user-installed
-    // FFmpeg (docs/ffmpeg-bundled-backend.md). Stills still go through the
-    // platform's vips binding, picked by OS since the artifact covers FFmpeg only.
-    FFMPEG_BUNDLED("ffmpeg-bundled", "Bundled FFmpeg 8.x (Maven natives) / libvips",
-            ffmpegVips("ffm.bind.bundled.BundledFfmpegBindings", bundledVipsClass())),
     // Bundled FFmpeg solo: stills AND video through the ffmpeg-ffm artifact —
     // no libvips, nothing user-installed. Stills refine from FFmpeg's
     // one-frame-video shape heuristically (see FfmpegFfmMediaFacade).
@@ -105,7 +82,6 @@ public enum MediaBackend {
     // fields directly — an enum's constants initialize before its other static
     // fields, and javac rejects the forward reference.)
     private static final String PKG = "io.github.ghosthack.mediabrowser.media.";
-    private static final String FFMPEG_VIPS_FACADE = PKG + "ffm.FfmpegVipsMediaFacade";
 
     /** Instantiates a facade; deferred so absent classes only fail on use. */
     @FunctionalInterface
@@ -136,25 +112,6 @@ public enum MediaBackend {
         String fallback = PKG + fallbackClass;
         return new Spec(List.of(facade, fallback),
                 () -> (MediaFacade) newInstance(facade, newInstance(fallback)));
-    }
-
-    /**
-     * The vips binding {@link #FFMPEG_BUNDLED} pairs with, by OS: Homebrew
-     * paths on macOS, DLL-name-off-PATH elsewhere (the least path-specific
-     * choice for Windows and anything else).
-     */
-    private static String bundledVipsClass() {
-        boolean mac = System.getProperty("os.name", "").toLowerCase().contains("mac");
-        return mac ? "ffm.bind.brew.BrewVipsBindings" : "ffm.bind.win.WindowsVipsBindings";
-    }
-
-    /** {@code FfmpegVipsMediaFacade} over a no-arg-constructed bindings pair. */
-    private static Spec ffmpegVips(String ffmpegBindingsClass, String vipsBindingsClass) {
-        String ffmpegBindings = PKG + ffmpegBindingsClass;
-        String vipsBindings = PKG + vipsBindingsClass;
-        return new Spec(List.of(FFMPEG_VIPS_FACADE, ffmpegBindings, vipsBindings),
-                () -> (MediaFacade) newInstance(FFMPEG_VIPS_FACADE,
-                        newInstance(ffmpegBindings), newInstance(vipsBindings)));
     }
 
     private static Object newInstance(String className, Object... args)
@@ -213,9 +170,8 @@ public enum MediaBackend {
      * The default backend: {@link #TWELVEMONKEYS_FFMPEG_FFM} — TwelveMonkeys
      * stills plus the bundled-FFmpeg (ffmpeg-ffm artifact) video path, which
      * behaves identically on macOS/Windows with nothing installed. In trees
-     * that omit {@code media/ffm} (the public source distribution, today) it
-     * degrades to {@link #TWELVEMONKEYS_JAVACV}, the same pairing over
-     * bytedeco's FFmpeg.
+     * that omit {@code media/ffm} it degrades to
+     * {@link #TWELVEMONKEYS_JAVACV}, the same pairing over bytedeco's FFmpeg.
      */
     public static MediaBackend defaultBackend() {
         return TWELVEMONKEYS_FFMPEG_FFM.isAvailable()
@@ -229,10 +185,8 @@ public enum MediaBackend {
      */
     public static MediaBackend fromSettings(String value) {
         if (value != null) {
-            // Legacy value (pre-split, single MacPorts FFmpeg backend).
-            String wanted = value.equalsIgnoreCase("ffmpeg") ? "ffmpeg-macports" : value;
             for (MediaBackend backend : values()) {
-                if (backend.settingsValue.equalsIgnoreCase(wanted) && backend.isAvailable()) {
+                if (backend.settingsValue.equalsIgnoreCase(value) && backend.isAvailable()) {
                     return backend;
                 }
             }

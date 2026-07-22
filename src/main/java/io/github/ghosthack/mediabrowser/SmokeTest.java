@@ -79,11 +79,12 @@ public final class SmokeTest {
     }
 
     /**
-     * Regression guard for the still decode pipeline. The FIT thumbnail and the
-     * full visual decode the same image through different libvips entry points
-     * ({@code vips_thumbnail} vs {@code vips_image_new_from_file}), so an EXIF
-     * orientation (90°/180°/mirror) applied in one path but not the other would
-     * silently diverge — exactly the bug this catches. Compares aspect
+     * Regression guard for the still decode pipeline. A facade may decode the
+     * FIT thumbnail and the full visual through different code paths
+     * (historically libvips' {@code vips_thumbnail} vs
+     * {@code vips_image_new_from_file}; FFmpeg/ImageIO facades have analogous
+     * splits), so an EXIF orientation (90°/180°/mirror) applied in one path but
+     * not the other would silently diverge — exactly the bug this catches. Compares aspect
      * orientation and a coarse, scaler-tolerant content grid (the two come from
      * different scalers, so an exact pixel match is not expected) and prints OK
      * or a MISMATCH warning.
