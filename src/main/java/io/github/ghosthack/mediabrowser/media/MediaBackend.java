@@ -30,11 +30,20 @@ import java.util.List;
  * {@link #fromSettings(String)}.</p>
  */
 public enum MediaBackend {
-    // Bundled FFmpeg solo (the default): stills AND video through the
-    // ffmpeg-ffm artifact — nothing user-installed. Stills refine from
+    // Bundled FFmpeg solo, pure: stills AND video through the ffmpeg-ffm
+    // artifact and nothing else — nothing user-installed. Stills refine from
     // FFmpeg's one-frame-video shape heuristically (see FfmpegFfmMediaFacade).
     FFMPEG_FFM("ffmpeg-ffm", "Bundled FFmpeg (images + video)",
             noArg("ffm.FfmpegFfmMediaFacade")),
+    // The same facade with the explicit TurboJPEG addition (the default):
+    // baseline-JPEG thumbnails decode through libjpeg-turbo's scaled decode
+    // (turbojpeg-ffm artifact) — ~1.6x faster than FFmpeg's full decode on
+    // real camera JPEGs; progressive/CMYK/lossless still decode via FFmpeg
+    // (capability routing). Fails at create() where the turbojpeg natives
+    // are absent, rather than silently behaving like FFMPEG_FFM.
+    FFMPEG_FFM_TURBOJPEG("ffmpeg-ffm-turbojpeg",
+            "Bundled FFmpeg + TurboJPEG thumbnails",
+            staticFactory("ffm.FfmpegFfmMediaFacade", "withTurboJpeg")),
     // 100% Apple: no FFmpeg/libvips fallback. Pass a fallback facade to
     // AppleMediaFacade instead if coverage for e.g. WebM/VP9 is wanted.
     APPLE("apple", "Apple (ImageIO / AVFoundation)",
@@ -93,6 +102,13 @@ public enum MediaBackend {
 
     /** The implementation classes a backend needs, plus how to build its facade. */
     private record Spec(List<String> requiredClasses, Factory factory) {}
+
+    /** Facade built by a public static no-arg factory method on {@code facadeClass}. */
+    private static Spec staticFactory(String facadeClass, String method) {
+        String facade = PKG + facadeClass;
+        return new Spec(List.of(facade),
+                () -> (MediaFacade) Class.forName(facade).getMethod(method).invoke(null));
+    }
 
     /** Facade with a public no-arg constructor ({@code facadeClass} relative to {@code PKG}). */
     private static Spec noArg(String facadeClass) {
@@ -169,17 +185,16 @@ public enum MediaBackend {
     }
 
     /**
-     * The default backend: {@link #FFMPEG_FFM} — stills and video both through
-     * the bundled-FFmpeg (ffmpeg-ffm artifact) path, which behaves identically
-     * on macOS/Windows with nothing installed and decodes JPEG markedly faster
-     * than the ImageIO stills of the previous {@code TWELVEMONKEYS_FFMPEG_FFM}
-     * default (benchmark in docs/ffm-retirement-handoff.md; formats FFmpeg
-     * doesn't claim, e.g. PSD/ICO, need an explicit TwelveMonkeys-paired
-     * backend). In trees that omit {@code media/ffm} it degrades to
+     * The default backend: {@link #FFMPEG_FFM_TURBOJPEG} — stills and video
+     * through the bundled-FFmpeg (ffmpeg-ffm artifact) path plus the explicit
+     * TurboJPEG thumbnail fast path, the fastest measured JPEG option
+     * (benchmarks in docs/ffm-retirement-handoff.md; formats FFmpeg doesn't
+     * claim, e.g. PSD/ICO, need an explicit TwelveMonkeys-paired backend).
+     * In trees that omit {@code media/ffm} it degrades to
      * {@link #TWELVEMONKEYS_JAVACV}, bundled-FFmpeg video over bytedeco.
      */
     public static MediaBackend defaultBackend() {
-        return FFMPEG_FFM.isAvailable() ? FFMPEG_FFM : TWELVEMONKEYS_JAVACV;
+        return FFMPEG_FFM_TURBOJPEG.isAvailable() ? FFMPEG_FFM_TURBOJPEG : TWELVEMONKEYS_JAVACV;
     }
 
     /**

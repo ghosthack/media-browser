@@ -22,18 +22,17 @@ import java.util.Optional;
  * shrink-on-load), then hands the small raster to {@link Thumbnails#scale} for
  * the exact geometry and {@link RasterFrames#applyExifOrientation} for the
  * EXIF orientation (all eight values) — the same baking convention as the
- * TwelveMonkeys facade.
+ * TwelveMonkeys facade. Used only by the explicit {@code ffmpeg-ffm-turbojpeg}
+ * backend variant ({@link FfmpegFfmMediaFacade#withTurboJpeg()}); there is no
+ * system-property switch.
  *
  * <p><b>Declines instead of guessing.</b> {@link #thumbnail} returns empty for
  * anything outside the well-trodden path — CMYK/YCCK colorspaces, lossless
- * JPEG, parse trouble — and the caller falls back to the FFmpeg decode. A missing native (platform without a turbojpeg-ffm
- * classifier jar) disables the fast path once, quietly.</p>
+ * JPEG, parse trouble — and the caller decodes via FFmpeg instead (capability
+ * routing, documented per backend). A missing native surfaces loudly at
+ * backend creation via {@link #available()}, never as silent degradation.</p>
  */
 final class TurboJpegStills {
-
-    /** {@code -Dmedia.turbojpeg=false} disables the fast path. */
-    private static final boolean ENABLED =
-            !"false".equalsIgnoreCase(System.getProperty("media.turbojpeg", "true"));
 
     private static volatile Boolean available;
 
@@ -50,13 +49,10 @@ final class TurboJpegStills {
                 }
             }
         }
-        return ENABLED && a;
+        return a;
     }
 
     private static boolean probe() {
-        if (!ENABLED) {
-            return false;
-        }
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment n = arena.allocate(ValueLayout.JAVA_INT);
             return !TurboJpeg.tj3GetScalingFactors(n).equals(MemorySegment.NULL);
