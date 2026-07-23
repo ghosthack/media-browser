@@ -16,6 +16,7 @@ import javafx.application.Platform;
 import javafx.scene.control.Alert;
 import javafx.stage.Stage;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -45,13 +46,44 @@ public final class App extends Application {
             service = new MediaService(backend.create(),
                     settings.thumbnailMemoryBudgetBytes());
         } catch (Throwable t) {
-            var alert = new Alert(Alert.AlertType.ERROR);
+            // Startup backend check: the backend binds only at startup, so a
+            // selection that cannot initialize (native link failure, corrupt
+            // extraction, ...) is handled here — details to the console, the
+            // persisted setting replaced with the pure-Java backend (no
+            // natives, cannot link-fail), and one short alert saying so.
+            var fallback = MediaBackend.TWELVEMONKEYS_JCODEC;
+            System.err.println("[App] media backend '" + backend.settingsValue()
+                    + "' failed to initialize; replacing the media.backend setting with '"
+                    + fallback.settingsValue() + "'");
+            t.printStackTrace();
+            settings.setMediaBackend(fallback.settingsValue());
+            try {
+                settings.save();
+            } catch (IOException e) {
+                System.err.println("[App] could not persist the replacement backend: " + e);
+            }
+            try {
+                service = new MediaService(fallback.create(),
+                        settings.thumbnailMemoryBudgetBytes());
+            } catch (Throwable t2) {
+                t2.printStackTrace();
+                var fatal = new Alert(Alert.AlertType.ERROR);
+                fatal.setTitle("Media Browser");
+                fatal.setHeaderText("The pure-Java fallback backend failed too");
+                fatal.setContentText(String.valueOf(t2));
+                fatal.showAndWait();
+                Platform.exit();
+                return;
+            }
+            var alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Media Browser");
-            alert.setHeaderText("Cannot load the native media libraries (" + backend + " backend)");
-            alert.setContentText(String.valueOf(t));
+            alert.setHeaderText("Decode backend replaced");
+            alert.setContentText("The '" + backend.settingsValue() + "' backend could not be"
+                    + " initialized, so the setting was changed to the pure-Java '"
+                    + fallback.settingsValue() + "' backend."
+                    + "\nSee the console log for details."
+                    + "\nPick a different backend in Preferences \u25b8 Media decode backend.");
             alert.showAndWait();
-            Platform.exit();
-            return;
         }
 
         // One shared rotation store backs all views (mirrors how the single
