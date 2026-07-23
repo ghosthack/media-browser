@@ -16,9 +16,11 @@ import io.github.ghosthack.mediabrowser.media.MediaItem;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
+import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
 
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.SimpleBooleanProperty;
@@ -1867,6 +1869,35 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var backendRow = new HBox(8, new Label("Media decode backend:"), backendCombo);
         backendRow.setAlignment(Pos.CENTER_LEFT);
 
+        // Playback decode policy for the bundled-FFmpeg backends (HwDecode):
+        // applies to new playback sessions immediately, meaningless (and so
+        // disabled) for the other backends.
+        var decodeCombo = new ComboBox<HwDecode.Policy>();
+        decodeCombo.getItems().setAll(HwDecode.Policy.values());
+        decodeCombo.setConverter(new StringConverter<>() {
+            @Override public String toString(HwDecode.Policy p) {
+                return p == null ? "" : switch (p) {
+                    case AUTO -> "Auto (hardware when available)";
+                    case SOFTWARE -> "Software";
+                    case HARDWARE -> "Hardware (required — fails loudly)";
+                };
+            }
+            @Override public HwDecode.Policy fromString(String s) {
+                return null; // non-editable combo; never parses back
+            }
+        });
+        decodeCombo.setValue(switch (settings.decodeDevice().toLowerCase(java.util.Locale.ROOT)) {
+            case "software" -> HwDecode.Policy.SOFTWARE;
+            case "hardware" -> HwDecode.Policy.HARDWARE;
+            default -> HwDecode.Policy.AUTO;
+        });
+        decodeCombo.disableProperty().bind(Bindings.createBooleanBinding(
+                () -> backendCombo.getValue() == null
+                        || !backendCombo.getValue().settingsValue().contains("ffmpeg-ffm"),
+                backendCombo.valueProperty()));
+        var decodeRow = new HBox(8, new Label("Video playback decode:"), decodeCombo);
+        decodeRow.setAlignment(Pos.CENTER_LEFT);
+
         var themeCombo = new ComboBox<Theme>();
         themeCombo.getItems().setAll(Theme.values());
         themeCombo.setValue(settings.theme());
@@ -1928,7 +1959,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         loadingDelayRow.setAlignment(Pos.CENTER_LEFT);
         var hint = new Label("Applies after restarting the application.");
         hint.setStyle("-fx-text-fill: gray;");
-        var generalContent = new VBox(8, themeRow, backendRow, actionLogFileBox,
+        var generalContent = new VBox(8, themeRow, backendRow, decodeRow, actionLogFileBox,
                 new Separator(), loadingIndicatorRow, loadingDelayRow,
                 new Separator(),
                 chromeBox, resizeBox, overscanBox, inWindowMenuBox, windowModeRow,
@@ -2132,6 +2163,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setTheme(themeCombo.getValue());
         ThemeManager.get().setCurrent(themeCombo.getValue());
         settings.setMediaBackend(backendCombo.getValue().settingsValue());
+        // Persist + apply live: the next playback session honours the policy.
+        String decodeDevice = decodeCombo.getValue().name().toLowerCase(java.util.Locale.ROOT);
+        settings.setDecodeDevice(decodeDevice);
+        HwDecode.configure(decodeDevice);
         settings.setUndecoratedWindows(chromeBox.isSelected());
         settings.setUndecoratedResizable(resizeBox.isSelected());
         settings.setMaximizeOverscan(overscanBox.isSelected());

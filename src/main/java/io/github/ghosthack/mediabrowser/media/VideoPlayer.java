@@ -28,6 +28,17 @@ public final class VideoPlayer implements AutoCloseable {
          */
         void frame(MemorySegment bgra, int width, int height, long positionMicros);
 
+        /**
+         * A decoded frame still on the GPU (see {@link VideoStream#gpuFrame()}),
+         * due for presentation now; only valid during the call. Return
+         * {@code true} when presented; {@code false} to have the caller fall
+         * back to {@link #frame} with the CPU-converted pixels — the default
+         * for sinks with no zero-copy path.
+         */
+        default boolean gpuFrame(VideoStream.GpuFrame frame, long positionMicros) {
+            return false;
+        }
+
         /** Called once when the session ends, even on error. */
         @Override
         void close();
@@ -116,7 +127,13 @@ public final class VideoPlayer implements AutoCloseable {
                     }
                     long position = Math.max(0, pts - firstPts);
                     if (!sleepUntil(startNanos + position * 1_000L)) break;
-                    s.frame(stream.bgra(), stream.width(), stream.height(), position);
+                    // Zero-copy first: a GPU-resident frame goes straight to a
+                    // sink that can bind it; otherwise (or when the sink
+                    // declines) the stream converts to BGRA on demand.
+                    VideoStream.GpuFrame gpu = stream.gpuFrame();
+                    if (gpu == null || !s.gpuFrame(gpu, position)) {
+                        s.frame(stream.bgra(), stream.width(), stream.height(), position);
+                    }
                 }
             }
         } catch (Throwable t) {

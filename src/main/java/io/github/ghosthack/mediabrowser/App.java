@@ -4,6 +4,7 @@ import io.github.ghosthack.mediabrowser.media.AaeStore;
 import io.github.ghosthack.mediabrowser.media.MediaBackend;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
+import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogFile;
 import io.github.ghosthack.mediabrowser.ui.ActionLog;
 import io.github.ghosthack.mediabrowser.ui.AppShell;
@@ -41,18 +42,27 @@ public final class App extends Application {
         // Seed the current theme before any window builds its scene, so each
         // registers and is themed from the first frame.
         ThemeManager.get().setCurrent(settings.theme());
-        var backend = MediaBackend.fromSettings(settings.mediaBackend());
+        // Playback decode policy (auto/software/hardware) for the FFM
+        // backends — applied before the backend binds so the first playback
+        // session already honours it.
+        HwDecode.configure(settings.decodeDevice());
+        String configured = settings.mediaBackend();
         try {
+            // fromSettings throws for a recognized-but-unavailable selection
+            // (never a silent substitute), so it sits inside the check too.
+            var backend = MediaBackend.fromSettings(configured);
             service = new MediaService(backend.create(),
                     settings.thumbnailMemoryBudgetBytes());
         } catch (Throwable t) {
             // Startup backend check: the backend binds only at startup, so a
-            // selection that cannot initialize (native link failure, corrupt
-            // extraction, ...) is handled here — details to the console, the
-            // persisted setting replaced with the pure-Java backend (no
-            // natives, cannot link-fail), and one short alert saying so.
+            // selection that cannot run here — unavailable on this platform/
+            // build (fromSettings throws) or failing to initialize (native
+            // link failure, corrupt extraction, ...) — is handled here:
+            // details to the console, the persisted setting replaced with the
+            // pure-Java backend (no natives, cannot link-fail), and one short
+            // alert saying so.
             var fallback = MediaBackend.TWELVEMONKEYS_JCODEC;
-            System.err.println("[App] media backend '" + backend.settingsValue()
+            System.err.println("[App] media backend '" + configured
                     + "' failed to initialize; replacing the media.backend setting with '"
                     + fallback.settingsValue() + "'");
             t.printStackTrace();
@@ -78,7 +88,7 @@ public final class App extends Application {
             var alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Media Browser");
             alert.setHeaderText("Decode backend replaced");
-            alert.setContentText("The '" + backend.settingsValue() + "' backend could not be"
+            alert.setContentText("The '" + configured + "' backend could not be"
                     + " initialized, so the setting was changed to the pure-Java '"
                     + fallback.settingsValue() + "' backend."
                     + "\nSee the console log for details."

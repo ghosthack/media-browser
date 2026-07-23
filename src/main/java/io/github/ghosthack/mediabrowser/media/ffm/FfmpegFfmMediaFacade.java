@@ -5,6 +5,7 @@ import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
 import io.github.ghosthack.mediabrowser.media.Metadata;
+import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.Thumbnail;
 import io.github.ghosthack.mediabrowser.media.ThumbnailMode;
@@ -26,17 +27,22 @@ import java.util.Set;
  * audio all decode through FFmpeg — no libvips, no other native dependency,
  * nothing user-installed. Works as the solo {@code FFMPEG_FFM} backend
  * <em>and</em> as the video fallback behind the TwelveMonkeys still facade for
- * {@code TWELVEMONKEYS_FFMPEG_FFM} (same pairing as the JavaCV twins).
+ * {@code TWELVEMONKEYS_FFMPEG_FFM}.
  *
  * <p><b>Still vs. video.</b> FFmpeg demuxes a still image as a one-frame video
- * stream, and {@link FfmpegAv} reports it as {@link MediaKind#VIDEO}. Like the
- * JavaCV facade, this class refines the kind heuristically: a known still
+ * stream, and {@link FfmpegAv} reports it as {@link MediaKind#VIDEO}. This
+ * class refines the kind heuristically: a known still
  * extension with no audio stream and no container duration is
  * {@link MediaKind#IMAGE}. Animated GIF/AVIF report a real duration, so they
  * stay {@link MediaKind#VIDEO} and play in the viewer.</p>
  *
  * <p>HEIC/AVIF decode natively here (FFmpeg 8 demuxes HEIF; AV1 stills go
  * through the statically linked dav1d).</p>
+ *
+ * <p>Camera RAW (CR2/CR3/NEF/ARW/RAF/ORF/DNG/…) — a family FFmpeg does not
+ * cover — routes to {@link LibRawStills} (the libraw-ffm artifact) by
+ * extension. Where those natives are absent, RAW extensions are not claimed
+ * (loud stderr note at first probe), everything else is untouched.</p>
  */
 public final class FfmpegFfmMediaFacade implements MediaFacade {
 
@@ -100,6 +106,11 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             return Optional.empty();
         }
         String ext = extension(file);
+        if (LibRawStills.isRaw(ext)) {
+            // RAW is always a still; decode problems surface at view time,
+            // never as a listing-time filter.
+            return LibRawStills.available() ? Optional.of(MediaKind.IMAGE) : Optional.empty();
+        }
         if (!STILL_EXTENSIONS.contains(ext) && !AV_EXTENSIONS.contains(ext)) {
             return Optional.empty();
         }
@@ -112,11 +123,21 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
 
     @Override
     public MediaProbe probe(Path file) {
+        if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
+            return rawProbe(file);
+        }
         return refineKind(av.probe(file, fileSize(file)), file);
     }
 
     @Override
     public VisualResult loadVisual(Path file) {
+        if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
+            RasterFrame frame = LibRawStills.fullDecode(file)
+                    .orElseThrow(() -> new MediaException(
+                            "LibRaw could not decode " + file.getFileName()
+                            + " (lossy-compressed DNG?)"));
+            return new VisualResult(rawProbe(file), Optional.of(frame));
+        }
         VisualResult result = av.firstFrameWithProbe(file, fileSize(file));
         MediaProbe refined = refineKind(result.probe(), file);
         VisualResult out = refined == result.probe() ? result
@@ -126,6 +147,12 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
 
     @Override
     public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
+        if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
+            // Empty frame = visibly blank tile, the same failure surface as an
+            // FFmpeg thumbnail miss — never a substitute rendering.
+            return new Thumbnail(
+                    LibRawStills.thumbnail(file, maxEdge, mode, turboJpeg), MediaKind.IMAGE);
+        }
         boolean jpeg = isJpeg(file);
         if (jpeg && turboJpeg) {
             // libjpeg-turbo shrink-on-load fast path (the -turbojpeg backend
@@ -158,18 +185,23 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
 
     @Override
     public Metadata readMetadata(Path file) {
+        if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
+            return rawMetadata(file);
+        }
         return metadata.read(file);
     }
 
     @Override
     public VideoStream openVideo(Path file) {
-        return new FfmpegVideoStream(ffmpeg, file);
+        return new FfmpegVideoStream(ffmpeg, file, HwDecode.playbackRequest());
     }
 
     @Override
     public String nativeVersions() {
         return "Bundled FFmpeg " + av.version()
-                + (turboJpeg ? "; TurboJPEG (baseline-JPEG thumbnails)" : "");
+                + (turboJpeg ? "; TurboJPEG (baseline-JPEG thumbnails)" : "")
+                + (LibRawStills.available() ? "; LibRaw " + LibRawStills.version()
+                        + " (camera RAW)" : "");
     }
 
     @Override
@@ -218,6 +250,54 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         }
         return new VisualResult(result.probe(),
                 result.frame().map(f -> RasterFrames.applyExifOrientation(f, orientation)));
+    }
+
+    /** Probe a RAW file via LibRaw metadata (no pixel decode). */
+    private static MediaProbe rawProbe(Path file) {
+        LibRawStills.RawInfo info = LibRawStills.info(file)
+                .orElseThrow(() -> new MediaException(
+                        "LibRaw could not open " + file.getFileName()));
+        String camera = (info.make() + " " + info.model()).trim();
+        return new MediaProbe(file, MediaKind.IMAGE, extension(file),
+                fileSize(file), -1, -1, info.width(), info.height(),
+                null, -1, null, -1, -1,
+                camera.isEmpty() ? "camera raw" : "raw, " + camera);
+    }
+
+    private static Metadata rawMetadata(Path file) {
+        Optional<LibRawStills.RawInfo> maybe = LibRawStills.info(file);
+        if (maybe.isEmpty()) {
+            return Metadata.empty(file);
+        }
+        LibRawStills.RawInfo info = maybe.get();
+        Metadata.Builder b = new Metadata.Builder(file);
+        if (!info.make().isBlank()) {
+            b.add("Camera", "Make", info.make());
+        }
+        if (!info.model().isBlank()) {
+            b.add("Camera", "Model", info.model());
+        }
+        b.add("Image", "Dimensions", info.width() + " × " + info.height());
+        if (info.timestampSeconds() > 0) {
+            b.add("Image", "Captured", java.time.Instant.ofEpochSecond(info.timestampSeconds())
+                    .atZone(java.time.ZoneId.systemDefault())
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+        }
+        if (info.isoSpeed() > 0) {
+            b.add("Exposure", "ISO", String.valueOf(Math.round(info.isoSpeed())));
+        }
+        if (info.shutter() > 0) {
+            b.add("Exposure", "Shutter", info.shutter() >= 1
+                    ? String.format(Locale.ROOT, "%.1f s", info.shutter())
+                    : "1/" + Math.round(1 / info.shutter()) + " s");
+        }
+        if (info.aperture() > 0) {
+            b.add("Exposure", "Aperture", String.format(Locale.ROOT, "f/%.1f", info.aperture()));
+        }
+        if (info.focalLen() > 0) {
+            b.add("Exposure", "Focal length", String.format(Locale.ROOT, "%.0f mm", info.focalLen()));
+        }
+        return b.build();
     }
 
     private static boolean isJpeg(Path file) {

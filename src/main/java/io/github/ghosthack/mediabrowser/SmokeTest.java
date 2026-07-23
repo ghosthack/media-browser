@@ -27,6 +27,10 @@ public final class SmokeTest {
 
     public static void main(String[] args) {
         var backend = MediaBackend.fromSettings(System.getProperty("media.backend"));
+        // Playback decode policy, e.g. -Ddecode.device=hardware for the hw
+        // playback smoke (FFM backends only; see media.ffm.HwDecode).
+        io.github.ghosthack.mediabrowser.media.ffm.HwDecode.configure(
+                System.getProperty("decode.device", "auto"));
         try (MediaFacade facade = backend.create()) {
             System.out.println("backend: " + backend + " | native: " + facade.nativeVersions());
             for (String arg : args) {
@@ -146,6 +150,7 @@ public final class SmokeTest {
 
     /** Decodes a few frames through the video stream + GL renderer. */
     private static void playbackSmoke(MediaFacade facade, Path file) {
+        long hwBefore = io.github.ghosthack.mediabrowser.media.ffm.HwDecode.hwSessions();
         try (var stream = facade.openVideo(file)) {
             System.out.println("  playback: " + stream.width() + "x" + stream.height()
                     + ", duration " + stream.durationMicros() / 1000 + " ms");
@@ -160,20 +165,39 @@ public final class SmokeTest {
                 System.out.println("  playback: GL renderer unavailable ("
                         + glUnavailable + "); verifying VideoStream contract directly");
                 playbackSmokeNoGl(stream);
+                System.out.println("  playback decode: "
+                        + (io.github.ghosthack.mediabrowser.media.ffm.HwDecode.hwSessions() > hwBefore
+                                ? "hardware" : "software"));
                 return;
             }
-            // macOS GL path — unchanged.
+            // macOS GL path: zero-copy IOSurface render when the frame is on
+            // the GPU (VideoToolbox NV12), BGRA upload otherwise.
+            int gpuFrames = 0;
             try (renderer) {
                 ByteBuffer out = ByteBuffer.allocateDirect(stream.width() * stream.height() * 4);
                 for (int i = 0; i < 5 && stream.next(); i++) {
-                    renderer.render(stream.bgra(), out);
+                    var gpu = stream.gpuFrame();
+                    boolean zeroCopy = gpu != null && renderer.renderSurface(
+                            gpu.cvPixelBuffer(), gpu.codedWidth(), gpu.codedHeight(),
+                            gpu.containerQuarterTurnsCw(), gpu.bt709(), gpu.fullRange(), out);
+                    if (zeroCopy) {
+                        gpuFrames++;
+                    } else {
+                        renderer.render(stream.bgra(), out);
+                    }
                     int mid = (stream.height() / 2 * stream.width() + stream.width() / 2) * 4;
-                    System.out.printf("  frame %d: pts %d ms, center BGRA #%02x%02x%02x%02x%n",
+                    System.out.printf("  frame %d: pts %d ms, center BGRA #%02x%02x%02x%02x%s%n",
                             i, stream.ptsMicros() / 1000, out.get(mid), out.get(mid + 1),
-                            out.get(mid + 2), out.get(mid + 3));
+                            out.get(mid + 2), out.get(mid + 3), zeroCopy ? " (zero-copy)" : "");
                 }
             }
+            if (gpuFrames > 0) {
+                System.out.println("  playback render: zero-copy IOSurface (" + gpuFrames + " frames)");
+            }
         }
+        System.out.println("  playback decode: "
+                + (io.github.ghosthack.mediabrowser.media.ffm.HwDecode.hwSessions() > hwBefore
+                        ? "hardware" : "software"));
     }
 
     /**

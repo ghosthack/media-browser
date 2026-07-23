@@ -53,8 +53,26 @@ final class FfmpegVideoStream implements VideoStream {
     private int srcW = -1, srcH = -1, srcFmt = -1;
     private boolean draining, ended, closed;
 
-    FfmpegVideoStream(FfmpegBindings ff, Path file) {
+    // Hardware decode (HwDecode policy): the device reference, the hw pixel
+    // format get_format prefers, the readback destination frame, and the
+    // shared arena keeping the get_format upcall stub alive (shared because
+    // libavcodec may call it from a decoder worker thread).
+    private final boolean hwRequired;
+    private final int hwDeviceType;
+    private MemorySegment hwDeviceRef = MemorySegment.NULL;
+    private int hwPixFmt = -1;
+    private MemorySegment swFrame = MemorySegment.NULL, swFramePtr = MemorySegment.NULL;
+    private Arena stubArena;
+    private boolean firstFrameSeen;
+    /** False until {@link #bgra()} converts the current frame — the zero-copy
+     *  GPU path never pays the readback+swscale, so conversion is on demand. */
+    private boolean cpuReady;
+    private int containerTurns;
+
+    FfmpegVideoStream(FfmpegBindings ff, Path file, HwDecode.Request hw) {
         this.ff = ff;
+        this.hwRequired = hw != null && hw.require();
+        this.hwDeviceType = hw != null ? hw.deviceType() : -1;
         boolean ok = false;
         try {
             ctxPtr = ff.openInput(arena, file);
@@ -80,6 +98,13 @@ final class FfmpegVideoStream implements VideoStream {
             MemorySegment vs = ff.stream(ctx, videoIndex);
             ff.check(ff.parametersToContext(cctx, ff.codecpar(vs)),
                     "avcodec_parameters_to_context");
+            // Frame threading (libavcodec defaults to one thread): decode
+            // throughput for high-res streams at the cost of a few frames of
+            // pipeline latency, which the pts-paced player never observes.
+            ff.setAutoThreads(cctx);
+            if (hw != null) {
+                requestHardware(hw, codec, file);
+            }
             ff.check(ff.open2(cctx, codec), "avcodec_open2");
 
             pkt = ff.packetAlloc();
@@ -123,6 +148,7 @@ final class FfmpegVideoStream implements VideoStream {
             // Bake any container/display rotation so presented frames are
             // upright (display-oriented), as the Apple backend's frames are.
             int q = ff.videoRotationQuarterTurnsCw(vs);
+            containerTurns = q;
             if (q != 0) {
                 rotation = new VideoRotation(width, height, q);
                 displayWidth = rotation.displayWidth();
@@ -137,6 +163,50 @@ final class FfmpegVideoStream implements VideoStream {
         } finally {
             if (!ok) close();
         }
+    }
+
+    /**
+     * Wires the hw device and get_format preference before {@code open2}.
+     * Under {@code hardware} policy every miss is loud; under {@code auto} a
+     * missing device or codec config just leaves the session software (the
+     * capability-routing decision, counted at the first frame).
+     */
+    private void requestHardware(HwDecode.Request hw, MemorySegment codec, Path file) {
+        if (!hw.require() && !isHwWorthwhile()) {
+            return;
+        }
+        int fmt = ff.hwPixFmtFor(codec, hw.deviceType());
+        if (fmt < 0) {
+            if (hw.require()) {
+                throw new MediaException("ffmpeg: hardware decode required but the decoder"
+                        + " has no hw config for this codec: " + file.getFileName());
+            }
+            return;
+        }
+        hwDeviceRef = ff.hwDeviceCreate(hw.deviceType());
+        if (hwDeviceRef.equals(MemorySegment.NULL)) {
+            if (hw.require()) {
+                throw new MediaException(
+                        "ffmpeg: hardware decode required but the hw device failed to open");
+            }
+            return;
+        }
+        stubArena = Arena.ofShared();
+        ff.requestHwDecode(stubArena, cctx, hwDeviceRef, fmt);
+        hwPixFmt = fmt;
+    }
+
+    /**
+     * Auto-policy codec gate, from the 2026-07-23 solo-stream benchmarks
+     * (docs/panama-decoder-candidates-handoff.md §3): hardware slashes CPU
+     * >10× on heavy HEVC (38 → 3 ms/frame at 4K/40 Mbps — every iPhone
+     * video), but on h264 the readback+swscale tax eats the win (par CPU,
+     * one third the wall throughput). So {@code auto} routes only HEVC;
+     * {@code hardware} skips this gate and forces any supported codec.
+     */
+    private boolean isHwWorthwhile() {
+        return "hevc".equals(ff.codecName(
+                ff.parCodecId(ff.codecpar(ff.stream(ctx, videoIndex)))));
     }
 
     @Override
@@ -156,7 +226,26 @@ final class FfmpegVideoStream implements VideoStream {
 
     @Override
     public MemorySegment bgra() {
+        if (!cpuReady) {
+            convertCpu();
+            cpuReady = true;
+        }
         return presented;
+    }
+
+    @Override
+    public VideoStream.GpuFrame gpuFrame() {
+        if (hwPixFmt < 0 || hwDeviceType != HwDecode.DEVICE_VIDEOTOOLBOX
+                || ff.frameFormat(frame) != hwPixFmt) {
+            return null;
+        }
+        long pixelBuffer = ff.frameHwHandle(frame);
+        if (pixelBuffer == 0) {
+            return null;
+        }
+        return new VideoStream.GpuFrame(pixelBuffer, width, height, containerTurns,
+                ff.frameColorspace(frame) == 1 /* AVCOL_SPC_BT709 */,
+                ff.frameColorRange(frame) == 2 /* AVCOL_RANGE_JPEG */);
     }
 
     @Override
@@ -168,9 +257,12 @@ final class FfmpegVideoStream implements VideoStream {
     public boolean next() {
         if (ended || closed) return false;
         while (true) {
+            // receiveFrame unrefs `frame` internally first, so the previous
+            // frame (and its GPU surface handed out via gpuFrame()) stays
+            // valid exactly until this call — the documented lifetime.
             int rr = ff.receiveFrame(cctx, frame);
             if (rr == 0) {
-                convert();
+                frameDecoded();
                 return true;
             }
             if (rr == ff.averrorEof()) {
@@ -203,10 +295,41 @@ final class FfmpegVideoStream implements VideoStream {
         }
     }
 
-    private void convert() {
-        int w = ff.frameWidth(frame);
-        int h = ff.frameHeight(frame);
-        int fmt = ff.frameFormat(frame);
+    /** Per-frame bookkeeping at decode time: policy check, counters, pts. */
+    private void frameDecoded() {
+        if (!firstFrameSeen) {
+            firstFrameSeen = true;
+            boolean hwActive = hwPixFmt >= 0 && ff.frameFormat(frame) == hwPixFmt;
+            if (hwRequired && !hwActive) {
+                throw new MediaException("ffmpeg: hardware decode required but the decoder"
+                        + " fell back to software (" + ff.pixFmtName(ff.frameFormat(frame)) + ")");
+            }
+            HwDecode.recordSession(hwActive);
+        }
+        cpuReady = false;
+
+        long t = ff.frameBestEffortTimestamp(frame);
+        if (t == ff.noptsValue()) t = ff.framePts(frame);
+        ptsMicros = t == ff.noptsValue() || tbDen <= 0
+                ? (ptsMicros < 0 ? 0 : ptsMicros + fallbackFrameMicros)
+                : t * 1_000_000L * tbNum / tbDen;
+    }
+
+    private void convertCpu() {
+        // A hardware frame is an opaque device handle — read it back to a
+        // software frame (NV12 for VideoToolbox) for the swscale path below.
+        MemorySegment src = frame;
+        if (hwPixFmt >= 0 && ff.frameFormat(frame) == hwPixFmt) {
+            if (swFrame.equals(MemorySegment.NULL)) {
+                swFrame = ff.frameAlloc();
+                swFramePtr = Ffm.pointerTo(arena, swFrame);
+            }
+            ff.check(ff.hwFrameTransfer(swFrame, frame), "av_hwframe_transfer_data");
+            src = swFrame;
+        }
+        int w = ff.frameWidth(src);
+        int h = ff.frameHeight(src);
+        int fmt = ff.frameFormat(src);
         if (w <= 0 || h <= 0 || fmt < 0) {
             throw new MediaException("ffmpeg: decoder produced an unusable frame");
         }
@@ -221,20 +344,18 @@ final class FfmpegVideoStream implements VideoStream {
             srcH = h;
             srcFmt = fmt;
         }
-        ff.swsScale(sws, ff.frameData(frame), ff.frameLinesize(frame),
+        ff.swsScale(sws, ff.frameData(src), ff.frameLinesize(src),
                 0, h, dstData, dstStride);
 
         // swscale wrote the coded frame into dstView; bake the rotation (if any)
-        // into the buffer consumers read via bgra().
+        // into the buffer consumers read via bgra(). The decoded frame itself
+        // stays referenced (receiveFrame unrefs it on the next call) so a GPU
+        // surface handed out for the same frame remains valid.
         presented = rotation != null ? rotation.rotate(dstView) : dstView;
 
-        long t = ff.frameBestEffortTimestamp(frame);
-        if (t == ff.noptsValue()) t = ff.framePts(frame);
-        ptsMicros = t == ff.noptsValue() || tbDen <= 0
-                ? (ptsMicros < 0 ? 0 : ptsMicros + fallbackFrameMicros)
-                : t * 1_000_000L * tbNum / tbDen;
-
-        ff.frameUnref(frame);
+        if (src != frame) {
+            ff.frameUnref(src);   // readback buffers are per-frame allocations
+        }
     }
 
     @Override
@@ -243,10 +364,13 @@ final class FfmpegVideoStream implements VideoStream {
         closed = true;
         if (rotation != null) rotation.close();
         if (!sws.equals(MemorySegment.NULL)) ff.swsFreeContext(sws);
+        if (!swFramePtr.equals(MemorySegment.NULL)) ff.frameFree(swFramePtr);
         if (!framePtr.equals(MemorySegment.NULL)) ff.frameFree(framePtr);
         if (!pktPtr.equals(MemorySegment.NULL)) ff.packetFree(pktPtr);
         if (!cctxPtr.equals(MemorySegment.NULL)) ff.freeContext(cctxPtr);
         if (!ctxPtr.equals(MemorySegment.NULL)) ff.closeInput(ctxPtr);
+        if (!hwDeviceRef.equals(MemorySegment.NULL)) ff.hwDeviceUnref(hwDeviceRef);
+        if (stubArena != null) stubArena.close();
         arena.close();
     }
 }

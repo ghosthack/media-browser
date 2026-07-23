@@ -33,6 +33,7 @@ public final class AppSettings {
     private static final String STARTUP_MOSAIC_KEY = "startup.mosaic";
     private static final String STARTUP_TWO_WINDOW_KEY = "startup.twoWindow";
     private static final String BACKEND_KEY = "media.backend";
+    private static final String DECODE_DEVICE_KEY = "decode.device";
     private static final String DETECTION_KEY = "media.detection";
     private static final String THEME_KEY = "ui.theme";
     private static final String THUMB_MAX_EDGE_KEY = "mosaic.thumbnail.maxEdge";
@@ -159,6 +160,7 @@ public final class AppSettings {
     private WindowMode windowMode;
     private StartupLayout startupLayout;
     private String mediaBackend;
+    private String decodeDevice;
     private String detectionMode;
     private Theme theme;
     private int thumbnailMaxEdge;
@@ -245,6 +247,7 @@ public final class AppSettings {
         settings.startupLayout = StartupLayout.fromSettings(
                 props.getProperty(STARTUP_LAYOUT_KEY), legacyStartupLayout(props));
         settings.mediaBackend = props.getProperty(BACKEND_KEY, "ffmpeg-ffm-turbojpeg");
+        settings.decodeDevice = props.getProperty(DECODE_DEVICE_KEY, "auto");
         settings.detectionMode = props.getProperty(DETECTION_KEY, "extension");
         settings.theme = Theme.fromSettings(props.getProperty(THEME_KEY), Theme.PLAIN_DARK_GRAY);
         settings.thumbnailMaxEdge = parseBoundedInt(
@@ -446,6 +449,7 @@ public final class AppSettings {
         props.setProperty(WINDOW_MODE_KEY, windowMode.name());
         props.setProperty(STARTUP_LAYOUT_KEY, startupLayout.name());
         props.setProperty(BACKEND_KEY, mediaBackend);
+        props.setProperty(DECODE_DEVICE_KEY, decodeDevice);
         props.setProperty(DETECTION_KEY, detectionMode);
         props.setProperty(THEME_KEY, theme.name());
         props.setProperty(THUMB_MAX_EDGE_KEY, Integer.toString(thumbnailMaxEdge));
@@ -636,6 +640,21 @@ public final class AppSettings {
 
     public void setMediaBackend(String backend) {
         this.mediaBackend = backend;
+    }
+
+    /**
+     * Playback decode policy for the bundled-FFmpeg backends:
+     * {@code "auto"} (default; hardware when the codec and device support it),
+     * {@code "software"}, or {@code "hardware"} (required — fails loudly).
+     * Applied by {@code media.ffm.HwDecode}.
+     */
+    public String decodeDevice() {
+        return decodeDevice;
+    }
+
+    public void setDecodeDevice(String decodeDevice) {
+        this.decodeDevice = decodeDevice == null || decodeDevice.isBlank()
+                ? "auto" : decodeDevice;
     }
 
     /** Media detection method: {@code "content"} (default) or {@code "extension"}. */

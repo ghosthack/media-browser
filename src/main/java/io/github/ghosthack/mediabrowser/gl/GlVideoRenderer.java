@@ -17,9 +17,15 @@ import static org.lwjgl.opengl.EXTFramebufferObject.glCheckFramebufferStatusEXT;
 import static org.lwjgl.opengl.EXTFramebufferObject.glDeleteFramebuffersEXT;
 import static org.lwjgl.opengl.EXTFramebufferObject.glFramebufferTexture2DEXT;
 import static org.lwjgl.opengl.EXTFramebufferObject.glGenFramebuffersEXT;
+import static org.lwjgl.opengl.ARBTextureRectangle.GL_TEXTURE_RECTANGLE_ARB;
 import static org.lwjgl.opengl.GL11.*;
 import static org.lwjgl.opengl.GL12.GL_BGRA;
+import static org.lwjgl.opengl.GL12.GL_CLAMP_TO_EDGE;
 import static org.lwjgl.opengl.GL12.GL_UNSIGNED_INT_8_8_8_8_REV;
+import static org.lwjgl.opengl.GL13.GL_TEXTURE0;
+import static org.lwjgl.opengl.GL13.GL_TEXTURE1;
+import static org.lwjgl.opengl.GL13.glActiveTexture;
+import static org.lwjgl.opengl.GL20.*;
 
 /**
  * Offscreen OpenGL renderer (LWJGL) for video frames: each BGRA frame is
@@ -52,6 +58,15 @@ public final class GlVideoRenderer implements AutoCloseable {
     private int targetTexture = -1;
     private int framebuffer = -1;
     private boolean closed;
+
+    // Zero-copy NV12/IOSurface path (macOS, VideoToolbox output): lazy —
+    // nothing is created until the first renderSurface call.
+    private int nv12Program = -1;
+    private int nv12TexY = -1;
+    private int nv12TexC = -1;
+    private int nv12ConvUniform = -1;
+    private int nv12OffsetUniform = -1;
+    private boolean nv12Failed;
 
     public GlVideoRenderer(int width, int height) {
         this(width, height, 0);
@@ -106,6 +121,154 @@ public final class GlVideoRenderer implements AutoCloseable {
         glEnd();
 
         glReadPixels(0, 0, outWidth, outHeight, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, dst);
+    }
+
+    /**
+     * Zero-copy render of a VideoToolbox NV12 frame: binds the CVPixelBuffer's
+     * IOSurface planes directly as rectangle textures in this CGL context (no
+     * readback, no swscale, no upload), converts YUV→RGB in a fragment shader,
+     * and reads the composed FBO back into {@code dst} exactly like
+     * {@link #render}. {@code extraQuarterTurns} is the container rotation of
+     * the coded frame (the surface is in coded orientation), composed with the
+     * constructor's user rotation on the quad.
+     *
+     * <p>Returns {@code false} when this frame cannot go zero-copy — not
+     * macOS, not an NV12 surface (e.g. 10-bit HDR P010), or the GL plumbing
+     * failed — in which case the caller falls back to the CPU path. A pipeline
+     * failure disables the path for the renderer's lifetime.</p>
+     */
+    public boolean renderSurface(long cvPixelBuffer, int srcWidth, int srcHeight,
+                                 int extraQuarterTurns, boolean bt709, boolean fullRange,
+                                 ByteBuffer dst) {
+        if (!MacVideoSurfaces.AVAILABLE || nv12Failed || cvPixelBuffer == 0) {
+            return false;
+        }
+        int pixelFormat = MacVideoSurfaces.pixelFormatType(cvPixelBuffer);
+        if (pixelFormat != MacVideoSurfaces.PIXEL_FORMAT_NV12_VIDEO
+                && pixelFormat != MacVideoSurfaces.PIXEL_FORMAT_NV12_FULL) {
+            return false;
+        }
+        long surface = MacVideoSurfaces.ioSurface(cvPixelBuffer);
+        if (surface == 0 || !ensureNv12Pipeline()) {
+            return false;
+        }
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, nv12TexY);
+        int err = MacVideoSurfaces.texImageIoSurface2D(context, GL_TEXTURE_RECTANGLE_ARB,
+                GL_LUMINANCE, srcWidth, srcHeight, GL_LUMINANCE, GL_UNSIGNED_BYTE, surface, 0);
+        if (err == 0) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_RECTANGLE_ARB, nv12TexC);
+            err = MacVideoSurfaces.texImageIoSurface2D(context, GL_TEXTURE_RECTANGLE_ARB,
+                    GL_LUMINANCE_ALPHA, (srcWidth + 1) / 2, (srcHeight + 1) / 2,
+                    GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, surface, 1);
+        }
+        if (err != 0) {
+            System.err.println("[GlVideoRenderer] CGLTexImageIOSurface2D failed ("
+                    + err + "); zero-copy disabled for this renderer");
+            nv12Failed = true;
+            restoreFixedFunctionState();
+            return false;
+        }
+
+        glUseProgram(nv12Program);
+        boolean full = fullRange || pixelFormat == MacVideoSurfaces.PIXEL_FORMAT_NV12_FULL;
+        glUniformMatrix3fv(nv12ConvUniform, false, yuvToRgbColumnMajor(bt709, full));
+        glUniform3f(nv12OffsetUniform, full ? 0f : 16f / 255f, 0.5f, 0.5f);
+
+        int turns = ((quarterTurns + extraQuarterTurns) % 4 + 4) % 4;
+        glBegin(GL_QUADS);
+        for (int i = 0; i < 4; i++) {
+            float[] tc = TEXCOORDS[(i - turns + 4) % 4];
+            glTexCoord2f(tc[0] * srcWidth, tc[1] * srcHeight); // rectangle: pixel coords
+            glVertex2f(VERTICES[i][0], VERTICES[i][1]);
+        }
+        glEnd();
+
+        restoreFixedFunctionState();
+        glReadPixels(0, 0, outWidth, outHeight, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, dst);
+        return true;
+    }
+
+    /** Back to the fixed-function BGRA pipeline {@link #render} expects. */
+    private void restoreFixedFunctionState() {
+        glUseProgram(0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, sourceTexture);
+    }
+
+    /** YUV→RGB conversion matrix, column-major for {@code glUniformMatrix3fv}. */
+    private static float[] yuvToRgbColumnMajor(boolean bt709, boolean fullRange) {
+        if (fullRange) {
+            return bt709
+                    ? new float[] {1f, 1f, 1f, 0f, -0.1873f, 1.8556f, 1.5748f, -0.4681f, 0f}
+                    : new float[] {1f, 1f, 1f, 0f, -0.344f, 1.772f, 1.402f, -0.714f, 0f};
+        }
+        return bt709
+                ? new float[] {1.164f, 1.164f, 1.164f, 0f, -0.213f, 2.112f, 1.793f, -0.533f, 0f}
+                : new float[] {1.164f, 1.164f, 1.164f, 0f, -0.392f, 2.017f, 1.596f, -0.813f, 0f};
+    }
+
+    /** GLSL 1.20 fragment-only program (fixed-function vertex stage). */
+    private static final String NV12_FRAGMENT_SHADER = """
+            #version 120
+            #extension GL_ARB_texture_rectangle : enable
+            uniform sampler2DRect texY;
+            uniform sampler2DRect texC;
+            uniform mat3 conv;
+            uniform vec3 yuvOffset;
+            void main() {
+                float y = texture2DRect(texY, gl_TexCoord[0].st).r;
+                vec2 c = texture2DRect(texC, gl_TexCoord[0].st * 0.5).ra;
+                vec3 rgb = conv * (vec3(y, c.x, c.y) - yuvOffset);
+                gl_FragColor = vec4(rgb, 1.0);
+            }
+            """;
+
+    private boolean ensureNv12Pipeline() {
+        if (nv12Program >= 0) {
+            return true;
+        }
+        int shader = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(shader, NV12_FRAGMENT_SHADER);
+        glCompileShader(shader);
+        if (glGetShaderi(shader, GL_COMPILE_STATUS) == GL_FALSE) {
+            System.err.println("[GlVideoRenderer] NV12 shader compile failed: "
+                    + glGetShaderInfoLog(shader));
+            glDeleteShader(shader);
+            nv12Failed = true;
+            return false;
+        }
+        int program = glCreateProgram();
+        glAttachShader(program, shader);
+        glLinkProgram(program);
+        glDeleteShader(shader);
+        if (glGetProgrami(program, GL_LINK_STATUS) == GL_FALSE) {
+            System.err.println("[GlVideoRenderer] NV12 program link failed: "
+                    + glGetProgramInfoLog(program));
+            glDeleteProgram(program);
+            nv12Failed = true;
+            return false;
+        }
+        nv12Program = program;
+        nv12ConvUniform = glGetUniformLocation(program, "conv");
+        nv12OffsetUniform = glGetUniformLocation(program, "yuvOffset");
+        glUseProgram(program);
+        glUniform1i(glGetUniformLocation(program, "texY"), 0);
+        glUniform1i(glGetUniformLocation(program, "texC"), 1);
+        glUseProgram(0);
+
+        nv12TexY = glGenTextures();
+        nv12TexC = glGenTextures();
+        for (int tex : new int[] {nv12TexY, nv12TexC}) {
+            glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
+        return true;
     }
 
     /**
@@ -188,6 +351,9 @@ public final class GlVideoRenderer implements AutoCloseable {
             if (framebuffer != -1) glDeleteFramebuffersEXT(framebuffer);
             if (targetTexture != -1) glDeleteTextures(targetTexture);
             if (sourceTexture != -1) glDeleteTextures(sourceTexture);
+            if (nv12TexY != -1) glDeleteTextures(nv12TexY);
+            if (nv12TexC != -1) glDeleteTextures(nv12TexC);
+            if (nv12Program >= 0) glDeleteProgram(nv12Program);
             GL.setCapabilities(null);
             CGL.CGLSetCurrentContext(0);
             CGL.CGLDestroyContext(context);

@@ -1,6 +1,8 @@
 package io.github.ghosthack.mediabrowser.media.ffm.bind.bundled;
 
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVChannelLayout;
+import io.github.ghosthack.ffmpegffm.ffmpeg.AVCodecContext;
+import io.github.ghosthack.ffmpegffm.ffmpeg.AVCodecHWConfig;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVCodecParameters;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVDictionaryEntry;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVFormatContext;
@@ -9,11 +11,14 @@ import io.github.ghosthack.ffmpegffm.ffmpeg.AVInputFormat;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVPacket;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVRational;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVStream;
+import io.github.ghosthack.ffmpegffm.ffmpeg.AVStreamGroup;
+import io.github.ghosthack.ffmpegffm.ffmpeg.AVStreamGroupTileGrid;
 import io.github.ghosthack.ffmpegffm.ffmpeg.FFmpeg;
 import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.Ffm;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegBindings;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.Rational;
+import io.github.ghosthack.mediabrowser.media.ffm.bind.TileGrid;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -126,6 +131,60 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
         return FFmpeg.av_find_best_stream(ctx, mediaType, -1, -1, decoderRet, 0);
     }
 
+    // ---- stream groups -----------------------------------------------------
+
+    @Override
+    public int nbStreamGroups(MemorySegment ctx) {
+        return AVFormatContext.nb_stream_groups(ctx);
+    }
+
+    @Override
+    public TileGrid tileGrid(MemorySegment ctx, int index) {
+        MemorySegment groups = AVFormatContext.stream_groups(ctx)
+                .reinterpret((index + 1L) * ValueLayout.ADDRESS.byteSize());
+        MemorySegment group = groups.getAtIndex(ValueLayout.ADDRESS, index)
+                .reinterpret(AVStreamGroup.sizeof());
+        if (AVStreamGroup.type(group) != FFmpeg.AV_STREAM_GROUP_PARAMS_TILE_GRID()) {
+            return null;
+        }
+        MemorySegment grid = AVStreamGroup.params.tile_grid(AVStreamGroup.params(group))
+                .reinterpret(AVStreamGroupTileGrid.sizeof());
+        int nbTiles = AVStreamGroupTileGrid.nb_tiles(grid);
+        int nbStreams = AVStreamGroup.nb_streams(group);
+        if (nbTiles <= 0 || nbStreams <= 0) {
+            return null;
+        }
+        MemorySegment offsets = AVStreamGroupTileGrid.offsets(grid)
+                .reinterpret(nbTiles * AVStreamGroupTileGrid.offsets.sizeof());
+        MemorySegment streams = AVStreamGroup.streams(group)
+                .reinterpret(nbStreams * ValueLayout.ADDRESS.byteSize());
+        TileGrid.Tile[] tiles = new TileGrid.Tile[nbTiles];
+        for (int i = 0; i < nbTiles; i++) {
+            MemorySegment offset = AVStreamGroupTileGrid.offsets.asSlice(offsets, i);
+            int groupLocal = AVStreamGroupTileGrid.offsets.idx(offset);
+            if (groupLocal < 0 || groupLocal >= nbStreams) {
+                throw new MediaException("ffmpeg: tile grid references stream "
+                        + groupLocal + " outside its group of " + nbStreams);
+            }
+            MemorySegment stream = streams.getAtIndex(ValueLayout.ADDRESS, groupLocal)
+                    .reinterpret(AVStream.layout().byteSize());
+            tiles[i] = new TileGrid.Tile(AVStream.index(stream),
+                    AVStreamGroupTileGrid.offsets.horizontal(offset),
+                    AVStreamGroupTileGrid.offsets.vertical(offset));
+        }
+        return new TileGrid(
+                AVStreamGroupTileGrid.coded_width(grid),
+                AVStreamGroupTileGrid.coded_height(grid),
+                AVStreamGroupTileGrid.horizontal_offset(grid),
+                AVStreamGroupTileGrid.vertical_offset(grid),
+                AVStreamGroupTileGrid.width(grid),
+                AVStreamGroupTileGrid.height(grid),
+                Ffm.exifOrientationFromSideData(
+                        AVStreamGroupTileGrid.coded_side_data(grid),
+                        AVStreamGroupTileGrid.nb_coded_side_data(grid)),
+                tiles);
+    }
+
     @Override
     public MemorySegment codecpar(MemorySegment stream) {
         return AVStream.codecpar(stream).reinterpret(AVCodecParameters.layout().byteSize());
@@ -167,6 +226,14 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     }
 
     @Override
+    public int videoExifOrientation(MemorySegment stream) {
+        MemorySegment par = AVStream.codecpar(stream);
+        return Ffm.exifOrientationFromSideData(
+                AVCodecParameters.coded_side_data(par),
+                AVCodecParameters.nb_coded_side_data(par));
+    }
+
+    @Override
     public int parWidth(MemorySegment codecpar) {
         return AVCodecParameters.width(codecpar);
     }
@@ -200,8 +267,24 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     }
 
     @Override
+    public int parFormat(MemorySegment codecpar) {
+        return AVCodecParameters.format(codecpar);
+    }
+
+    @Override
     public String codecName(int codecId) {
         return Ffm.cstr(FFmpeg.avcodec_get_name(codecId));
+    }
+
+    @Override
+    public MemorySegment findDecoder(int codecId) {
+        return FFmpeg.avcodec_find_decoder(codecId);
+    }
+
+    @Override
+    public void setAutoThreads(MemorySegment cctx) {
+        AVCodecContext.thread_count(
+                cctx.reinterpret(AVCodecContext.layout().byteSize()), 0);
     }
 
     @Override
@@ -274,6 +357,72 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
         return FFmpeg.avcodec_receive_frame(cctx, frame);
     }
 
+    // ---- hardware decode ---------------------------------------------------
+
+    @Override
+    public MemorySegment hwDeviceCreate(int deviceType) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment holder = arena.allocate(ValueLayout.ADDRESS);
+            int err = FFmpeg.av_hwdevice_ctx_create(holder, deviceType,
+                    MemorySegment.NULL, MemorySegment.NULL, 0);
+            return err < 0 ? MemorySegment.NULL : holder.get(ValueLayout.ADDRESS, 0);
+        }
+    }
+
+    @Override
+    public void hwDeviceUnref(MemorySegment deviceRef) {
+        if (deviceRef.equals(MemorySegment.NULL)) return;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment holder = arena.allocate(ValueLayout.ADDRESS);
+            holder.set(ValueLayout.ADDRESS, 0, deviceRef);
+            FFmpeg.av_buffer_unref(holder);
+        }
+    }
+
+    @Override
+    public int hwPixFmtFor(MemorySegment codec, int deviceType) {
+        for (int i = 0; ; i++) {
+            MemorySegment cfg = FFmpeg.avcodec_get_hw_config(codec, i);
+            if (cfg.equals(MemorySegment.NULL)) {
+                return -1;
+            }
+            cfg = cfg.reinterpret(AVCodecHWConfig.sizeof());
+            if (AVCodecHWConfig.device_type(cfg) == deviceType
+                    && (AVCodecHWConfig.methods(cfg)
+                            & FFmpeg.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX()) != 0) {
+                return AVCodecHWConfig.pix_fmt(cfg);
+            }
+        }
+    }
+
+    @Override
+    public void requestHwDecode(Arena stubArena, MemorySegment cctx,
+                                MemorySegment deviceRef, int hwPixFmt) {
+        MemorySegment sized = cctx.reinterpret(AVCodecContext.layout().byteSize());
+        MemorySegment ref = FFmpeg.av_buffer_ref(deviceRef);
+        if (ref.equals(MemorySegment.NULL)) {
+            throw new MediaException("ffmpeg: av_buffer_ref failed for the hw device");
+        }
+        AVCodecContext.hw_device_ctx(sized, ref);
+        // The offered list is AV_PIX_FMT_NONE-terminated; libavcodec never
+        // offers more than a handful of formats, so a generous bound is safe.
+        MemorySegment cb = AVCodecContext.get_format.allocate((c, fmts) -> {
+            MemorySegment list = fmts.reinterpret(64 * 4L);
+            for (int i = 0; i < 64; i++) {
+                int fmt = list.get(ValueLayout.JAVA_INT, i * 4L);
+                if (fmt == hwPixFmt) return hwPixFmt;
+                if (fmt == FFmpeg.AV_PIX_FMT_NONE()) break;
+            }
+            return list.get(ValueLayout.JAVA_INT, 0);
+        }, stubArena);
+        AVCodecContext.get_format(sized, cb);
+    }
+
+    @Override
+    public int hwFrameTransfer(MemorySegment dst, MemorySegment src) {
+        return FFmpeg.av_hwframe_transfer_data(dst, src, 0);
+    }
+
     @Override
     public int frameWidth(MemorySegment frame) {
         return AVFrame.width(frame);
@@ -315,6 +464,21 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     }
 
     @Override
+    public long frameHwHandle(MemorySegment frame) {
+        return AVFrame.data(frame, 3).address();
+    }
+
+    @Override
+    public int frameColorspace(MemorySegment frame) {
+        return AVFrame.colorspace(frame);
+    }
+
+    @Override
+    public int frameColorRange(MemorySegment frame) {
+        return AVFrame.color_range(frame);
+    }
+
+    @Override
     public MemorySegment swsGetContextToBgra(int srcW, int srcH, int srcFmt,
                                              int dstW, int dstH, int flags) {
         return FFmpeg.sws_getContext(srcW, srcH, srcFmt, dstW, dstH,
@@ -341,6 +505,11 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     @Override
     public int swsArea() {
         return FFmpeg.SWS_AREA();
+    }
+
+    @Override
+    public int pixFmtBgra() {
+        return FFmpeg.AV_PIX_FMT_BGRA();
     }
 
     @Override

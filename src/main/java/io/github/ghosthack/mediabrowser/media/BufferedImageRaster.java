@@ -10,7 +10,7 @@ import java.lang.foreign.ValueLayout;
 
 /**
  * Shared {@link BufferedImage} → {@link RasterFrame} converter for the
- * ImageIO/AWT-based media backends (twelvemonkeys / javacv / jcodec). Produces
+ * ImageIO/AWT-based media backends (twelvemonkeys / jcodec). Produces
  * tightly packed, straight-alpha BGRA bytes (B,G,R,A; 4 bytes per pixel,
  * row-major) — the contract every {@link RasterFrame} and the GL presentation
  * path expects.
@@ -23,9 +23,9 @@ import java.lang.foreign.ValueLayout;
  *       {@link DataBufferInt} (the GIF compositor's INT_ARGB canvas lands here).</li>
  *   <li><b>byte-interleaved fast path</b> — {@code TYPE_3BYTE_BGR} (B,G,R bytes)
  *       and {@code TYPE_4BYTE_ABGR} (A,B,G,R bytes), packed straight off their
- *       backing {@link DataBufferByte}. These are exactly what JavaCV's
- *       {@code Java2DFrameConverter} and jcodec's {@code AWTUtil} emit, so the
- *       two pull-decode video backends fill their reusable native buffer with
+ *       backing {@link DataBufferByte}. These are exactly what jcodec's
+ *       {@code AWTUtil} emits, so the pull-decode video backend fills its
+ *       reusable native buffer with
  *       <em>zero</em> per-frame allocation (the {@code getRGB} path, by contrast,
  *       allocates a temporary per scanline inside AWT's {@code ColorModel}).</li>
  * </ul>
@@ -80,7 +80,7 @@ public final class BufferedImageRaster {
      * {@code scratch} for the row staging. Used by the playback streams to fill
      * their reusable native buffer on every frame with <em>zero</em> per-frame
      * heap allocation when the source is one of the fast-path rasters (INT or the
-     * byte-interleaved BGR/ABGR that JavaCV and jcodec emit).
+     * byte-interleaved BGR/ABGR that jcodec emits).
      *
      * <p>Writes row-by-row through {@code scratch} rather than materializing a
      * whole-frame {@code byte[]} first, so a stream that constructs one

@@ -2,6 +2,7 @@ package io.github.ghosthack.mediabrowser.ui;
 
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
 import io.github.ghosthack.mediabrowser.media.MediaService;
+import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
 
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
@@ -14,6 +15,7 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Supplier;
 
 /**
@@ -69,6 +71,11 @@ public final class DiagnosticsPanel extends VBox {
                         s.activeThreads() + " of " + s.poolThreads()),
                 new InfoPanel.Row("Items in memory", Integer.toString(s.cachedItems())),
                 new InfoPanel.Row("Memory", MediaProbe.humanBytes(s.cachedBytes())
-                        + " of " + MediaProbe.humanBytes(s.budgetBytes()))));
+                        + " of " + MediaProbe.humanBytes(s.budgetBytes())),
+                // Playback decode routing (FFM backends): the witness that
+                // makes the auto hw/software choice inspectable.
+                new InfoPanel.Row("Playback sessions",
+                        HwDecode.hwSessions() + " hw / " + HwDecode.swSessions()
+                        + " sw (" + HwDecode.policy().name().toLowerCase(Locale.ROOT) + ")")));
     }
 }

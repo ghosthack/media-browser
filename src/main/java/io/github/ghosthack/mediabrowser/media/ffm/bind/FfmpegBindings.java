@@ -74,6 +74,20 @@ public interface FfmpegBindings {
      */
     int findBestStream(MemorySegment ctx, int mediaType, MemorySegment decoderRet);
 
+    // ---- stream groups -----------------------------------------------------
+
+    /** {@code AVFormatContext.nb_stream_groups} (0 before FFmpeg 7.1). */
+    int nbStreamGroups(MemorySegment ctx);
+
+    /**
+     * The stream group at {@code index} lifted to a {@link TileGrid}, or
+     * {@code null} when that group is not an
+     * {@code AV_STREAM_GROUP_PARAMS_TILE_GRID} — the demuxed form of a tiled
+     * HEIF/AVIF still. Group-local tile indexes are resolved to format-context
+     * stream indexes in the lift.
+     */
+    TileGrid tileGrid(MemorySegment ctx, int index);
+
     // ---- stream reads ----------------------------------------------------
 
     /** The right-sized {@code AVCodecParameters*} for the stream. */
@@ -100,6 +114,15 @@ public interface FfmpegBindings {
      */
     int videoRotationQuarterTurnsCw(MemorySegment stream);
 
+    /**
+     * The stream's display-matrix orientation as an EXIF code (1..8; 1 when
+     * absent) — rotation and mirror, for the stills paths that bake full
+     * orientation ({@code Ffm.exifOrientationFromSideData} over the same side
+     * data as {@link #videoRotationQuarterTurnsCw}, which stays rotation-only
+     * for playback).
+     */
+    int videoExifOrientation(MemorySegment stream);
+
     // ---- codec parameters ------------------------------------------------
 
     int parWidth(MemorySegment codecpar);
@@ -118,8 +141,14 @@ public interface FfmpegBindings {
      */
     int parChannels(MemorySegment codecpar);
 
+    /** {@code AVCodecParameters.format} — the pixel format for video streams. */
+    int parFormat(MemorySegment codecpar);
+
     /** {@code avcodec_get_name(codecId)} as a String. */
     String codecName(int codecId);
+
+    /** {@code avcodec_find_decoder(codecId)}, possibly {@code MemorySegment.NULL}. */
+    MemorySegment findDecoder(int codecId);
 
     // ---- decode ----------------------------------------------------------
 
@@ -128,6 +157,14 @@ public interface FfmpegBindings {
     int parametersToContext(MemorySegment cctx, MemorySegment codecpar);
 
     int open2(MemorySegment cctx, MemorySegment codec);
+
+    /**
+     * Sets {@code AVCodecContext.thread_count = 0} (auto) before
+     * {@link #open2}: libavcodec defaults to a single thread, and frame
+     * threading pipelines independent intra frames — near-linear speedup on
+     * tile-grid composes and multi-frame decode generally.
+     */
+    void setAutoThreads(MemorySegment cctx);
 
     void freeContext(MemorySegment cctxPtr);
 
@@ -154,6 +191,47 @@ public interface FfmpegBindings {
 
     int receiveFrame(MemorySegment cctx, MemorySegment frame);
 
+    // ---- hardware decode -------------------------------------------------
+
+    /**
+     * {@code av_hwdevice_ctx_create} for {@code deviceType} (an
+     * {@code AVHWDeviceType} value, see {@code HwDecode}) with the default
+     * device. Returns the owning {@code AVBufferRef*}, or
+     * {@code MemorySegment.NULL} when the device cannot be created here —
+     * the caller decides whether that is a loud error (required hardware) or
+     * a route-to-software (auto).
+     */
+    MemorySegment hwDeviceCreate(int deviceType);
+
+    /** Releases a {@link #hwDeviceCreate} reference ({@code av_buffer_unref}). */
+    void hwDeviceUnref(MemorySegment deviceRef);
+
+    /**
+     * The hardware pixel format {@code codec} decodes to for {@code deviceType}
+     * via the {@code hw_device_ctx} method ({@code avcodec_get_hw_config}
+     * scan), or {@code -1} when the decoder advertises no such config — the
+     * codec-capability gate for auto routing.
+     */
+    int hwPixFmtFor(MemorySegment codec, int deviceType);
+
+    /**
+     * Requests hardware decode on {@code cctx} before {@link #open2}: stores a
+     * new reference to {@code deviceRef} in {@code hw_device_ctx} and installs
+     * a {@code get_format} callback preferring {@code hwPixFmt} (first
+     * software format otherwise — the caller detects that on the first frame
+     * and applies its policy). The callback stub must outlive the codec
+     * context and may be invoked from a decoder worker thread, so
+     * {@code stubArena} must be a shared arena closed after the context.
+     */
+    void requestHwDecode(Arena stubArena, MemorySegment cctx, MemorySegment deviceRef, int hwPixFmt);
+
+    /**
+     * {@code av_hwframe_transfer_data(dst, src, 0)} — GPU→CPU readback of a
+     * hardware frame into {@code dst} (format auto-picked when unset; NV12
+     * for VideoToolbox). Returns the FFmpeg error code.
+     */
+    int hwFrameTransfer(MemorySegment dst, MemorySegment src);
+
     // ---- frame reads -----------------------------------------------------
 
     int frameWidth(MemorySegment frame);
@@ -174,6 +252,19 @@ public interface FfmpegBindings {
 
     long framePts(MemorySegment frame);
 
+    /**
+     * {@code AVFrame.data[3]} as a raw address — the hardware handle of a hw
+     * frame (a {@code CVPixelBufferRef} for VideoToolbox). {@code 0} when
+     * absent.
+     */
+    long frameHwHandle(MemorySegment frame);
+
+    /** {@code AVFrame.colorspace} ({@code AVCOL_SPC_*}; BT.709 is 1). */
+    int frameColorspace(MemorySegment frame);
+
+    /** {@code AVFrame.color_range} ({@code AVCOL_RANGE_*}; full/JPEG is 2). */
+    int frameColorRange(MemorySegment frame);
+
     // ---- swscale ---------------------------------------------------------
 
     /**
@@ -191,6 +282,9 @@ public interface FfmpegBindings {
     int swsBilinear();
 
     int swsArea();
+
+    /** {@code AV_PIX_FMT_BGRA}, for BGRA-source rescales (tile-grid canvases). */
+    int pixFmtBgra();
 
     // ---- dictionaries ----------------------------------------------------
 
