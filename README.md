@@ -19,13 +19,15 @@ mvn javafx:run -Djavafx.args="/some/dir"        # opens at /some/dir
 ## Decode backends
 
 The decode backend is chosen at startup (Preferences ▸ Media decode backend);
-the default is `ffmpeg-ffm` (bundled FFmpeg for stills and video) where the
-ffmpeg-ffm natives cover the platform (macos-arm64, windows-x64), degrading to
+the default is `ffmpeg-ffm-turbojpeg` (bundled FFmpeg for stills and video,
+plus a TurboJPEG thumbnail fast path) where the ffmpeg-ffm/turbojpeg-ffm
+natives cover the platform (macos-arm64, windows-x64), degrading to
 `twelvemonkeys-javacv` elsewhere:
 
 | Backend | Stills | Video | Native? |
 |---|---|---|---|
-| `ffmpeg-ffm` *(default)* | FFmpeg (incl. HEIC/AVIF) | FFmpeg (all codecs) | yes, fetched by Maven (classifier jars) |
+| `ffmpeg-ffm-turbojpeg` *(default)* | FFmpeg + JPEG thumbnails via libjpeg-turbo | FFmpeg (all codecs) | yes, fetched by Maven (classifier jars) |
+| `ffmpeg-ffm` | FFmpeg only (incl. HEIC/AVIF) | FFmpeg (all codecs) | yes, fetched by Maven (classifier jars) |
 | `twelvemonkeys-ffmpeg-ffm` | TwelveMonkeys ImageIO (JPEG/CMYK, TIFF, WebP, PSD, …) | GIF + bundled FFmpeg (ffmpeg-ffm) | yes, fetched by Maven (classifier jars) |
 | `apple` | Apple ImageIO | AVFoundation | macOS system frameworks |
 | `windows-native` | WIC | Media Foundation | Windows system APIs |

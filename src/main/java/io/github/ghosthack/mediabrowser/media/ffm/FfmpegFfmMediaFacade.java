@@ -1,5 +1,6 @@
 package io.github.ghosthack.mediabrowser.media.ffm;
 
+import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
@@ -59,16 +60,38 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     private final FfmpegBindings ffmpeg;
     private final FfmpegAv av;
     private final FfmpegMetadata metadata;
+    private final boolean turboJpeg;
 
-    /** No-arg for the reflective {@code MediaBackend} factories. */
+    /** No-arg for the reflective {@code MediaBackend} factories: pure FFmpeg. */
     public FfmpegFfmMediaFacade() {
         this(new BundledFfmpegBindings());
     }
 
     public FfmpegFfmMediaFacade(FfmpegBindings ffmpeg) {
+        this(ffmpeg, false);
+    }
+
+    private FfmpegFfmMediaFacade(FfmpegBindings ffmpeg, boolean turboJpeg) {
         this.ffmpeg = ffmpeg;
         this.av = new FfmpegAv(ffmpeg);   // also quiets libav logging
         this.metadata = new FfmpegMetadata(ffmpeg);
+        this.turboJpeg = turboJpeg;
+    }
+
+    /**
+     * The {@code ffmpeg-ffm-turbojpeg} variant: identical except baseline-JPEG
+     * thumbnails decode through libjpeg-turbo's scaled decode
+     * ({@link TurboJpegStills}). Fails loudly when the turbojpeg-ffm natives
+     * are absent on this platform — choosing this backend is an explicit
+     * request for the fast path, not a hint.
+     */
+    public static FfmpegFfmMediaFacade withTurboJpeg() {
+        if (!TurboJpegStills.available()) {
+            throw new MediaException(
+                    "turbojpeg-ffm natives unavailable on this platform; "
+                    + "use the ffmpeg-ffm backend instead");
+        }
+        return new FfmpegFfmMediaFacade(new BundledFfmpegBindings(), true);
     }
 
     @Override
@@ -104,9 +127,12 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     @Override
     public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
         boolean jpeg = isJpeg(file);
-        if (jpeg) {
-            // libjpeg-turbo shrink-on-load fast path; declines (empty) fall
-            // through to the ordinary FFmpeg decode below.
+        if (jpeg && turboJpeg) {
+            // libjpeg-turbo shrink-on-load fast path (the -turbojpeg backend
+            // variant only). Declines — progressive/CMYK/lossless, which
+            // TurboJPEG handles worse or not at all — fall through to the
+            // ordinary FFmpeg decode below: capability routing, not a
+            // failure fallback.
             var fast = TurboJpegStills.thumbnail(file, maxEdge, mode);
             if (fast.isPresent()) {
                 return new Thumbnail(fast, MediaKind.IMAGE);
@@ -142,7 +168,8 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
 
     @Override
     public String nativeVersions() {
-        return "Bundled FFmpeg " + av.version();
+        return "Bundled FFmpeg " + av.version()
+                + (turboJpeg ? "; TurboJPEG (baseline-JPEG thumbnails)" : "");
     }
 
     @Override
