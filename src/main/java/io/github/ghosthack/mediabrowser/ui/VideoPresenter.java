@@ -2,6 +2,7 @@ package io.github.ghosthack.mediabrowser.ui;
 
 import io.github.ghosthack.mediabrowser.gl.GlVideoRenderer;
 import io.github.ghosthack.mediabrowser.media.VideoPlayer;
+import io.github.ghosthack.mediabrowser.media.VideoStream;
 
 import javafx.application.Platform;
 import javafx.scene.image.ImageView;
@@ -147,18 +148,37 @@ final class GlVideoPresenter implements VideoPlayer.FrameSink {
 
     @Override
     public void frame(MemorySegment bgra, int width, int height, long positionMicros) {
-        VideoPresenter.Slot slot = null;
+        VideoPresenter.Slot slot = acquireSlot();
+        if (slot == null) return; // the FX thread is behind: drop this frame
+        renderer.render(bgra, slot.buffer);
+        present(slot);
+    }
+
+    @Override
+    public boolean gpuFrame(VideoStream.GpuFrame frame, long positionMicros) {
+        VideoPresenter.Slot slot = acquireSlot();
+        if (slot == null) return true; // dropping a frame is handling it
+        if (!renderer.renderSurface(frame.cvPixelBuffer(),
+                frame.codedWidth(), frame.codedHeight(),
+                frame.containerQuarterTurnsCw(), frame.bt709(), frame.fullRange(),
+                slot.buffer)) {
+            slot.busy.set(false);
+            return false; // zero-copy unavailable for this frame → BGRA path
+        }
+        present(slot);
+        return true;
+    }
+
+    private VideoPresenter.Slot acquireSlot() {
         for (VideoPresenter.Slot s : slots) {
             if (s.busy.compareAndSet(false, true)) {
-                slot = s;
-                break;
+                return s;
             }
         }
-        if (slot == null) return; // the FX thread is behind: drop this frame
+        return null;
+    }
 
-        renderer.render(bgra, slot.buffer);
-
-        VideoPresenter.Slot chosen = slot;
+    private void present(VideoPresenter.Slot chosen) {
         Platform.runLater(() -> {
             if (!disposed.get()) {
                 chosen.pixels.updateBuffer(pb -> null); // whole buffer is dirty
@@ -331,6 +351,11 @@ final class FallbackVideoSink implements VideoPlayer.FrameSink {
     @Override
     public void frame(MemorySegment bgra, int width, int height, long positionMicros) {
         if (delegate != null) delegate.frame(bgra, width, height, positionMicros);
+    }
+
+    @Override
+    public boolean gpuFrame(VideoStream.GpuFrame frame, long positionMicros) {
+        return delegate != null && delegate.gpuFrame(frame, positionMicros);
     }
 
     @Override

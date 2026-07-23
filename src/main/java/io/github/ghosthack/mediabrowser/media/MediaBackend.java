@@ -25,9 +25,9 @@ import java.util.List;
  * compiles unchanged in source trees that omit some backends (the public
  * source distribution drops the pure-Java and FFmpeg/libvips stacks). A
  * constant whose implementation classes are absent reports
- * {@link #isAvailable()} {@code false}, drops out of {@link #available()}, and
- * any persisted selection naming it falls back to the default in
- * {@link #fromSettings(String)}.</p>
+ * {@link #isAvailable()} {@code false} and drops out of {@link #available()};
+ * a persisted selection naming it makes {@link #fromSettings(String)} throw —
+ * an explicit selection is honored or errors, never silently substituted.</p>
  */
 public enum MediaBackend {
     // Bundled FFmpeg solo, pure: stills AND video through the ffmpeg-ffm
@@ -57,18 +57,12 @@ public enum MediaBackend {
             noArg("windows.WindowsMediaFacade").onPlatform(isWindowsOs())),
     // TwelveMonkeys ImageIO: enhanced still-image decode (JPEG/CMYK,
     // TIFF, WebP, PSD, etc.) + animated GIF as video. No fallback here
-    // (TWELVEMONKEYS solo); the 12M+JavaCV/jcodec backends pass a video
+    // (TWELVEMONKEYS solo); the 12M+ffm/jcodec backends pass a video
     // fallback. Anything non-still/non-GIF throws.
     TWELVEMONKEYS("twelvemonkeys", "TwelveMonkeys ImageIO (images + GIF)",
             nullFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade")),
-    // TwelveMonkeys stills/GIF + JavaCV (bundled FFmpeg) for everything
-    // else (video/audio).
-    TWELVEMONKEYS_JAVACV("twelvemonkeys-javacv", "TwelveMonkeys ImageIO + JavaCV video",
-            videoFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade",
-                    "javacv.JavaCvMediaFacade")),
     // TwelveMonkeys stills/GIF + bundled FFmpeg (ffmpeg-ffm artifact) for
-    // video/audio — the JAVACV pairing with the FFM backend instead of
-    // bytedeco. Was the default 2026-07-21..22; FFMPEG_FFM's faster JPEG
+    // video/audio. Was the default 2026-07-21..22; FFMPEG_FFM's faster JPEG
     // decode won (docs/ffm-retirement-handoff.md), but this pairing keeps
     // the wider ImageIO still-format coverage (PSD/ICO/CMYK exotics).
     TWELVEMONKEYS_FFMPEG_FFM("twelvemonkeys-ffmpeg-ffm", "TwelveMonkeys ImageIO + bundled FFmpeg video",
@@ -81,9 +75,6 @@ public enum MediaBackend {
     TWELVEMONKEYS_JCODEC("twelvemonkeys-jcodec", "TwelveMonkeys ImageIO + jcodec video",
             videoFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade",
                     "jcodec.JcodecMediaFacade")),
-    // JavaCV solo: bundled FFmpeg for both stills and video.
-    JAVACV("javacv", "JavaCV (bundled FFmpeg: images + video)",
-            noArg("javacv.JavaCvMediaFacade")),
     // 100% pure Java: images and video decode with no native
     // dependency; audio and any codec/container the pure stack declines
     // throw (no fallback). Pass a fallback facade to PureMediaFacade
@@ -217,22 +208,28 @@ public enum MediaBackend {
      * Looks classes up without initializing them, so no native libraries load.
      */
     public boolean isAvailable() {
+        return unavailabilityReason() == null;
+    }
+
+    /** Why this backend cannot run here — for error messages; null when available. */
+    private String unavailabilityReason() {
         if (!spec.platformSupported()) {
-            return false;
+            return "it is gated off this OS";
         }
         for (String className : spec.requiredClasses()) {
             try {
                 Class.forName(className, false, MediaBackend.class.getClassLoader());
             } catch (ClassNotFoundException e) {
-                return false;
+                return "class " + className + " is not part of this build";
             }
         }
         for (String resource : spec.requiredResources()) {
             if (MediaBackend.class.getClassLoader().getResource(resource) == null) {
-                return false;
+                return "classpath resource " + resource
+                        + " is missing (no bundled natives for this platform)";
             }
         }
-        return true;
+        return null;
     }
 
     /** The backends present in this build, in declaration order — menu source. */
@@ -246,22 +243,40 @@ public enum MediaBackend {
      * TurboJPEG thumbnail fast path, the fastest measured JPEG option
      * (benchmarks in docs/ffm-retirement-handoff.md; formats FFmpeg doesn't
      * claim, e.g. PSD/ICO, need an explicit TwelveMonkeys-paired backend).
-     * In trees that omit {@code media/ffm} it degrades to
-     * {@link #TWELVEMONKEYS_JAVACV}, bundled-FFmpeg video over bytedeco.
+     * Unconditional — deliberately no availability probe: in a tree or on a
+     * platform where this backend cannot run, {@link #create()} fails loudly
+     * at startup ({@code App}'s startup check then visibly replaces the
+     * setting) rather than silently substituting another decode stack, so the
+     * backend in use is never a guess. (An availability-degrading default —
+     * latterly to the JavaCV pair retired 2026-07-22 — filled this role until
+     * determinism won.)
      */
     public static MediaBackend defaultBackend() {
-        return FFMPEG_FFM_TURBOJPEG.isAvailable() ? FFMPEG_FFM_TURBOJPEG : TWELVEMONKEYS_JAVACV;
+        return FFMPEG_FFM_TURBOJPEG;
     }
 
     /**
      * Parses the persisted setting value; matches by {@code settingsValue}.
-     * Unknown values — and backends whose classes are absent from this build —
-     * resolve to {@link #defaultBackend()}.
+     * Unknown (and retired) values resolve to {@link #defaultBackend()} — the
+     * stale-{@code app.properties} migration path. A value that names a
+     * <em>recognized</em> backend which cannot run here throws instead of
+     * silently substituting another: an explicit selection is honored or
+     * errors, never guessed ({@code App}'s startup check turns the throw into
+     * the visible replace-with-jcodec path; {@code SmokeTest} surfaces it raw).
+     *
+     * @throws IllegalStateException when {@code value} names a recognized
+     *         backend that is unavailable in this build / on this platform
      */
     public static MediaBackend fromSettings(String value) {
         if (value != null) {
             for (MediaBackend backend : values()) {
-                if (backend.settingsValue.equalsIgnoreCase(value) && backend.isAvailable()) {
+                if (backend.settingsValue.equalsIgnoreCase(value)) {
+                    String reason = backend.unavailabilityReason();
+                    if (reason != null) {
+                        throw new IllegalStateException("media.backend '" + value
+                                + "' names " + backend.name() + " (" + backend.label
+                                + "), which cannot run here: " + reason);
+                    }
                     return backend;
                 }
             }

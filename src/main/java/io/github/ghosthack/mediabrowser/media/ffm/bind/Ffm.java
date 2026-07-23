@@ -83,11 +83,83 @@ public final class Ffm {
      * stream's coded side data ({@code AVStream.side_data} in 4.x,
      * {@code AVCodecParameters.coded_side_data} in 7.x+). Returns the clockwise
      * quarter-turns (0..3) needed to display the frame upright, or {@code 0}
-     * when there is no display matrix.
+     * when there is no display matrix. Rotation only — the video path's
+     * contract; stills use {@link #exifOrientationFromSideData}, which also
+     * honours mirroring.
      */
     public static int rotationQuarterTurnsFromSideData(MemorySegment sideDataArray, int count) {
-        if (count <= 0 || sideDataArray == null || sideDataArray.equals(MemorySegment.NULL)) {
+        int[] m = displayMatrixFromSideData(sideDataArray, count);
+        return m == null ? 0 : VideoRotation.quarterTurnsCw(displayRotationDegrees(m));
+    }
+
+    /**
+     * The display matrix as a full EXIF orientation (1..8) — rotation
+     * <em>and</em> mirror, so an {@code imir}-mirrored HEIF item bakes
+     * correctly (the mov demuxer encodes {@code irot}/{@code imir} as
+     * rotation-then-column-flip in this matrix). Returns {@code 1} when there
+     * is no display matrix; a matrix that is no axis-aligned orientation
+     * falls back to the nearest pure rotation, like the video path.
+     */
+    public static int exifOrientationFromSideData(MemorySegment sideDataArray, int count) {
+        int[] m = displayMatrixFromSideData(sideDataArray, count);
+        if (m == null) {
+            return 1;
+        }
+        int orientation = exifOrientationFromDisplayMatrix(m);
+        if (orientation != 0) {
+            return orientation;
+        }
+        return EXIF_FOR_QUARTER_TURNS[
+                VideoRotation.quarterTurnsCw(displayRotationDegrees(m))];
+    }
+
+    /** EXIF code realizing {@code q} clockwise quarter-turns (see RasterFrames). */
+    private static final int[] EXIF_FOR_QUARTER_TURNS = {1, 6, 3, 8};
+
+    /**
+     * Maps a display matrix to the EXIF orientation (1..8) whose
+     * {@code RasterFrames.applyExifOrientation} realizes the same
+     * stored-to-display transform, or {@code 0} when the matrix is not an
+     * axis-aligned orientation (skew, non-quarter rotation, singular).
+     *
+     * <p>Convention (libavutil/display.h): row vectors, image coordinates —
+     * {@code (x', y') = (x·m0 + y·m3, x·m1 + y·m4)} after per-axis scale
+     * normalization. The eight orientations are the eight sign patterns of an
+     * orthogonal axis-aligned 2×2; mirrored ones have negative determinant.</p>
+     */
+    public static int exifOrientationFromDisplayMatrix(int[] m) {
+        double scaleX = Math.hypot(m[0] / 65536.0, m[3] / 65536.0);
+        double scaleY = Math.hypot(m[1] / 65536.0, m[4] / 65536.0);
+        if (scaleX == 0.0 || scaleY == 0.0) {
             return 0;
+        }
+        int a = snap(m[0] / 65536.0 / scaleX);
+        int c = snap(m[3] / 65536.0 / scaleX);
+        int b = snap(m[1] / 65536.0 / scaleY);
+        int d = snap(m[4] / 65536.0 / scaleY);
+        if (a == 1 && b == 0 && c == 0 && d == 1) return 1;
+        if (a == -1 && b == 0 && c == 0 && d == 1) return 2;
+        if (a == -1 && b == 0 && c == 0 && d == -1) return 3;
+        if (a == 1 && b == 0 && c == 0 && d == -1) return 4;
+        if (a == 0 && b == 1 && c == 1 && d == 0) return 5;
+        if (a == 0 && b == 1 && c == -1 && d == 0) return 6;
+        if (a == 0 && b == -1 && c == -1 && d == 0) return 7;
+        if (a == 0 && b == -1 && c == 1 && d == 0) return 8;
+        return 0;
+    }
+
+    /** Snaps a normalized matrix entry to −1/0/1, or 2 when it is none of them (±2% tolerance). */
+    private static int snap(double v) {
+        if (Math.abs(v) < 0.02) return 0;
+        if (Math.abs(v - 1) < 0.02) return 1;
+        if (Math.abs(v + 1) < 0.02) return -1;
+        return 2;
+    }
+
+    /** The nine fixed-point ints of the first display matrix in the side-data array, or null. */
+    private static int[] displayMatrixFromSideData(MemorySegment sideDataArray, int count) {
+        if (count <= 0 || sideDataArray == null || sideDataArray.equals(MemorySegment.NULL)) {
+            return null;
         }
         MemorySegment arr = sideDataArray.reinterpret(count * SIDE_DATA_STRIDE);
         for (int i = 0; i < count; i++) {
@@ -98,16 +170,16 @@ public final class Ffm {
             MemorySegment data = arr.get(ValueLayout.ADDRESS, base + SIDE_DATA_DATA_OFFSET);
             long size = arr.get(ValueLayout.JAVA_LONG, base + SIDE_DATA_SIZE_OFFSET);
             if (data.equals(MemorySegment.NULL) || size < DISPLAY_MATRIX_BYTES) {
-                return 0;
+                return null;
             }
             MemorySegment matrix = data.reinterpret(DISPLAY_MATRIX_BYTES);
             int[] m = new int[9];
             for (int k = 0; k < 9; k++) {
                 m[k] = matrix.get(ValueLayout.JAVA_INT, k * 4L);
             }
-            return VideoRotation.quarterTurnsCw(displayRotationDegrees(m));
+            return m;
         }
-        return 0;
+        return null;
     }
 
     /**

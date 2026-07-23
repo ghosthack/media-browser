@@ -78,6 +78,19 @@ final class TurboJpegStills {
             return Optional.empty();
         }
         int orientation = exifOrientation(jpeg);
+        return decodeScaled(jpeg, maxEdge, mode)
+                .map(f -> RasterFrames.applyExifOrientation(f, orientation));
+    }
+
+    /**
+     * The scaled-decode core on raw JPEG bytes, orientation NOT applied —
+     * for callers whose orientation authority is outside the JPEG (e.g. the
+     * {@link LibRawStills} embedded-preview path, where LibRaw's flip wins).
+     */
+    static Optional<RasterFrame> decodeScaled(byte[] jpeg, int maxEdge, ThumbnailMode mode) {
+        if (!available() || maxEdge <= 0) {
+            return Optional.empty();
+        }
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handle = TurboJpeg.tj3InitVersion(
                     TurboJpeg.TJINIT_DECOMPRESS(), TurboJpeg.TURBOJPEG_VERSION_NUMBER());
@@ -116,8 +129,7 @@ final class TurboJpegStills {
                 byte[] bgra = new byte[sw * sh * 4];
                 MemorySegment.copy(dst, ValueLayout.JAVA_BYTE, 0, bgra, 0, bgra.length);
 
-                RasterFrame frame = Thumbnails.scale(new RasterFrame(sw, sh, bgra), maxEdge, mode);
-                return Optional.of(RasterFrames.applyExifOrientation(frame, orientation));
+                return Optional.of(Thumbnails.scale(new RasterFrame(sw, sh, bgra), maxEdge, mode));
             } finally {
                 TurboJpeg.tj3Destroy(handle);
             }

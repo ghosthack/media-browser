@@ -18,8 +18,10 @@
     <javafx.version>24.0.2</javafx.version>
     <lwjgl.version>3.4.1</lwjgl.version>
     <twelvemonkeys.version>3.13.1</twelvemonkeys.version>
-    <!-- JavaCV (bundled FFmpeg) for the JAVACV / TWELVEMONKEYS_JAVACV backends.
-         ffmpeg/javacpp versions are pinned to the JavaCV release. -->
+    <!-- JavaCV (bundled FFmpeg), test scope only: mints video fixtures via
+         FFmpegFrameRecorder (BackendEvaluationTest, JcodecMediaFacadeTest).
+         The JAVACV / TWELVEMONKEYS_JAVACV runtime backends were retired
+         2026-07-22. ffmpeg/javacpp versions are pinned to the JavaCV release. -->
     <javacv.version>1.5.13</javacv.version>
     <!-- FFmpeg preset version that ships with JavaCV 1.5.13. The preset
          coordinate is <ffmpeg-version>-<javacv-version>; verify it exists on
@@ -40,7 +42,7 @@
     <!-- Bundled-FFmpeg backend (FFMPEG_FFM): FFM stubs + self-extracting
          from-source LGPL natives, built in ../ffmpeg-ffm, on Maven Central.
          Classifier jars exist for macos-arm64 and windows-x64 only. -->
-    <ffmpegffm.version>8.1.2-0.1.0</ffmpegffm.version>
+    <ffmpegffm.version>8.1.2-0.2.0</ffmpegffm.version>
     <ffmpegffm.natives>macos-arm64</ffmpegffm.natives>
     <!-- libjpeg-turbo JPEG-thumbnail fast path (TurboJpegStills): FFM stubs +
          self-extracting natives, built in ../turbojpeg-ffm. Same platform
@@ -48,6 +50,11 @@
          runtime, they never break a build. -->
     <turbojpegffm.version>3.2.0-0.1.0</turbojpegffm.version>
     <turbojpegffm.natives>macos-arm64</turbojpegffm.natives>
+    <!-- Camera-RAW route (LibRawStills): FFM stubs + self-extracting natives,
+         built in ../libraw-ffm. Same platform coverage as ffmpeg-ffm; absent
+         natives mean RAW extensions are not claimed, they never break a build. -->
+    <librawffm.version>0.22.2-0.1.0</librawffm.version>
+    <librawffm.natives>macos-arm64</librawffm.natives>
     <junit.version>5.11.4</junit.version>
     <app.mainClass>io.github.ghosthack.mediabrowser.App</app.mainClass>
     <!-- Mosaic thumbnail/UI telemetry knobs, forwarded to the forked javafx:run
@@ -174,15 +181,17 @@
       <artifactId>imageio-thumbsdb</artifactId>
       <version>${twelvemonkeys.version}</version>
     </dependency>
-    <!-- JavaCV: FFmpegFrameGrabber pull-decode over bundled FFmpeg natives.
-         We pull only the ffmpeg preset (not javacv-platform / opencv / etc.);
-         the natives are single-platform via the ${javacpp.platform} classifier
-         (see the per-OS profiles). FFmpeg preset is LGPL/GPL depending on the
-         build — record for distribution. -->
+    <!-- JavaCV, TEST ONLY: FFmpegFrameRecorder mints the video fixtures the
+         backend-evaluation and jcodec tests decode. No runtime backend uses
+         it (JavaCV pair retired 2026-07-22), so nothing bytedeco ships in the
+         distribution. We pull only the ffmpeg preset (not javacv-platform /
+         opencv / etc.); the natives are single-platform via the
+         ${javacpp.platform} classifier (see the per-OS profiles). -->
     <dependency>
       <groupId>org.bytedeco</groupId>
       <artifactId>javacv</artifactId>
       <version>${javacv.version}</version>
+      <scope>test</scope>
       <exclusions>
         <!-- Strip every non-FFmpeg bytedeco preset javacv drags in (opencv,
              openblas, leptonica, tesseract, etc.); we only use FFmpeg. -->
@@ -202,18 +211,19 @@
       </exclusions>
     </dependency>
     <!-- FFmpeg preset Java API (transitively pulled by javacv, pinned here for
-         clarity) + single-platform native. -->
+         clarity) + single-platform native. Test scope, like javacv above. -->
     <dependency>
       <groupId>org.bytedeco</groupId>
       <artifactId>ffmpeg</artifactId>
       <version>${ffmpeg.version}</version>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.bytedeco</groupId>
       <artifactId>ffmpeg</artifactId>
       <version>${ffmpeg.version}</version>
       <classifier>${javacpp.platform}</classifier>
-      <scope>runtime</scope>
+      <scope>test</scope>
     </dependency>
     <!-- JavaCPP runtime loader native (single-platform). -->
     <dependency>
@@ -221,7 +231,7 @@
       <artifactId>javacpp</artifactId>
       <version>${javacpp.version}</version>
       <classifier>${javacpp.platform}</classifier>
-      <scope>runtime</scope>
+      <scope>test</scope>
     </dependency>
     <!-- Bundled-FFmpeg backend: see the ffmpegffm.* properties above. -->
     <dependency>
@@ -247,6 +257,19 @@
       <artifactId>turbojpeg-ffm-natives</artifactId>
       <version>${turbojpegffm.version}</version>
       <classifier>${turbojpegffm.natives}</classifier>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- Camera-RAW route: see the librawffm.* properties above. -->
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>libraw-ffm</artifactId>
+      <version>${librawffm.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>libraw-ffm-natives</artifactId>
+      <version>${librawffm.version}</version>
+      <classifier>${librawffm.natives}</classifier>
       <scope>runtime</scope>
     </dependency>
     <!-- jcodec: pure-Java pull-decode (FrameGrab) for H.264/MPEG/ProRes in
@@ -282,6 +305,7 @@
         <javacpp.platform>windows-x86_64</javacpp.platform>
         <ffmpegffm.natives>windows-x64</ffmpegffm.natives>
         <turbojpegffm.natives>windows-x64</turbojpegffm.natives>
+        <librawffm.natives>windows-x64</librawffm.natives>
       </properties>
     </profile>
     <profile>

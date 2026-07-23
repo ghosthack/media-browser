@@ -89,8 +89,8 @@ public final class VideoRotation implements AutoCloseable {
     /**
      * Clockwise quarter-turns (0..3) that undo a baked rotation of
      * {@code ccwDegrees} counter-clockwise — the convention shared by FFmpeg's
-     * {@code av_display_rotation_get} / JavaCV's {@code getDisplayRotation()}
-     * (which report e.g. {@code -90}) and the pure stack's
+     * {@code av_display_rotation_get}
+     * (which reports e.g. {@code -90}) and the pure stack's
      * {@code rotationDegreesCcw()} (which reports e.g. {@code 270}); both denote
      * the same rotation mod&nbsp;360. Rounds to the nearest quarter-turn.
      */

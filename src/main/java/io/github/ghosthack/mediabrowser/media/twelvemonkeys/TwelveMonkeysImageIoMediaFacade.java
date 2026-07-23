@@ -37,7 +37,7 @@ import javax.imageio.stream.ImageInputStream;
  *
  * <p>The {@code fallback} is the composition seam for the {@code 12M + X}
  * backends (plan §1): {@code null} for the still-only {@code TWELVEMONKEYS}
- * backend, a {@code JavaCvMediaFacade} / {@code JcodecMediaFacade} for the
+ * backend, a {@code FfmpegFfmMediaFacade} / {@code JcodecMediaFacade} for the
  * combined backends. When a file is not a 12M-decodable still and not an
  * animated GIF, {@code classify}/{@code probe}/{@code loadVisual}/
  * {@code loadThumbnail}/{@code openVideo}/{@code readMetadata} delegate to the
@@ -134,7 +134,7 @@ public final class TwelveMonkeysImageIoMediaFacade implements MediaFacade {
     public Metadata readMetadata(Path file) {
         // TwelveMonkeys' own metadata extraction is not wired here; the 12M path
         // (stills + animated GIF) reports an empty snapshot, while non-12M media
-        // delegates to the fallback facade (e.g. JavaCV's container tags).
+        // delegates to the fallback facade (e.g. FFmpeg's container tags).
         if (isAnimatedGif(file) || canReadStill(file)) {
             return Metadata.empty(file);
         }

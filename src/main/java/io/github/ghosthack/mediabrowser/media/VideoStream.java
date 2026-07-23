@@ -33,8 +33,30 @@ public interface VideoStream extends AutoCloseable {
     /**
      * The internal BGRA buffer ({@code width * height * 4} bytes) holding the
      * last decoded frame; overwritten by the next {@link #next} call.
+     *
+     * <p>May convert lazily: a stream that also offers {@link #gpuFrame} only
+     * pays the CPU readback/convert when this is actually called.</p>
      */
     MemorySegment bgra();
+
+    /**
+     * The last decoded frame while it is still on the GPU — macOS
+     * VideoToolbox only for now: {@code cvPixelBuffer} is the CVPixelBufferRef
+     * backing an IOSurface, in <b>coded</b> orientation/dimensions with the
+     * container rotation to apply. Valid until the next {@link #next} call.
+     * {@code null} whenever the frame is CPU-side (software decode, other
+     * platforms, or a non-surface hw frame) — callers then use {@link #bgra()}.
+     *
+     * @param bt709 the frame is tagged BT.709 (untagged/601 otherwise)
+     * @param fullRange the frame is tagged full-range (JPEG levels)
+     */
+    default GpuFrame gpuFrame() {
+        return null;
+    }
+
+    /** See {@link #gpuFrame()}. */
+    record GpuFrame(long cvPixelBuffer, int codedWidth, int codedHeight,
+                    int containerQuarterTurnsCw, boolean bt709, boolean fullRange) {}
 
     @Override
     void close();
