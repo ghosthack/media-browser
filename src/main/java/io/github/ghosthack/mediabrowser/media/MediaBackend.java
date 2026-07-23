@@ -34,7 +34,8 @@ public enum MediaBackend {
     // artifact and nothing else — nothing user-installed. Stills refine from
     // FFmpeg's one-frame-video shape heuristically (see FfmpegFfmMediaFacade).
     FFMPEG_FFM("ffmpeg-ffm", "Bundled FFmpeg (images + video)",
-            noArg("ffm.FfmpegFfmMediaFacade")),
+            noArg("ffm.FfmpegFfmMediaFacade")
+                    .withResources(ffmpegNativesManifest())),
     // The same facade with the explicit TurboJPEG addition (the default):
     // baseline-JPEG thumbnails decode through libjpeg-turbo's scaled decode
     // (turbojpeg-ffm artifact) — ~1.6x faster than FFmpeg's full decode on
@@ -43,7 +44,8 @@ public enum MediaBackend {
     // are absent, rather than silently behaving like FFMPEG_FFM.
     FFMPEG_FFM_TURBOJPEG("ffmpeg-ffm-turbojpeg",
             "Bundled FFmpeg + TurboJPEG thumbnails",
-            staticFactory("ffm.FfmpegFfmMediaFacade", "withTurboJpeg")),
+            staticFactory("ffm.FfmpegFfmMediaFacade", "withTurboJpeg")
+                    .withResources(ffmpegNativesManifest(), turbojpegNativesManifest())),
     // 100% Apple: no FFmpeg/libvips fallback. Pass a fallback facade to
     // AppleMediaFacade instead if coverage for e.g. WebM/VP9 is wanted.
     APPLE("apple", "Apple (ImageIO / AVFoundation)",
@@ -71,7 +73,8 @@ public enum MediaBackend {
     // the wider ImageIO still-format coverage (PSD/ICO/CMYK exotics).
     TWELVEMONKEYS_FFMPEG_FFM("twelvemonkeys-ffmpeg-ffm", "TwelveMonkeys ImageIO + bundled FFmpeg video",
             videoFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade",
-                    "ffm.FfmpegFfmMediaFacade")),
+                    "ffm.FfmpegFfmMediaFacade")
+                    .withResources(ffmpegNativesManifest())),
     // TwelveMonkeys stills/GIF + jcodec (pure-Java H.264/MPEG/ProRes)
     // for video. jcodec declines other codecs (classify → empty), which
     // the 12M wrapper surfaces as unsupported.
@@ -100,8 +103,42 @@ public enum MediaBackend {
         MediaFacade create() throws ReflectiveOperationException;
     }
 
-    /** The implementation classes a backend needs, plus how to build its facade. */
-    private record Spec(List<String> requiredClasses, Factory factory) {}
+    /**
+     * The implementation classes and classpath resources a backend needs, plus
+     * how to build its facade. {@code requiredResources} carries the bundled
+     * natives manifests of the ffmpeg-ffm/turbojpeg-ffm artifacts — present
+     * only in the classifier jar of a covered platform, so their absence means
+     * "this platform has no natives", checkable without loading anything.
+     */
+    private record Spec(List<String> requiredClasses, List<String> requiredResources,
+                        Factory factory) {
+        Spec(List<String> requiredClasses, Factory factory) {
+            this(requiredClasses, List.of(), factory);
+        }
+        Spec withResources(String... resources) {
+            return new Spec(requiredClasses, List.of(resources), factory);
+        }
+    }
+
+    /** This platform's natives classifier, mirroring the artifacts' loaders. */
+    private static String nativeClassifier() {
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        String arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
+        String osPart = os.contains("mac") ? "macos" : os.contains("win") ? "windows" : "linux";
+        String archPart = (arch.equals("aarch64") || arch.equals("arm64")) ? "arm64" : "x64";
+        return osPart + "-" + archPart;
+    }
+
+    /** The ffmpeg-ffm natives manifest for this platform (method: the enum
+     * constants may call methods but not forward-reference static fields). */
+    private static String ffmpegNativesManifest() {
+        return "natives/" + nativeClassifier() + "/manifest.txt";
+    }
+
+    /** The turbojpeg-ffm natives manifest for this platform. */
+    private static String turbojpegNativesManifest() {
+        return "turbojpeg-natives/" + nativeClassifier() + "/manifest.txt";
+    }
 
     /** Facade built by a public static no-arg factory method on {@code facadeClass}. */
     private static Spec staticFactory(String facadeClass, String method) {
@@ -173,6 +210,11 @@ public enum MediaBackend {
             try {
                 Class.forName(className, false, MediaBackend.class.getClassLoader());
             } catch (ClassNotFoundException e) {
+                return false;
+            }
+        }
+        for (String resource : spec.requiredResources()) {
+            if (MediaBackend.class.getClassLoader().getResource(resource) == null) {
                 return false;
             }
         }
