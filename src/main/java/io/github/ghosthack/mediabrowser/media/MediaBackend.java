@@ -49,12 +49,12 @@ public enum MediaBackend {
     // 100% Apple: no FFmpeg/libvips fallback. Pass a fallback facade to
     // AppleMediaFacade instead if coverage for e.g. WebM/VP9 is wanted.
     APPLE("apple", "Apple (ImageIO / AVFoundation)",
-            nullFallback("apple.AppleMediaFacade")),
+            nullFallback("apple.AppleMediaFacade").onPlatform(isMacOs())),
     // 100% Windows native: WIC (stills/metadata) + Media Foundation
     // (video/audio). No FFmpeg/libvips/pure fallback — every path either
     // works through a Windows API or throws MediaException.
     WINDOWS_NATIVE("windows-native", "Windows (WIC / Media Foundation)",
-            noArg("windows.WindowsMediaFacade")),
+            noArg("windows.WindowsMediaFacade").onPlatform(isWindowsOs())),
     // TwelveMonkeys ImageIO: enhanced still-image decode (JPEG/CMYK,
     // TIFF, WebP, PSD, etc.) + animated GIF as video. No fallback here
     // (TWELVEMONKEYS solo); the 12M+JavaCV/jcodec backends pass a video
@@ -111,13 +111,24 @@ public enum MediaBackend {
      * "this platform has no natives", checkable without loading anything.
      */
     private record Spec(List<String> requiredClasses, List<String> requiredResources,
-                        Factory factory) {
+                        boolean platformSupported, Factory factory) {
         Spec(List<String> requiredClasses, Factory factory) {
-            this(requiredClasses, List.of(), factory);
+            this(requiredClasses, List.of(), true, factory);
         }
         Spec withResources(String... resources) {
-            return new Spec(requiredClasses, List.of(resources), factory);
+            return new Spec(requiredClasses, List.of(resources), platformSupported, factory);
         }
+        Spec onPlatform(boolean supported) {
+            return new Spec(requiredClasses, requiredResources, supported, factory);
+        }
+    }
+
+    private static boolean isMacOs() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac");
+    }
+
+    private static boolean isWindowsOs() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
     }
 
     /** This platform's natives classifier, mirroring the artifacts' loaders. */
@@ -206,6 +217,9 @@ public enum MediaBackend {
      * Looks classes up without initializing them, so no native libraries load.
      */
     public boolean isAvailable() {
+        if (!spec.platformSupported()) {
+            return false;
+        }
         for (String className : spec.requiredClasses()) {
             try {
                 Class.forName(className, false, MediaBackend.class.getClassLoader());
