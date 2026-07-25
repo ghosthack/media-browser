@@ -41,6 +41,14 @@ import java.util.Set;
  *       orientation flip itself in {@code dcraw_make_mem_image}. Some phone
  *       DNGs (e.g. Samsung) carry no preview at all, so this path is not an
  *       edge case.</li>
+ *   <li><b>Full-resolution preview</b> (viewer only) — DNG 1.7 files with
+ *       JPEG-XL-compressed raw tiles (iPhone 17-era; Compression 52546) are a
+ *       stub in LibRaw unless it is built against the Adobe DNG SDK + libjxl:
+ *       {@code libraw_unpack} returns {@code LIBRAW_FILE_UNSUPPORTED}. When
+ *       exactly that happens and the file carries a preview at full raw
+ *       resolution (Apple always writes one), the camera's own render is the
+ *       decode. Capability routing on the reported unpack verdict, not a
+ *       failure fallback: any other unpack error still surfaces loudly.</li>
  * </ul>
  *
  * <p>Failures follow the backend's convention: a missing native means RAW
@@ -161,8 +169,37 @@ final class LibRawStills {
                     return preview;
                 }
             }
-            return rawDecode(lr, arena, true)
+            Optional<RasterFrame> full = rawDecode(lr, arena, true)
                     .map(f -> Thumbnails.scale(f, maxEdge, mode));
+            if (full.isPresent() || turboJpeg) {
+                return full;
+            }
+            // JXL-stubbed DNGs under the plain ffmpeg-ffm backend: the raw
+            // decode is impossible here, so the embedded preview is the
+            // thumbnail — the same policy the -turbojpeg variant applies
+            // first. Fresh handle: the failed unpack poisons this one
+            // (unpack_thumb would fail as an out-of-order call).
+            return previewThumbnailFresh(file, maxEdge, mode);
+        } catch (Throwable t) {
+            return Optional.empty();
+        } finally {
+            LibRaw.libraw_close(lr);
+        }
+    }
+
+    /** {@link #previewThumbnail} on its own freshly opened handle. */
+    private static Optional<RasterFrame> previewThumbnailFresh(Path file, int maxEdge,
+                                                               ThumbnailMode mode) {
+        MemorySegment lr = LibRaw.libraw_init(0);
+        if (lr.equals(MemorySegment.NULL)) {
+            return Optional.empty();
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            if (LibRaw.libraw_open_file(lr, arena.allocateFrom(file.toString()))
+                    != LibRaw.LIBRAW_SUCCESS()) {
+                return Optional.empty();
+            }
+            return previewThumbnail(lr, maxEdge, mode);
         } catch (Throwable t) {
             return Optional.empty();
         } finally {
@@ -184,12 +221,71 @@ final class LibRawStills {
                     != LibRaw.LIBRAW_SUCCESS()) {
                 return Optional.empty();
             }
-            return rawDecode(lr, arena, false);
+            int rc = LibRaw.libraw_unpack(lr);
+            if (rc == LibRaw.LIBRAW_SUCCESS()) {
+                return processUnpacked(lr, arena, false);
+            }
+            if (rc == LibRaw.LIBRAW_FILE_UNSUPPORTED()) {
+                // JXL-compressed DNG (see class doc): the camera's full-res
+                // render is the decode, not a downgraded stand-in. Fresh
+                // handle: after a failed unpack, LibRaw rejects unpack_thumb
+                // on this one as an out-of-order call.
+                return fullResPreview(file);
+            }
+            return Optional.empty();
         } catch (Throwable t) {
             return Optional.empty();
         } finally {
             LibRaw.libraw_close(lr);
         }
+    }
+
+    /**
+     * The embedded preview as the viewer image, only when it matches the raw's
+     * visible resolution — a smaller preview is not a full-quality decode.
+     * Requires the TurboJPEG native (ships with both FFM backends).
+     */
+    private static Optional<RasterFrame> fullResPreview(Path file) {
+        if (!TurboJpegStills.available()) {
+            return Optional.empty();
+        }
+        MemorySegment lr = LibRaw.libraw_init(0);
+        if (lr.equals(MemorySegment.NULL)) {
+            return Optional.empty();
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            if (LibRaw.libraw_open_file(lr, arena.allocateFrom(file.toString()))
+                    != LibRaw.LIBRAW_SUCCESS()
+                    || LibRaw.libraw_unpack_thumb(lr) != LibRaw.LIBRAW_SUCCESS()) {
+                return Optional.empty();
+            }
+            return decodePreview(lr);
+        } catch (Throwable t) {
+            return Optional.empty();
+        } finally {
+            LibRaw.libraw_close(lr);
+        }
+    }
+
+    private static Optional<RasterFrame> decodePreview(MemorySegment lr) {
+        MemorySegment data = lr.reinterpret(libraw_data_t.sizeof());
+        MemorySegment thumb = libraw_data_t.thumbnail(data);
+        int tlength = libraw_thumbnail_t.tlength(thumb);
+        if (libraw_thumbnail_t.tformat(thumb) != LibRaw.LIBRAW_THUMBNAIL_JPEG() || tlength <= 0) {
+            return Optional.empty();
+        }
+        int tw = Short.toUnsignedInt(libraw_thumbnail_t.twidth(thumb));
+        int th = Short.toUnsignedInt(libraw_thumbnail_t.theight(thumb));
+        if (tw < LibRaw.libraw_get_iwidth(lr) || th < LibRaw.libraw_get_iheight(lr)) {
+            return Optional.empty();
+        }
+        byte[] jpeg = new byte[tlength];
+        MemorySegment.copy(libraw_thumbnail_t.thumb(thumb).reinterpret(tlength),
+                ValueLayout.JAVA_BYTE, 0, jpeg, 0, tlength);
+        int orientation = flipToExifOrientation(
+                libraw_image_sizes_t.flip(libraw_data_t.sizes(data)));
+        return TurboJpegStills.decodeScaled(jpeg, Math.max(tw, th), ThumbnailMode.FIT)
+                .map(f -> RasterFrames.applyExifOrientation(f, orientation));
     }
 
     /**
@@ -233,6 +329,11 @@ final class LibRawStills {
         if (LibRaw.libraw_unpack(lr) != LibRaw.LIBRAW_SUCCESS()) {
             return Optional.empty();
         }
+        return processUnpacked(lr, arena, halfSize);
+    }
+
+    private static Optional<RasterFrame> processUnpacked(MemorySegment lr, Arena arena,
+                                                         boolean halfSize) {
         MemorySegment data = lr.reinterpret(libraw_data_t.sizeof());
         MemorySegment params = libraw_data_t.params(data);
         libraw_output_params_t.use_camera_wb(params, 1);

@@ -42,18 +42,18 @@
     <!-- Bundled-FFmpeg backend (FFMPEG_FFM): FFM stubs + self-extracting
          from-source LGPL natives, built in ../ffmpeg-ffm, on Maven Central.
          Classifier jars exist for macos-arm64 and windows-x64 only. -->
-    <ffmpegffm.version>8.1.2-0.2.0</ffmpegffm.version>
+    <ffmpegffm.version>8.1.2-0.3.0</ffmpegffm.version>
     <ffmpegffm.natives>macos-arm64</ffmpegffm.natives>
     <!-- libjpeg-turbo JPEG-thumbnail fast path (TurboJpegStills): FFM stubs +
          self-extracting natives, built in ../turbojpeg-ffm. Same platform
          coverage as ffmpeg-ffm; absent natives disable the fast path at
          runtime, they never break a build. -->
-    <turbojpegffm.version>3.2.0-0.1.0</turbojpegffm.version>
+    <turbojpegffm.version>3.2.0-0.2.0</turbojpegffm.version>
     <turbojpegffm.natives>macos-arm64</turbojpegffm.natives>
     <!-- Camera-RAW route (LibRawStills): FFM stubs + self-extracting natives,
          built in ../libraw-ffm. Same platform coverage as ffmpeg-ffm; absent
          natives mean RAW extensions are not claimed, they never break a build. -->
-    <librawffm.version>0.22.2-0.1.0</librawffm.version>
+    <librawffm.version>0.22.2-0.2.0</librawffm.version>
     <librawffm.natives>macos-arm64</librawffm.natives>
     <junit.version>5.11.4</junit.version>
     <app.mainClass>io.github.ghosthack.mediabrowser.App</app.mainClass>
@@ -330,6 +330,9 @@
       <properties>
         <lwjgl.natives>natives-linux</lwjgl.natives>
         <javacpp.platform>linux-x86_64</javacpp.platform>
+        <ffmpegffm.natives>linux-x64</ffmpegffm.natives>
+        <turbojpegffm.natives>linux-x64</turbojpegffm.natives>
+        <librawffm.natives>linux-x64</librawffm.natives>
       </properties>
     </profile>
   </profiles>

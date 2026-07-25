@@ -49,7 +49,10 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     /** Extensions FFmpeg should claim as possible stills (kind refined by probe). */
     private static final Set<String> STILL_EXTENSIONS = Set.of(
             "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff",
-            "avif", "heic", "heif");
+            "avif", "heic", "heif",
+            // JPEG XL decodes through the statically linked libjxl (ffmpeg-ffm
+            // >= 0.3.0); animated JXL keeps VIDEO via its duration like GIF.
+            "jxl");
 
     /** AV container/stream extensions FFmpeg should claim (video and audio). */
     private static final Set<String> AV_EXTENSIONS = Set.of(
@@ -132,10 +135,27 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     @Override
     public VisualResult loadVisual(Path file) {
         if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
+            // JXL-compressed DNGs (DNG 1.7, iPhone 17): LibRaw 0.22 stubs
+            // these out (LIBRAW_FILE_UNSUPPORTED), so the tile decode through
+            // bundled FFmpeg's libjxl + the pure-Java DNG render is the real
+            // decode. The Compression-52546 SubIFD is the same gate that
+            // verdict fires on. On a render failure the embedded full-res
+            // preview below stays the safety net — visibly logged, not silent.
+            Optional<RasterFrame> jxlDng = Optional.empty();
+            try {
+                jxlDng = DngJxlStills.fullDecode(ffmpeg, file);
+            } catch (MediaException e) {
+                System.err.println("media-browser: JXL DNG render failed for "
+                        + file.getFileName() + " (" + e.getMessage()
+                        + "); falling back to the embedded preview");
+            }
+            if (jxlDng.isPresent()) {
+                return new VisualResult(rawProbe(file), jxlDng);
+            }
             RasterFrame frame = LibRawStills.fullDecode(file)
                     .orElseThrow(() -> new MediaException(
                             "LibRaw could not decode " + file.getFileName()
-                            + " (lossy-compressed DNG?)"));
+                            + " (lossy/JXL-compressed DNG without a full-size preview?)"));
             return new VisualResult(rawProbe(file), Optional.of(frame));
         }
         VisualResult result = av.firstFrameWithProbe(file, fileSize(file));
@@ -194,6 +214,19 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     @Override
     public VideoStream openVideo(Path file) {
         return new FfmpegVideoStream(ffmpeg, file, HwDecode.playbackRequest());
+    }
+
+    /**
+     * SmokeTest seam: the JXL-DNG tile-decode render alone (no preview
+     * fallback), for parity checks against {@link #debugJxlDngPreview}.
+     */
+    public Optional<RasterFrame> debugJxlDngRender(Path file) {
+        return DngJxlStills.fullDecode(ffmpeg, file);
+    }
+
+    /** SmokeTest seam: the LibRaw decode / embedded-preview route alone. */
+    public Optional<RasterFrame> debugJxlDngPreview(Path file) {
+        return LibRawStills.fullDecode(file);
     }
 
     @Override

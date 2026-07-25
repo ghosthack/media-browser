@@ -286,6 +286,25 @@ public interface FfmpegBindings {
     /** {@code AV_PIX_FMT_BGRA}, for BGRA-source rescales (tile-grid canvases). */
     int pixFmtBgra();
 
+    // ---- raw-packet decode (DNG JXL tiles) --------------------------------
+
+    /** {@code AV_CODEC_ID_JPEGXL} — the libjxl wrapper decoder's codec id. */
+    int codecIdJpegxl();
+
+    int pixFmtRgb48le();
+
+    int pixFmtRgba64le();
+
+    int pixFmtGray16le();
+
+    /**
+     * Points {@code pkt} at a copy of {@code data} allocated in {@code arena}
+     * with FFmpeg's required zero input padding. The packet stays
+     * non-refcounted — {@code avcodec_send_packet} copies it, so the arena
+     * only needs to outlive the send call.
+     */
+    void packetSetData(Arena arena, MemorySegment pkt, byte[] data);
+
     // ---- dictionaries ----------------------------------------------------
 
     /**

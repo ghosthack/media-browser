@@ -71,6 +71,7 @@ public final class SmokeTest {
                             && visual.frame().isPresent() && thumb.frame().isPresent()) {
                         orientationParity(visual.frame().get(), thumb.frame().get());
                     }
+                    jxlDngParity(facade, file);
                     if (kind.get() == MediaKind.VIDEO) {
                         playbackSmoke(facade, file);
                     }
@@ -110,6 +111,54 @@ public final class SmokeTest {
         boolean ok = aspectOk && meanDiff <= 50;
         System.out.printf("  orientation-parity: %s (aspect %s, mean luma diff %.1f)%n",
                 ok ? "OK" : "MISMATCH", aspectOk ? "match" : "DIVERGED", meanDiff);
+    }
+
+    /**
+     * Fidelity guard for the JXL-compressed-DNG pipeline: every such DNG
+     * embeds Apple's own full-res render of the same pixels (the IFD0
+     * preview), so the tile-decode + pure-Java DNG render is compared against
+     * it on a coarse luma grid. Prints nothing for files the JXL-DNG path
+     * does not claim, or on non-FFM backends.
+     */
+    private static void jxlDngParity(MediaFacade facade, Path file) {
+        if (!(facade instanceof io.github.ghosthack.mediabrowser.media.ffm.FfmpegFfmMediaFacade ffm)) {
+            return;
+        }
+        java.util.Optional<RasterFrame> rendered;
+        try {
+            rendered = ffm.debugJxlDngRender(file);
+        } catch (RuntimeException e) {
+            System.out.println("  jxl-dng-parity: RENDER FAILED (" + e.getMessage() + ")");
+            return;
+        }
+        if (rendered.isEmpty()) {
+            return;
+        }
+        var preview = ffm.debugJxlDngPreview(file);
+        if (preview.isEmpty()) {
+            System.out.println("  jxl-dng-parity: no embedded preview to compare against");
+            return;
+        }
+        RasterFrame ours = rendered.get();
+        RasterFrame apple = preview.get();
+        boolean aspectOk = Integer.signum(ours.width() - ours.height())
+                == Integer.signum(apple.width() - apple.height());
+        double sum = 0;
+        double max = 0;
+        int n = 0;
+        for (int gy = 1; gy < 8; gy++) {
+            for (int gx = 1; gx < 8; gx++) {
+                double d = Math.abs(luma(ours, gx / 8.0, gy / 8.0)
+                        - luma(apple, gx / 8.0, gy / 8.0));
+                sum += d;
+                max = Math.max(max, d);
+                n++;
+            }
+        }
+        double meanDiff = sum / n;
+        boolean ok = aspectOk && meanDiff <= 12;
+        System.out.printf("  jxl-dng-parity: %s (aspect %s, mean luma diff %.1f, max %.1f)%n",
+                ok ? "OK" : "MISMATCH", aspectOk ? "match" : "DIVERGED", meanDiff, max);
     }
 
     /** Nearest-sampled luma at normalized {@code (u, v)} of a BGRA frame. */

@@ -513,6 +513,34 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     }
 
     @Override
+    public int codecIdJpegxl() {
+        return FFmpeg.AV_CODEC_ID_JPEGXL();
+    }
+
+    @Override
+    public int pixFmtRgb48le() {
+        return FFmpeg.AV_PIX_FMT_RGB48LE();
+    }
+
+    @Override
+    public int pixFmtRgba64le() {
+        return FFmpeg.AV_PIX_FMT_RGBA64LE();
+    }
+
+    @Override
+    public int pixFmtGray16le() {
+        return FFmpeg.AV_PIX_FMT_GRAY16LE();
+    }
+
+    @Override
+    public void packetSetData(Arena arena, MemorySegment pkt, byte[] data) {
+        MemorySegment seg = arena.allocate(data.length + FFmpeg.AV_INPUT_BUFFER_PADDING_SIZE());
+        MemorySegment.copy(data, 0, seg, ValueLayout.JAVA_BYTE, 0, data.length);
+        AVPacket.data(pkt, seg);
+        AVPacket.size(pkt, data.length);
+    }
+
+    @Override
     public MemorySegment dictGetFirst(MemorySegment dict, MemorySegment emptyKey, MemorySegment prev) {
         MemorySegment entry = FFmpeg.av_dict_get(dict, emptyKey, prev,
                 FFmpeg.AV_DICT_IGNORE_SUFFIX());
