@@ -1,5 +1,7 @@
 package io.github.ghosthack.mediabrowser.album;
 
+import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
+
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -104,7 +106,14 @@ public final class AlbumStore {
             List<Path> paths = new ArrayList<>();
             for (String line : Files.readAllLines(album.file(), StandardCharsets.UTF_8)) {
                 String trimmed = line.trim();
-                if (!trimmed.isEmpty()) {
+                if (trimmed.isEmpty()) continue;
+                if (trimmed.contains(ArchivePaths.SEPARATOR)) {
+                    // A member inside a disc image or zip; mounting it is what
+                    // turns the locator back into a usable path. A container
+                    // that has since moved or gone unreadable drops out of the
+                    // listing, the same way a deleted member would.
+                    ArchivePaths.parse(trimmed).ifPresent(paths::add);
+                } else {
                     paths.add(Path.of(trimmed));
                 }
             }
@@ -130,12 +139,14 @@ public final class AlbumStore {
     public AddResult addPaths(Album album, List<Path> paths) throws IOException {
         LinkedHashSet<String> members = new LinkedHashSet<>();
         for (Path existing : entries(album)) {
-            members.add(existing.toString());
+            members.add(ArchivePaths.format(existing));
         }
         int before = members.size();
         int skipped = 0;
         for (Path path : paths) {
-            String absolute = path.toAbsolutePath().normalize().toString();
+            // Stored as a locator, so a member inside an archive names both the
+            // container and the entry; identical to the plain path outside one.
+            String absolute = ArchivePaths.format(path.toAbsolutePath().normalize());
             if (!members.add(absolute)) {
                 skipped++;
             }

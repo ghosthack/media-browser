@@ -57,6 +57,7 @@ public final class CoreFoundation {
 
     // ── CoreFoundation method handles ──────────────────────────────────
 
+    private static final MethodHandle H_CF_DATA_CREATE;
     private static final MethodHandle H_CF_DATA_CREATE_NO_COPY;
     private static final MethodHandle H_CF_RELEASE;
     private static final MethodHandle H_CF_RETAIN;
@@ -115,6 +116,11 @@ public final class CoreFoundation {
             LOOKUP = SymbolLookup.loaderLookup();
 
             // ── CoreFoundation functions ───────────────────────────────
+
+            // CFDataRef CFDataCreate(CFAllocatorRef, const UInt8*, CFIndex)
+            H_CF_DATA_CREATE = downcall("CFDataCreate",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
 
             // CFDataRef CFDataCreateWithBytesNoCopy(CFAllocatorRef, const UInt8*, CFIndex, CFAllocatorRef)
             H_CF_DATA_CREATE_NO_COPY = downcall("CFDataCreateWithBytesNoCopy",
@@ -261,6 +267,7 @@ public final class CoreFoundation {
         } else {
             LOOKUP = null;
 
+            H_CF_DATA_CREATE = null;
             H_CF_DATA_CREATE_NO_COPY = null;
             H_CF_RELEASE = null;
             H_CF_RETAIN = null;
@@ -317,6 +324,28 @@ public final class CoreFoundation {
     }
 
     // ── Public API: CoreFoundation functions ────────────────────────────
+
+    /**
+     * Creates a CFData holding a <em>copy</em> of the given bytes — safe to
+     * hand to CF objects that outlive the caller's arena (unlike
+     * {@link #cfDataCreateNoCopy}). Wraps {@code CFDataCreate}.
+     * <p>
+     * Caller must release the returned CFData via {@link #cfRelease(MemorySegment)}.
+     *
+     * @param arena arena for the temporary source buffer
+     * @param bytes the bytes to copy into the CFData
+     * @return a new CFDataRef
+     */
+    public static MemorySegment cfDataCreate(Arena arena, byte[] bytes) {
+        try {
+            MemorySegment buf = arena.allocate(Math.max(1, bytes.length));
+            MemorySegment.copy(bytes, 0, buf, ValueLayout.JAVA_BYTE, 0, bytes.length);
+            return (MemorySegment) H_CF_DATA_CREATE.invokeExact(
+                    MemorySegment.NULL, buf, (long) bytes.length);
+        } catch (Throwable t) {
+            throw new DecodeException("CFDataCreate failed", t);
+        }
+    }
 
     /**
      * Wraps {@code CFDataCreateWithBytesNoCopy}.

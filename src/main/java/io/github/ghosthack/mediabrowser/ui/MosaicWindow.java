@@ -10,7 +10,9 @@ import io.github.ghosthack.mediabrowser.media.AaeSidecar;
 import io.github.ghosthack.mediabrowser.media.AaeStore;
 import io.github.ghosthack.mediabrowser.media.Adjustments;
 import io.github.ghosthack.mediabrowser.media.DirEntry;
+import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.MediaItem;
+import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
 import io.github.ghosthack.mediabrowser.media.MediaService;
@@ -81,12 +83,14 @@ import javafx.scene.text.TextAlignment;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Objects;
@@ -257,6 +261,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     private final DiagnosticsPanel diagnosticsPanel;
     /** Right-edge vertical split: Info, Metadata, Diagnostics (membership follows the toggles). */
     private final SplitPane rightPanels = new SplitPane();
+    /** Grid | panel stack, with the stack's width dragged and remembered. */
+    private final SidePanelSplit contentSplit;
     /** Debounce for the opt-in Auto metadata load; (re)armed on each selection change. */
     private final PauseTransition metadataDebounce = new PauseTransition(Duration.millis(180));
     /** Status-bar labels (bottom edge): the lead/selection text on the left, the tally on the right. */
@@ -600,7 +606,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         this.statusBarVisible.set(settings.mosaicStatusBarVisible());
         this.menuBarVisible.set(settings.mosaicMenuBarVisible());
         this.locationBarVisible.set(settings.mosaicLocationBarVisible());
-        this.actionLogVisible.set(settings.mosaicActionLogVisible());
+        // actionLogVisible is not seeded here: it's the one app-wide flag,
+        // seeded and bound (bidirectionally, all three views) by MainWindow.
         // Per-type tile labels; persisted on toggle, repainting the grid.
         this.dirLabelsVisible.set(settings.mosaicDirLabelsVisible());
         this.fileLabelsVisible.set(settings.mosaicFileLabelsVisible());
@@ -688,6 +695,10 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
 
         // --- canvas + scrollbar ----------------------------------------------
         vbar.setOrientation(javafx.geometry.Orientation.VERTICAL);
+        // Opt the grid's bar into scrollbar.css's flat black styling; the sheet
+        // is scoped to this class so the side panels' table scrollbars keep the
+        // theme's (a black track down a light Info panel reads as an artifact).
+        vbar.getStyleClass().add("flat-scroll-bar");
         vbar.valueProperty().addListener((obs, was, v) -> {
             scrollY = v.doubleValue();
             requestDraw();
@@ -770,6 +781,10 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
 
         var content = new HBox(canvasHolder, vbar);
         HBox.setHgrow(canvasHolder, Priority.ALWAYS);
+        // Grid and panel stack share a draggable split (see SidePanelSplit)
+        // rather than BorderPane center/right, so the panel width is the user's,
+        // survives a restart, and doesn't shift when a panel is toggled.
+        contentSplit = new SidePanelSplit(content, rightPanels, settings);
 
         // Selection info + on-demand metadata panels stacked on the right edge
         // (a vertical split, Info over Metadata), and a status bar at the bottom:
@@ -814,9 +829,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
 
         // The shared menu bar is inserted at index 0 by installMenuBar(...).
         topBox = new VBox(toolBar, locationBar);
-        this.root = new javafx.scene.layout.BorderPane(content);
+        this.root = new javafx.scene.layout.BorderPane(contentSplit);
         root.setTop(topBox);
-        root.setRight(rightPanels);
         root.setBottom(new VBox(actionLogPanel, statusBar));
         root.setStyle("-fx-background-color: black;");
         // Anchor for mosaic.css's looked-up colour defaults (the themeable
@@ -895,6 +909,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             @Override public Path nextFocusAfterMove(List<Path> moving) { return MosaicWindow.this.nextFocusAfterMove(moving); }
             @Override public void refreshAfterMove(Path focusPath) { MosaicWindow.this.refreshAfterMove(focusPath); }
             @Override public void showStatus(String message) { statusLabel.setText(message); }
+            @Override public void releaseBeforeMove(List<Path> moving) { viewer.releaseBeforeMove(moving); }
         });
     }
 
@@ -1016,7 +1031,11 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         return locationBarVisible;
     }
 
-    /** Action-log panel visibility (the mosaic bar's Show ▸ Action Log binds here); hidden by default. */
+    /**
+     * Action-log panel visibility; hidden by default. One app-wide flag:
+     * MainWindow binds this bidirectionally to its own prop (which the Show ▸
+     * Action Log items and modifier1+J drive), so all three views follow it.
+     */
     public BooleanProperty actionLogVisibleProperty() {
         return actionLogVisible;
     }
@@ -1318,9 +1337,9 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             if (panels.size() == 2) rightPanels.setDividerPositions(0.4);
             else if (panels.size() == 3) rightPanels.setDividerPositions(0.34, 0.67);
         }
-        boolean any = !panels.isEmpty();
-        rightPanels.setVisible(any);
-        rightPanels.setManaged(any);
+        // Membership in the content split, not visibility: an all-hidden stack
+        // leaves the split entirely so the grid gets its width back.
+        if (contentSplit != null) contentSplit.setPanelsVisible(!panels.isEmpty());
     }
 
     /**
@@ -1346,8 +1365,11 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             infoPanel.showMessage(switch (lead.type()) {
                 case PARENT -> "Parent folder";
                 case DIRECTORY -> "Folder";
+                case ARCHIVE -> "iso".equals(lead.extension())
+                        ? "Reading disc image…" : "Reading archive…";
                 default -> "Not viewable media";
             });
+            if (lead.type() == DirEntry.Type.ARCHIVE) showArchiveInfo(lead, gen);
             return;
         }
         infoPanel.showMessage("Probing…");
@@ -1360,6 +1382,29 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                     } else {
                         infoPanel.show(probe);
                     }
+                }));
+    }
+
+    /**
+     * Fills the info panel's detail table for a selected archive tile — format,
+     * naming scheme and volume identity — without mounting it. Mirrors
+     * {@code MainWindow.showArchiveInfo}; applies to the container only, never
+     * to entries inside it.
+     */
+    private void showArchiveInfo(DirEntry lead, int gen) {
+        service.archiveInfo(lead.path()).whenComplete((info, error) ->
+                Platform.runLater(() -> {
+                    if (gen != probeSequence) return;
+                    if (error != null) {
+                        infoPanel.showMessage(rootMessage(error));
+                        return;
+                    }
+                    var rows = new ArrayList<InfoPanel.Row>();
+                    rows.add(new InfoPanel.Row("Format", info.summary()));
+                    for (var field : info.fields()) {
+                        rows.add(new InfoPanel.Row(field.name(), field.value()));
+                    }
+                    infoPanel.showDetailRows(rows);
                 }));
     }
 
@@ -1394,7 +1439,11 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      */
     private void fireMetadataRead() {
         DirEntry lead = (selected >= 0 && selected < items.size()) ? items.get(selected) : null;
-        if (lead == null || !lead.viewable() || selection.size() != 1) {
+        // An archive has metadata worth reading — its volume descriptor — even
+        // though it is not viewable media.
+        boolean readable = lead != null
+                && (lead.viewable() || lead.type() == DirEntry.Type.ARCHIVE);
+        if (!readable || selection.size() != 1) {
             metadataPanel.showMessage(lead == null ? "No selection" : "Not viewable media");
             return;
         }
@@ -1471,6 +1520,17 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         folderPending.clear();
         scaled.clear();   // collage sub-tiles change size with the grid edge
         relayout();       // recompute the cache cap: each tile now holds N² images
+    }
+
+    /**
+     * Drops the cached folder-preview scans and repaints — for changes that
+     * alter which children a scan returns (the folder-preview sniff toggle)
+     * without touching the grid edge or tile geometry.
+     */
+    public void refreshFolderPreviews() {
+        folderPreviews.clear();
+        folderPending.clear();
+        relayout();
     }
 
     /**
@@ -1653,7 +1713,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         }
         items = source == null ? List.of() : source.stream()
                 .filter(e -> switch (e.type()) {
-                    case PARENT, DIRECTORY -> true;
+                    case PARENT, DIRECTORY, ARCHIVE -> true;
                     case MEDIA -> switch (e.mediaKind()) {
                         case IMAGE -> filterImages.get();
                         case VIDEO -> filterVideos.get();
@@ -1979,6 +2039,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         switch (item.type()) {
             case MEDIA -> drawMediaContent(g, item, cx, cy);
             case DIRECTORY -> drawFolderContent(g, item, cx, cy);
+            case ARCHIVE -> drawArchiveContent(g, item, cx, cy);
             case PARENT -> drawParentContent(g, cx, cy);
             case OTHER -> drawOtherContent(g, item, cx, cy);
         }
@@ -2044,6 +2105,45 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         }
         if (!drew) drawFolderGlyph(g, cx, cy);
         if (dirLabelsVisible.get()) drawCaption(g, item.displayName(), cx, cy);
+    }
+
+    /**
+     * An archive tile: the folder glyph — an archive <em>is</em> browsed as a
+     * folder — stamped with its format ({@code ZIP}, {@code ISO}, {@code CBZ})
+     * so it reads as a container at a glance rather than as an ordinary
+     * directory. No preview collage: enumerating a 650 MB image to thumbnail
+     * four of its files is far too much work for a tile the user has not asked
+     * to open.
+     */
+    private void drawArchiveContent(GraphicsContext g, DirEntry item, double cx, double cy) {
+        drawFolderGlyph(g, cx, cy);
+        drawArchiveLabel(g, item.extension().toUpperCase(Locale.ROOT), cx, cy);
+        if (dirLabelsVisible.get()) drawCaption(g, item.displayName(), cx, cy);
+    }
+
+    /**
+     * Stamps {@code format} across the folder glyph's body. Black on the muted
+     * folder, but flipped to the folder's own fill under the INVERSE style,
+     * where black text on a black folder would simply vanish.
+     */
+    private void drawArchiveLabel(GraphicsContext g, String format, double cx, double cy) {
+        if (format.isEmpty()) return;
+        boolean inverse = folderGlyph.get() == MosaicFolderGlyph.INVERSE;
+        // The same body rectangle drawFolderGlyph lays out, so the text sits on
+        // the folder rather than floating over the tile.
+        double w = tileSize * 0.46, h = tileSize * 0.34;
+        double fy = cy + (tileSize - h) / 2.0;
+        g.setFill(inverse ? FOLDER_GLYPH_FILL : Color.BLACK);
+        // Sized off the body height, then clamped so a longer format (CBZ) stays
+        // inside the body with margin rather than running to its edges. 0.62em
+        // per character approximates the sans-serif advance closely enough that
+        // no text measuring is needed on a per-tile paint.
+        double byHeight = h * 0.42;
+        double byWidth = w * 0.82 / (Math.max(3, format.length()) * 0.62);
+        g.setFont(font(Math.max(7, Math.min(byHeight, byWidth))));
+        g.setTextAlign(TextAlignment.CENTER);
+        g.setTextBaseline(VPos.CENTER);
+        g.fillText(format, cx + tileSize / 2.0, fy + h / 2.0);
     }
 
     /** The {@code ..} parent tile: an up-arrow glyph captioned "..". */
@@ -2715,13 +2815,42 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * focused for fixing. Mirrors the main window's address bar.
      */
     private void navigateFromLocation() {
-        Path target = Path.of(locationField.getText().trim()).toAbsolutePath().normalize();
-        if (Files.isDirectory(target)) {
+        // Accepts an archive locator (/discs/photos.iso!/DCIM) as well as a
+        // plain path, mounting the container when needed.
+        Path target = ArchivePaths.parse(locationField.getText())
+                .map(p -> ArchivePaths.revive(p).toAbsolutePath().normalize())
+                .orElse(null);
+        if (target != null && ArchivePaths.isDirectory(target)) {
             navigator.accept(target);
             canvas.requestFocus();
         } else {
-            statusLabel.setText("Not a folder: " + target);
+            statusLabel.setText("Not a folder: " + locationField.getText().trim());
         }
+    }
+
+    /**
+     * Enters an archive tile: mounts off the FX thread (a large container's
+     * directory is real I/O), then navigates to its root; a container that
+     * will not open reports why instead of doing nothing. Mirrors
+     * {@code MainWindow.openArchive}.
+     */
+    private void openArchive(Path archive) {
+        statusLabel.setText("Opening " + archive.getFileName() + "…");
+        service.fileOp(() -> {
+            try {
+                // Lands inside a solitary top-level folder; see browseRoot.
+                return ArchivePaths.browseRoot(archive);
+            } catch (IOException e) {
+                throw new MediaException(e.getMessage(), e);
+            }
+        }).whenComplete((root, error) -> Platform.runLater(() -> {
+            if (error != null) {
+                statusLabel.setText("Cannot open " + archive.getFileName() + ": "
+                        + rootMessage(error));
+                return;
+            }
+            navigator.accept(root);
+        }));
     }
 
     /** Backspace (and the viewer relaying parent navigation): navigates the
@@ -2729,9 +2858,13 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     @Override
     public void navigateToParent() {
         Path dir = dirSupplier != null ? dirSupplier.get() : null;
-        Path parent = dir == null ? null : dir.getParent();
+        // From an archive root, step out to the folder holding the container
+        // and land on the container itself.
+        Path parent = ArchivePaths.parentOf(dir);
         if (parent != null) {
-            pendingSelectPath = dir;   // select the folder we came from in the parent
+            pendingSelectPath = ArchivePaths.hostArchive(dir)
+                    .filter(archive -> ArchivePaths.isArchiveRoot(dir))
+                    .orElse(dir);      // select the folder we came from in the parent
             navigator.accept(parent);
         }
     }
@@ -2828,15 +2961,20 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     private void adjustSelection(java.util.function.Consumer<Path> op) {
         if (items.isEmpty() || selection.isEmpty()) return;
         GraphicsContext g = canvas.getGraphicsContext2D();
+        String notice = null;
         for (int i : selection) {
             if (i < 0 || i >= items.size()) continue;
             DirEntry entry = items.get(i);
             if (entry.type() != DirEntry.Type.MEDIA) continue;
             op.accept(entry.path());
+            // Only the first tile of an unwritable directory yields the notice;
+            // the adjustment still applied, in memory for this session.
+            if (notice == null) notice = rotationStore.pollSessionOnlyNotice(entry.path());
             invalidateAdjustment(entry.path());   // re-read the new value on next draw
             repaintCell(g, i);
             viewer.refreshAdjustments(entry.path());
         }
+        if (notice != null) statusLabel.setText(notice);
     }
 
     // --- per-tile context menu ----------------------------------------------
@@ -3050,6 +3188,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             // Backspace (otherwise the parent listing resets to its first tile).
             case PARENT -> navigateToParent();
             case DIRECTORY -> navigator.accept(entry.path());
+            case ARCHIVE -> openArchive(entry.path());
             // Pass this mosaic as the viewer host so Escape/Enter come back
             // here and arrow-browsing in the viewer mirrors back into the tile.
             // Keep Focus only applies across separate windows (the viewer opens
@@ -3161,6 +3300,20 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     @Override
     public void refreshAfterViewerMove(Path focusPath) {
         refreshAfterMove(focusPath);
+    }
+
+    /**
+     * An extension fix renamed a file in place: re-list so the tile shows the
+     * new name and keep selection on it, but — unlike {@link #refreshAfterMove}
+     * — never arm the auto-open, which would restart an ended video or pull
+     * the viewer back to the renamed item after the user navigated on.
+     */
+    @Override
+    public void refreshAfterExtensionFix(Path newPath) {
+        Path dir = dirSupplier != null ? dirSupplier.get() : null;
+        if (dir == null) return;
+        pendingSelectPath = newPath;
+        navigator.accept(dir);
     }
 
     /**

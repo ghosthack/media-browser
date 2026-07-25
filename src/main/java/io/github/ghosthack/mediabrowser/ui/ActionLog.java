@@ -34,7 +34,7 @@ import javafx.collections.ObservableList;
  */
 public final class ActionLog {
 
-    /** Session cap, matching iris94's action-log default. */
+    /** Session cap, matching the Swing predecessor's action-log default. */
     public static final int LIMIT = 2000;
 
     /** How many persisted entries seed the panel back in at startup. */

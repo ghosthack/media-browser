@@ -28,9 +28,8 @@ import java.nio.file.Path;
 /**
  * {@link FfmpegBindings} backed by the {@code io.github.ghosthack:ffmpeg-ffm}
  * Maven artifact: FFmpeg 8.x stubs whose natives ship in per-platform
- * classifier jars and self-extract at first use — no user-installed FFmpeg
- * (docs/ffmpeg-bundled-backend.md). Derived from the retired Homebrew-install
- * {@code BrewFfmpegBindings} (see docs/ffm-retirement-handoff.md); the only
+ * classifier jars and self-extract at first use — no user-installed FFmpeg.
+ * Derived from the retired Homebrew-install {@code BrewFfmpegBindings}; the only
  * behavioural delta is {@code AVERROR_EAGAIN}, chosen at runtime because this
  * class runs on every platform.
  */
@@ -285,6 +284,22 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     public void setAutoThreads(MemorySegment cctx) {
         AVCodecContext.thread_count(
                 cctx.reinterpret(AVCodecContext.layout().byteSize()), 0);
+    }
+
+    /**
+     * {@code AV_OPT_SEARCH_CHILDREN} — also search the codec's {@code priv_data}.
+     * Required here: {@code photocd} declares its own private {@code lowres}
+     * option rather than using {@code AVCodecContext.lowres}, so a search with
+     * flags 0 finds the generic field, reports success, and changes nothing.
+     */
+    private static final int AV_OPT_SEARCH_CHILDREN = 0x0001;
+
+    @Override
+    public boolean setLowres(MemorySegment cctx, int lowres) {
+        try (Arena arena = Arena.ofConfined()) {
+            return FFmpeg.av_opt_set_int(cctx, arena.allocateFrom("lowres"),
+                    lowres, AV_OPT_SEARCH_CHILDREN) == 0;
+        }
     }
 
     @Override

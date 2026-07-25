@@ -1,5 +1,7 @@
 package io.github.ghosthack.mediabrowser.media;
 
+import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -28,8 +30,14 @@ public record ThumbnailKey(Path path, long mtimeMillis, long size, int maxEdge,
      * it survives restarts and invalidates automatically when the file changes.
      */
     public String hash() {
-        String material = path + "\0" + mtimeMillis + "\0" + size + "\0" + maxEdge
-                + "\0" + mode;
+        // Identified by the locator, not Path.toString: inside an archive the
+        // latter is only the entry path ("/DCIM/IMG_0001.JPG"), which two
+        // different discs would share — a disk cache tier keyed on it would
+        // serve one disc's thumbnail for the other's file. In-memory record
+        // equality is already safe, since an archive Path carries its
+        // filesystem identity.
+        String material = ArchivePaths.format(path) + "\0" + mtimeMillis + "\0" + size
+                + "\0" + maxEdge + "\0" + mode;
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
                     .digest(material.getBytes(StandardCharsets.UTF_8));

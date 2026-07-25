@@ -27,20 +27,30 @@ import java.util.Set;
 public final class ExtensionClassifier {
 
     private static final Set<String> IMAGE_EXTENSIONS = Set.of(
-            "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "tif", "tiff", "webp",
-            "heic", "heif", "avif", "jp2", "j2k", "jpf", "jxl", "ico", "tga",
-            "ppm", "pgm", "pbm", "pnm", "pfm", "exr", "hdr", "dds", "psd",
-            "svg", "raw", "cr2", "cr3", "nef", "arw", "dng", "orf", "rw2",
-            "raf", "pcx", "xpm");
+            "jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "bmp", "tif", "tiff", "webp",
+            "heic", "heif", "avif", "jp2", "j2k", "jpf", "jls", "jxl", "ico", "tga",
+            "ppm", "pgm", "pbm", "pnm", "pam", "pfm", "exr", "hdr", "dds", "psd",
+            "svg", "raw",
+            // Camera RAW: the full set LibRawStills.RAW_EXTENSIONS routes to
+            // libraw-ffm. Keep the two in step — a name missing here is a file
+            // FILE_EXTENSION mode hides even though the backend opens it.
+            "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2",
+            "raf", "orf", "rw2", "pef", "srw", "erf", "kdc", "dcr", "mos",
+            "mrw", "rwl", "iiq", "3fr", "fff", "mef", "x3f", "dng",
+            "pcx", "xpm", "xbm", "xwd", "sgi", "ras", "qoi", "dpx",
+            // Kodak Photo CD: a pyramid of 192x128..3072x2048 in one file.
+            "pcd");
 
     private static final Set<String> VIDEO_EXTENSIONS = Set.of(
-            "mp4", "m4v", "m4s", "mkv", "webm", "avi", "mov", "wmv", "flv",
-            "mpg", "mpeg", "ts", "m2ts", "mts", "ogv", "3gp", "vob", "mxf",
-            "nut", "rm");
+            "mp4", "m4v", "m4s", "mkv", "webm", "avi", "mov", "qt", "wmv", "asf",
+            "flv", "f4v", "divx", "mpg", "mpeg", "m2v", "mpv",
+            "ts", "m2ts", "mts", "ogv", "ogm", "3gp", "3g2", "vob", "mxf",
+            "nut", "dv", "rm");
 
     private static final Set<String> AUDIO_EXTENSIONS = Set.of(
-            "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "wav", "wma",
-            "aiff", "aif", "ape", "mka", "ac3", "dts", "amr");
+            "mp3", "mp2", "m4a", "m4b", "m4r", "3ga", "aac", "flac", "ogg", "oga",
+            "opus", "wav", "wma", "aiff", "aif", "ape", "mka", "ac3", "dts", "amr",
+            "caf", "au", "ra", "mpc", "wv", "tta", "spx", "dsf");
 
     private ExtensionClassifier() {}
 

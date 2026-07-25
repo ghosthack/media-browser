@@ -33,6 +33,21 @@ public interface ViewerHost {
     default void refreshAfterViewerMove(Path focusPath) { }
 
     /**
+     * Re-list this host's directory after the automatic extension fix renamed
+     * {@code newPath}'s file in place, landing the host's selection on the new
+     * name — like {@link #refreshAfterViewerMove}, but the refresh must stay
+     * passive: the viewer's session is untouched by the fix, so the host must
+     * not auto-open or otherwise steer the viewer (the mosaic's move refresh
+     * does, which here would restart an ended video or yank the viewer back to
+     * the renamed item after the user navigated on). The default delegates to
+     * {@link #refreshAfterViewerMove}, which is exactly that passive re-list
+     * for the browser.
+     */
+    default void refreshAfterExtensionFix(Path newPath) {
+        refreshAfterViewerMove(newPath);
+    }
+
+    /**
      * Relay an Up/Down key the viewer chose not to act on to this host's own
      * navigation, so the underlying list/grid moves its selection (the mosaic a
      * row, the file list an item) while the viewer stays in front. The default

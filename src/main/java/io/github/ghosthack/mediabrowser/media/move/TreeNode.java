@@ -9,7 +9,7 @@ import java.util.List;
  * {@link #getPath() path} only, so a node can be looked up by its absolute path
  * regardless of expansion/loading state.
  *
- * <p>Ported from {@code iris94.core.models.TreeNode}; kept String-based (paths
+ * <p>Ported from the Swing predecessor's {@code TreeNode}; kept String-based (paths
  * as absolute path strings) so the {@code MoveDialogLogic} mini-tree algorithms
  * can compare highlighted paths to node paths directly.
  */

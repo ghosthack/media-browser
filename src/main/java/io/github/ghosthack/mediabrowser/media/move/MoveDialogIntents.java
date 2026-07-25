@@ -6,15 +6,15 @@ package io.github.ghosthack.mediabrowser.media.move;
  * whatever drives it — a Phase&nbsp;5 {@code MoveController}, a window, or the
  * manual harness used to exercise the view in isolation.
  *
- * <p>Mirrors the {@code AppStore.*moveDialog*} glue iris's Swing dialog called.
+ * <p>Mirrors the {@code *moveDialog*} store glue the Swing predecessor's dialog called.
  * Every method mutates the shared {@link MoveDialogModel} (and, for the
  * filesystem-touching ones, the move history / listing) and is expected to call
  * the view's {@code refresh()} when the model settles — synchronously for the
  * pure navigation intents, and after the async move completes for
  * {@link #submit()}. The view never reconciles itself; the driver decides when,
- * exactly as iris's store→change-listener→{@code syncFromState} flow did. This
- * keeps the "synchronous refresh before focus" sequencing (see the handoff §2.8)
- * in the driver's hands.
+ * exactly as the predecessor's store→change-listener→{@code syncFromState} flow
+ * did. This keeps the "synchronous refresh before focus" sequencing in the
+ * driver's hands.
  */
 public interface MoveDialogIntents {
 

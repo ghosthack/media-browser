@@ -1,6 +1,10 @@
 package io.github.ghosthack.mediabrowser.media;
 
 import io.github.ghosthack.mediabrowser.MosaicTelemetry;
+import io.github.ghosthack.mediabrowser.media.archive.ArchiveEntryCache;
+import io.github.ghosthack.mediabrowser.media.archive.ArchiveFormat;
+import io.github.ghosthack.mediabrowser.media.archive.ArchiveInfo;
+import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -55,6 +59,7 @@ public final class MediaService implements AutoCloseable {
 
     private final MediaFacade facade;
     private volatile DetectionMode detectionMode = DetectionMode.FILE_EXTENSION;
+    private volatile boolean folderPreviewSniff;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "media-facade");
         t.setDaemon(true);
@@ -131,9 +136,10 @@ public final class MediaService implements AutoCloseable {
     }
 
     /**
-     * How files are classified during a scan: native content sniffing (default)
-     * or filename extension. Applies to the next listing; re-scan the current
-     * folder to reclassify what is already shown.
+     * How files are classified during a scan: by filename extension alone, or
+     * extension plus a header-magic promotion of files the name can't classify
+     * (see {@link #classifyByContent}). Applies to the next listing; re-scan
+     * the current folder to reclassify what is already shown.
      */
     public void setDetectionMode(DetectionMode mode) {
         this.detectionMode = mode;
@@ -161,9 +167,9 @@ public final class MediaService implements AutoCloseable {
      *
      * <p>Used under {@link DetectionMode#CONTENT_SNIFF} to paint the folder
      * structure with placeholder tiles the instant a directory opens; the caller
-     * then refines the classification in the background from {@link #listEntries}.
-     * The extension pass can only mislabel the handful of files whose bytes
-     * disagree with their name (an extension-less or misnamed media file, an
+     * then refines the classification in the background from {@link #reclassify}.
+     * The extension pass can only miss the handful of files content mode adds
+     * something for (an extension-less or unknown-suffix media file, an
      * animated AVIF/HEIC), which the refine pass corrects.</p>
      */
     public CompletableFuture<List<DirEntry>> listEntriesFast(Path dir) {
@@ -171,21 +177,23 @@ public final class MediaService implements AutoCloseable {
     }
 
     /**
-     * Streams the content-sniff classification of {@code files} on the
+     * Streams the content-mode classification of {@code files} on the
      * media-facade executor, the companion to {@link #listEntriesFast}: after a
      * directory has been painted from the fast extension-only listing, this
-     * sniffs each file in turn and reports only the <em>corrections</em> — the
-     * files whose bytes disagree with the extension guess — to {@code onChanged},
-     * as each lands, so the listing can be refined progressively rather than in
-     * one swap at the end of the scan.
+     * classifies each file in turn per {@link #classifyByContent} and reports
+     * only the <em>corrections</em> — the promotions of files the extension
+     * guess left as OTHER, plus the animated AVIF/HEIC refinements — to
+     * {@code onChanged}, as each lands, so the listing is refined progressively
+     * rather than in one swap at the end of the scan.
      *
      * <p>{@code onChanged} is invoked on the executor thread with the file and
-     * its sniffed kind (empty = not media); the caller marshals to the FX thread
-     * and coalesces. Junk files and files whose sniff matches their extension are
-     * skipped silently (no callback), so a well-named directory streams nothing.
-     * Honours {@code stillWanted}: once it reports the listing was superseded
-     * (the user navigated away) the remaining files are abandoned. A per-file
-     * sniff failure is swallowed, leaving that file's extension guess in place.</p>
+     * its corrected kind; the caller marshals to the FX thread and coalesces.
+     * Junk files and files whose content verdict matches their extension guess
+     * are skipped silently (no callback), so a well-named directory streams
+     * nothing. Honours {@code stillWanted}: once it reports the listing was
+     * superseded (the user navigated away) the remaining files are abandoned. A
+     * per-file failure is swallowed, leaving that file's extension guess in
+     * place.</p>
      */
     public CompletableFuture<Void> reclassify(List<Path> files, BooleanSupplier stillWanted,
                                               BiConsumer<Path, Optional<MediaKind>> onChanged) {
@@ -228,15 +236,37 @@ public final class MediaService implements AutoCloseable {
     public CompletableFuture<MediaProbe> probe(Path file) {
         return CompletableFuture.supplyAsync(() -> {
             rejectIfEmpty(file);
-            return facade.probe(file);
+            return facade.probe(decodable(file));
         }, executor);
     }
 
     public CompletableFuture<VisualResult> loadVisual(Path file) {
         return CompletableFuture.supplyAsync(() -> {
             rejectIfEmpty(file);
-            return facade.loadVisual(file);
+            return facade.loadVisual(decodable(file));
         }, executor);
+    }
+
+    /**
+     * The path to hand the native backend for {@code file}: {@code file} itself
+     * for an ordinary file, or an extracted copy when it lives inside an
+     * archive.
+     *
+     * <p>Every backend opens media by OS path, and an entry inside an ISO or
+     * zip has none. Materializing here — at the one point where the service
+     * crosses into the facade — is what lets all six backends stay unaware that
+     * archives exist, and keeps browsing inside a container behave-alike with
+     * browsing a folder. Note that the <em>caller-facing</em> path stays the
+     * archive path throughout: cache keys, probes and the UI all continue to
+     * identify the entry by where it really lives, not by its temporary copy.</p>
+     */
+    private static Path decodable(Path file) {
+        try {
+            return ArchiveEntryCache.shared().materialize(file);
+        } catch (IOException e) {
+            throw new MediaException("cannot extract " + file.getFileName()
+                    + " from its archive: " + e.getMessage(), e);
+        }
     }
 
     /**
@@ -260,7 +290,7 @@ public final class MediaService implements AutoCloseable {
         return CompletableFuture.supplyAsync(() -> {
             if (!stillWanted.getAsBoolean()) return null;
             rejectIfEmpty(file);
-            return facade.loadVisual(file);
+            return facade.loadVisual(decodable(file));
         }, executor);
     }
 
@@ -274,9 +304,31 @@ public final class MediaService implements AutoCloseable {
      */
     public CompletableFuture<Metadata> metadata(Path file) {
         return CompletableFuture.supplyAsync(() -> {
+            // A container is not media: handing it to the facade would only
+            // produce a decode failure, when what it actually has to say is its
+            // volume identity.
+            if (ArchivePaths.isArchiveFile(file)) return archiveMetadata(file);
             rejectIfEmpty(file);
-            return facade.readMetadata(file);
+            return facade.readMetadata(decodable(file));
         }, metadataExecutor);
+    }
+
+    /** An archive's self-description as a {@link Metadata} snapshot. */
+    private static Metadata archiveMetadata(Path archive) {
+        ArchiveInfo info;
+        try {
+            info = ArchiveInfo.read(archive);
+        } catch (IOException e) {
+            throw new MediaException("cannot read " + archive.getFileName()
+                    + ": " + e.getMessage(), e);
+        }
+        String group = info.format() == ArchiveFormat.ISO ? "Volume" : "Archive";
+        var builder = new Metadata.Builder(archive);
+        builder.add(group, "Format", info.summary());
+        for (ArchiveInfo.Field field : info.fields()) {
+            builder.add(group, field.name(), field.value());
+        }
+        return builder.build();
     }
 
     /**
@@ -310,7 +362,7 @@ public final class MediaService implements AutoCloseable {
                     try {
                         rejectIfEmpty(file);
                         return thumbnailCache.get(k,
-                                () -> facade.loadThumbnail(file, maxEdge, mode));
+                                () -> facade.loadThumbnail(decodable(file), maxEdge, mode));
                     } finally {
                         MosaicTelemetry.recordThumbnailLoad(
                                 MosaicTelemetry.elapsedSince(loadStart));
@@ -361,23 +413,37 @@ public final class MediaService implements AutoCloseable {
      * The first {@code limit} visual media files (by name) directly inside
      * {@code dir} — still images and videos, both of which yield a frame for a
      * mosaic folder tile's preview collage. Classified by filename extension
-     * only (no native probe, no recursion) so scanning many folders stays cheap;
-     * runs on the dedicated thumbnail pool. Audio is excluded (no reliable
-     * visual). Returns an empty list for {@code limit <= 0}, an unreadable
-     * directory, or one with no visual media.
+     * (no native probe, no recursion) so scanning many folders stays cheap;
+     * with {@link #setFolderPreviewSniff the sniff toggle} on, files the name
+     * can't classify additionally get the curated {@link ContentSniffer}
+     * header check (one small read each), so unnamed media shows in collages
+     * too. Runs on the dedicated thumbnail pool. Audio is excluded (no
+     * reliable visual). Returns an empty list for {@code limit <= 0}, an
+     * unreadable directory, or one with no visual media.
      */
     public CompletableFuture<List<Path>> folderPreview(Path dir, int limit) {
-        return CompletableFuture.supplyAsync(() -> scanFolderPreview(dir, limit),
+        boolean sniff = folderPreviewSniff;
+        return CompletableFuture.supplyAsync(() -> scanFolderPreview(dir, limit, sniff),
                 thumbnailExecutor);
     }
 
-    private static List<Path> scanFolderPreview(Path dir, int limit) {
+    /**
+     * Whether {@link #folderPreview} header-sniffs extension-less and
+     * unknown-suffix children (per {@link ContentSniffer}) instead of staying
+     * strictly name-only. Off by default; independent of the listing's
+     * {@link DetectionMode} so the toggle behaves the same in both modes.
+     * The caller drops its cached previews when this flips.
+     */
+    public void setFolderPreviewSniff(boolean sniff) {
+        this.folderPreviewSniff = sniff;
+    }
+
+    private static List<Path> scanFolderPreview(Path dir, int limit, boolean sniff) {
         if (limit <= 0) return List.of();
         var previews = new ArrayList<Path>(limit);
         try (Stream<Path> children = Files.list(dir)) {
             children.filter(p -> !Files.isDirectory(p))
-                    .filter(p -> ExtensionClassifier.classify(p)
-                            .map(MediaService::isVisualKind).orElse(false))
+                    .filter(p -> isVisualPreview(p, sniff))
                     .sorted(Comparator.comparing(p -> p.getFileName().toString(),
                             String.CASE_INSENSITIVE_ORDER))
                     .limit(limit)
@@ -386,6 +452,20 @@ public final class MediaService implements AutoCloseable {
             return List.of();
         }
         return List.copyOf(previews);
+    }
+
+    /**
+     * Whether a child qualifies for a folder-preview cell: a visual kind by
+     * extension, or — sniffing on — by header magic when the name classifies
+     * as nothing. Promotion-only, mirroring {@link #classifyByContent}: a
+     * present extension verdict is never re-judged, and the junk gate keeps
+     * known OS droppings ({@code .DS_Store} et al.) from paying the read.
+     */
+    private static boolean isVisualPreview(Path file, boolean sniff) {
+        Optional<MediaKind> byExtension = ExtensionClassifier.classify(file);
+        if (byExtension.isPresent()) return isVisualKind(byExtension.get());
+        return sniff && !isJunk(file)
+                && ContentSniffer.sniff(file).map(MediaService::isVisualKind).orElse(false);
     }
 
     /** Whether a kind yields a still frame for a folder-preview cell (image or video). */
@@ -413,7 +493,7 @@ public final class MediaService implements AutoCloseable {
      */
     public VideoPlayer newVideoPlayer(Path file, VideoPlayer.FrameSink sink,
                                       Runnable onEnded, Consumer<Throwable> onError) {
-        return new VideoPlayer(facade, file, sink, onEnded, onError);
+        return new VideoPlayer(facade, decodable(file), sink, onEnded, onError);
     }
 
     /**
@@ -440,6 +520,26 @@ public final class MediaService implements AutoCloseable {
                         a.creationTime(), a.lastAccessTime());
             } catch (IOException e) {
                 throw new MediaException("cannot stat " + file + ": " + e.getMessage(), e);
+            }
+        }, fileOpExecutor);
+    }
+
+    /**
+     * Reads a container's self-description (format, ISO volume identity, ZIP
+     * entry count) on the {@code media-file-op} thread.
+     *
+     * <p>Runs when an archive is merely <em>selected</em>, so it deliberately
+     * does not mount: see {@link ArchiveInfo}. Kept off the facade thread too,
+     * since it is a filesystem read and has no business queueing behind a
+     * decode.</p>
+     */
+    public CompletableFuture<ArchiveInfo> archiveInfo(Path archive) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return ArchiveInfo.read(archive);
+            } catch (IOException e) {
+                throw new MediaException("cannot read " + archive.getFileName()
+                        + ": " + e.getMessage(), e);
             }
         }, fileOpExecutor);
     }
@@ -508,16 +608,28 @@ public final class MediaService implements AutoCloseable {
             } else {
                 long size = sizeOf(p);
                 long mtime = mtimeOf(p);
-                DirEntry entry = isJunk(p)
-                        ? new DirEntry(p, DirEntry.Type.OTHER, null, size, mtime)
-                        : classifier.apply(p)
-                                .map(kind -> new DirEntry(p, DirEntry.Type.MEDIA, kind, size, mtime))
-                                .orElseGet(() -> new DirEntry(p, DirEntry.Type.OTHER, null, size, mtime));
+                DirEntry entry;
+                if (isJunk(p)) {
+                    entry = new DirEntry(p, DirEntry.Type.OTHER, null, size, mtime);
+                } else if (ArchivePaths.isArchiveFile(p)) {
+                    // Checked in both the fast and the full scan: the check only
+                    // reads bytes for names that already look like a container,
+                    // and a row typed ARCHIVE in the fast listing that turned out
+                    // not to be one would offer a folder the user cannot open.
+                    entry = new DirEntry(p, DirEntry.Type.ARCHIVE, null, size, mtime);
+                } else {
+                    entry = classifier.apply(p)
+                            .map(kind -> new DirEntry(p, DirEntry.Type.MEDIA, kind, size, mtime))
+                            .orElseGet(() -> new DirEntry(p, DirEntry.Type.OTHER, null, size, mtime));
+                }
                 files.add(entry);
             }
         }
         var entries = new ArrayList<DirEntry>(dirs.size() + files.size() + 1);
-        Path parent = dir.getParent();
+        // Archive-aware: from the root of a mounted container this steps back
+        // out to the folder holding the container file, which the mount's own
+        // getParent() cannot do (a filesystem root has no parent).
+        Path parent = ArchivePaths.parentOf(dir);
         if (parent != null) entries.add(new DirEntry(parent, DirEntry.Type.PARENT, null, 0, 0));
         entries.addAll(dirs);
         entries.addAll(files);
@@ -527,8 +639,39 @@ public final class MediaService implements AutoCloseable {
     /** Classifies one file per the current {@link DetectionMode}. */
     private Optional<MediaKind> classify(Path file) {
         return detectionMode == DetectionMode.FILE_EXTENSION
-                ? classifyByExtension(file, ImageSequences::isAnimatedImageSequence, facade::classify)
-                : facade.classify(file);
+                ? classifyByExtension(file, ImageSequences::isAnimatedImageSequence,
+                        f -> facade.classify(decodable(f)))
+                : classifyByContent(file, ImageSequences::isAnimatedImageSequence,
+                        f -> facade.classify(decodable(f)), ContentSniffer::sniff);
+    }
+
+    /**
+     * The {@link MediaKind} for {@code file} in content detection mode: the
+     * extension verdict, plus a header-magic rescue for the files the name
+     * can't classify. A file whose extension already names a media kind keeps
+     * the exact {@link #classifyByExtension} policy (no I/O, including its
+     * animated AVIF/HEIC deferral); only when the name says nothing — no
+     * extension, or an unknown suffix like {@code .dat} — is the header
+     * sniffed ({@link ContentSniffer}, a curated magic-number table, one tiny
+     * read), promoting misnamed media the extension mode must show as OTHER.
+     *
+     * <p>Deliberately promotion-only: content never overrides a present
+     * extension verdict. The demotion a full per-file probe would add (a text
+     * file wearing {@code .jpg} dropping to OTHER) already surfaces loudly the
+     * moment the file is opened, and paying a native probe for every
+     * well-named file made content mode scan slowly precisely where it could
+     * never change the answer. A video renamed to {@code .jpg} is therefore
+     * trusted as IMAGE here and fails visibly at view time — consistent with
+     * preferring loud errors over silent reclassification.</p>
+     */
+    static Optional<MediaKind> classifyByContent(
+            Path file,
+            Predicate<Path> isAnimatedSequence,
+            Function<Path, Optional<MediaKind>> facadeClassify,
+            Function<Path, Optional<MediaKind>> sniff) {
+        Optional<MediaKind> byExtension =
+                classifyByExtension(file, isAnimatedSequence, facadeClassify);
+        return byExtension.isPresent() ? byExtension : sniff.apply(file);
     }
 
     /**

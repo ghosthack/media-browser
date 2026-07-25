@@ -4,6 +4,8 @@ import io.github.ghosthack.mediabrowser.AppSettings;
 import io.github.ghosthack.mediabrowser.LoadingIndicator;
 import io.github.ghosthack.mediabrowser.album.AlbumStore;
 import io.github.ghosthack.mediabrowser.media.AaeStore;
+import io.github.ghosthack.mediabrowser.media.ContentSniffer;
+import io.github.ghosthack.mediabrowser.media.ExtensionClassifier;
 import io.github.ghosthack.mediabrowser.media.MediaItem;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
@@ -11,7 +13,10 @@ import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
+import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.VideoPlayer;
+import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
+import io.github.ghosthack.mediabrowser.media.move.FileOps;
 
 import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
@@ -76,6 +81,7 @@ import javafx.scene.shape.Rectangle;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
+import java.io.UncheckedIOException;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
@@ -309,6 +315,8 @@ public final class ViewerWindow implements AppShell.ShellView {
     private final DiagnosticsPanel diagnosticsPanel;
     /** The right-edge panels share a vertical split: Info, Metadata, Diagnostics. */
     private final SplitPane rightPanels = new SplitPane();
+    /** Viewport | panel stack, with the stack's width dragged and remembered. */
+    private final SidePanelSplit contentSplit;
     /**
      * True for one event tick after a click in the toolbar or a side panel, so
      * the scene focus-owner listener knows to hand keyboard focus straight back
@@ -317,6 +325,12 @@ public final class ViewerWindow implements AppShell.ShellView {
     private boolean bounceArmed;
     /** Menu-bar visibility (Show ▸ Menu Bar binds here in the viewer's bar); reseeded from settings (hidden by default). */
     private final BooleanProperty menuBarVisible = new SimpleBooleanProperty(true);
+    /**
+     * Action-log panel visibility; hidden by default. One app-wide flag:
+     * MainWindow binds this bidirectionally to its own prop (which the Show ▸
+     * Action Log items and modifier1+J drive), so all three views follow it.
+     */
+    private final BooleanProperty actionLogVisible = new SimpleBooleanProperty(false);
     /** Debounce for the opt-in Auto metadata load; (re)armed on each navigation. */
     private final PauseTransition metadataDebounce = new PauseTransition(Duration.millis(180));
 
@@ -369,6 +383,20 @@ public final class ViewerWindow implements AppShell.ShellView {
     private int playSession;
     private long playDurationMicros = -1;
     private long playPositionMicros;
+
+    /**
+     * Files already offered the automatic extension fix this session — one
+     * attempt per path, so a failure (read-only volume, no certain extension)
+     * is reported once and never retried on every re-open.
+     */
+    private final Set<Path> extensionFixAttempted = new HashSet<>();
+    /** The file the live playback session opened; the fix target on stop. */
+    private Path playbackPath;
+    /**
+     * Whether the session delivered its {@code begin()} — the proof the file
+     * really plays, required before its extension may be fixed on stop.
+     */
+    private boolean playbackProven;
 
     public ViewerWindow(AppShell shell, MediaService service, AppSettings settings,
                         RotationStore rotationStore, AaeStore aaeStore) {
@@ -556,6 +584,11 @@ public final class ViewerWindow implements AppShell.ShellView {
         // horizontal one the bottom, leaving the corner free when both show.
         hScroll.setOrientation(Orientation.HORIZONTAL);
         vScroll.setOrientation(Orientation.VERTICAL);
+        // Opt these two into scrollbar.css's flat black styling. The sheet is
+        // scoped to this class so it stops at the black viewport and leaves the
+        // side panels' table scrollbars to the theme.
+        hScroll.getStyleClass().add("flat-scroll-bar");
+        vScroll.getStyleClass().add("flat-scroll-bar");
         hScroll.setMaxHeight(Region.USE_PREF_SIZE); // keep its 12px breadth
         vScroll.setMaxWidth(Region.USE_PREF_SIZE);
         hScroll.setVisible(false);
@@ -663,16 +696,25 @@ public final class ViewerWindow implements AppShell.ShellView {
         statusBar.visibleProperty().bind(statusToggle.selectedProperty());
         statusBar.managedProperty().bind(statusToggle.selectedProperty());
 
+        // The shared session action log + quick-move targets (same panel the
+        // browser and mosaic show), above this window's status bar.
+        var actionLogPanel = new ActionLogPanel(settings);
+        actionLogPanel.visibleProperty().bind(actionLogVisible);
+        actionLogPanel.managedProperty().bind(actionLogVisible);
+
         infoPanel.addHeaderControl(infoPin);
         metadataPanel.addHeaderControl(metadataPin);
 
         // The shared menu bar is inserted above the toolbar by installMenuBar(...).
         topBox = new VBox(toolBar);
-        this.root = new BorderPane(viewport);
+        // Viewport and panel stack share a draggable split (see SidePanelSplit)
+        // rather than BorderPane center/right, so the panel width is the user's
+        // and survives a restart.
+        contentSplit = new SidePanelSplit(viewport, rightPanels, settings);
+        this.root = new BorderPane(contentSplit);
         root.setTop(topBox);
-        root.setRight(rightPanels);
         updateRightPanels();
-        root.setBottom(statusBar);
+        root.setBottom(new VBox(actionLogPanel, statusBar));
         root.setStyle("-fx-background-color: black;");
 
         // The flat 1:1 pan scrollbars share the mosaic window's styling. On the
@@ -756,6 +798,14 @@ public final class ViewerWindow implements AppShell.ShellView {
                         e.consume();
                     }
                 }
+                // modifier1+J shows/hides the action log — the one app-wide
+                // flag, so the panel follows in the browser and mosaic too.
+                case J -> {
+                    if (e.isShortcutDown()) {
+                        actionLogVisible.set(!actionLogVisible.get());
+                        e.consume();
+                    }
+                }
                 case SLASH -> { toggleScaleMode(); e.consume(); }
                 // modifier1+C copies the on-screen item's path (right-click ▸
                 // Copy Path); a bare C toggles crop-to-fill.
@@ -812,7 +862,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         // is released over a bounce panel — by then the drag is done and the
         // control no longer needs keyboard focus. (Dragging is mouse-driven and
         // unaffected.)
-        for (Node panel : List.of(toolBar, rightPanels, statusBar)) {
+        for (Node panel : List.of(toolBar, rightPanels, statusBar, actionLogPanel)) {
             panel.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> armFocusBounce());
             panel.addEventFilter(MouseEvent.MOUSE_RELEASED,
                     e -> Platform.runLater(this::settleFocusToViewport));
@@ -956,6 +1006,11 @@ public final class ViewerWindow implements AppShell.ShellView {
     /** Status-bar visibility (Viewer ▸ Status Bar binds here); hidden by default. */
     public BooleanProperty statusBarVisibleProperty() {
         return statusToggle.selectedProperty();
+    }
+
+    /** Action-log visibility: the one app-wide flag, bound to MainWindow's prop. */
+    public BooleanProperty actionLogVisibleProperty() {
+        return actionLogVisible;
     }
 
     /** Info-panel visibility (Viewer ▸ Info Panel binds here). */
@@ -1481,7 +1536,10 @@ public final class ViewerWindow implements AppShell.ShellView {
     }
 
     private void loadCurrent() {
-        stopPlayback();
+        // Navigating away from a video that played fine is one of the two
+        // moments the automatic extension fix may run (the other: clean
+        // end-of-stream) — the handle is being released anyway.
+        stopPlayback(true);
         // Navigation ends a running flipbook (quietly: this load already
         // repaints the viewport, so the teardown must not reload on its own).
         if (flipbookToggle.isSelected()) {
@@ -1595,6 +1653,11 @@ public final class ViewerWindow implements AppShell.ShellView {
                                 + "\n(audio — no visual)");
                         statusLabel.setText(item.fileName() + " — " + item.kind());
                     }
+                    // Both branches are an error-free open (the error return is
+                    // above): a still decoded to a frame, or an audio file whose
+                    // probe succeeded. The decode holds no handle afterwards, so
+                    // a promoted file can take its extension fix right away.
+                    maybeFixExtension(item.path());
                 }));
 
         // Autoplay (on by default): a video starts playing on load instead of
@@ -1608,8 +1671,8 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /**
      * Rebuilds the right SplitPane from whichever panels are toggled on, so a
-     * hidden panel leaves no empty divider; collapses the split (handing the
-     * viewport its width back) when both are hidden.
+     * hidden panel leaves no empty divider, and drops the whole stack out of
+     * the content split (handing the viewport its width back) when all are off.
      */
     private void updateRightPanels() {
         var items = new ArrayList<Node>(3);
@@ -1621,9 +1684,9 @@ public final class ViewerWindow implements AppShell.ShellView {
             if (items.size() == 2) rightPanels.setDividerPositions(0.4);
             else if (items.size() == 3) rightPanels.setDividerPositions(0.34, 0.67);
         }
-        boolean any = !items.isEmpty();
-        rightPanels.setVisible(any);
-        rightPanels.setManaged(any);
+        // Membership in the content split, not visibility: an all-hidden stack
+        // leaves the split entirely so the viewport gets its width back.
+        if (contentSplit != null) contentSplit.setPanelsVisible(!items.isEmpty());
     }
 
     /**
@@ -1633,7 +1696,7 @@ public final class ViewerWindow implements AppShell.ShellView {
      * thread, so it never stalls fast browsing.
      *
      * <p>Staleness: we capture the <i>current</i> {@code loadSequence} <b>without</b>
-     * incrementing it. The handoff sketch's {@code ++loadSequence} would also void
+     * incrementing it. The alternative — {@code ++loadSequence} — would also void
      * the in-flight visual decode of this same item (its callback guards on the
      * same counter), dropping the image. A later navigation bumps the counter in
      * {@link #loadCurrent}, so a stale read then sees {@code seq != loadSequence}
@@ -1760,6 +1823,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         MediaItem item = siblings.get(index);
         rotationStore.rotate(item.path(), delta);
         rebakeCurrentAdjustments(item);
+        noteIfSessionOnly(item.path());
         // Keep the opener's view (the mosaic's tile) in step with this rotate.
         if (host != null) host.mirrorViewerAdjustments(item.path());
     }
@@ -1785,8 +1849,21 @@ public final class ViewerWindow implements AppShell.ShellView {
             case INVERT -> rotationStore.toggleInvert(item.path());
         }
         rebakeCurrentAdjustments(item);
+        noteIfSessionOnly(item.path());
         // Keep the opener's view (the mosaic's tile) in step with this change.
         if (host != null) host.mirrorViewerAdjustments(item.path());
+    }
+
+    /**
+     * States once per directory, in the status bar, that its adjustments could
+     * not be written and are being kept for this session only (a read-only
+     * volume). Overrides the dimensions line {@link #rebakeCurrentAdjustments}
+     * just set — the adjustment itself still applied, so this never blocks or
+     * fails the action; it only keeps the volatility from being invisible.
+     */
+    private void noteIfSessionOnly(Path path) {
+        String notice = rotationStore.pollSessionOnlyNotice(path);
+        if (notice != null) statusLabel.setText(notice);
     }
 
     /**
@@ -2232,8 +2309,13 @@ public final class ViewerWindow implements AppShell.ShellView {
      * decoder must let go first; {@link #stopPlayback()} blocks until the
      * playback thread has returned and released its native resources. Runs on the
      * FX thread just before the async move launches.
+     *
+     * <p>Also called by the browser's and mosaic's move hosts: leaving the
+     * viewer only pauses playback (so returning to the same item resumes), so
+     * a video watched here stays open until a move — from any view — asks for
+     * its file back.</p>
      */
-    private void releaseBeforeMove(List<Path> moving) {
+    void releaseBeforeMove(List<Path> moving) {
         if (player == null || index < 0 || index >= siblings.size()) return;
         Path current = siblings.get(index).path();
         if (moving.contains(current)) {
@@ -2297,6 +2379,8 @@ public final class ViewerWindow implements AppShell.ShellView {
         int session = ++playSession;
         playDurationMicros = -1;
         playPositionMicros = 0;
+        playbackPath = item.path();
+        playbackProven = false;
 
         // Honor the persisted user rotation: the presenter bakes it into each
         // frame (free on the GPU for the GL paths, a per-frame permutation for
@@ -2318,6 +2402,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                 Platform.runLater(() -> {
                     if (session != playSession) return;
                     hideLoadingIndicator();
+                    playbackProven = true;
                     playDurationMicros = durationMicros;
                     placeholder.setText("");
                     presenterLabel.setText(presenter.activePresenter());
@@ -2354,7 +2439,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                     if (repeatToggle.isSelected()) {
                         repeatPlayback(item);
                     } else {
-                        stopPlayback();
+                        stopPlayback(true);
                         statusLabel.setText(item.fileName() + " — ended");
                     }
                 }),
@@ -2400,12 +2485,92 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /** Ends any playback session; safe to call when none is active. */
     private void stopPlayback() {
+        stopPlayback(false);
+    }
+
+    /**
+     * Ends any playback session; safe to call when none is active. With
+     * {@code fixExtension} true, a session that proved its file plays (its
+     * {@code begin()} arrived, no error) offers the released file the
+     * automatic extension fix once the handle is closed — the close must come
+     * first, since on Windows an open file cannot be renamed. Callers pass
+     * {@code false} when the file is about to be moved
+     * ({@link #releaseBeforeMove}), re-opened (the flipbook), or just failed
+     * (the playback error hook).
+     */
+    private void stopPlayback(boolean fixExtension) {
+        Path played = playbackPath;
+        boolean proven = playbackProven;
+        playbackPath = null;
+        playbackProven = false;
         playSession++;
         playButton.setSelected(false);
         presenterLabel.setText("");
         if (player == null) return;
         player.close();
         player = null;
+        if (fixExtension && proven && played != null) {
+            maybeFixExtension(played);
+        }
+    }
+
+    /**
+     * The automatic extension fix (Settings ▸ General): a content-promoted
+     * file — one whose name classifies as nothing — that just opened without
+     * error is renamed in place to its header's canonical extension, with the
+     * move dialog's collision suffix policy, recorded as an {@code EXTFIX}
+     * action-log entry. One attempt per file per session; skipped entirely
+     * while a move is in flight (the move owns the path), and when the header
+     * offers no certain extension the name is simply left alone. A failed
+     * rename (read-only volume) is logged to stderr once and never blocks the
+     * view.
+     */
+    private void maybeFixExtension(Path path) {
+        if (!settings.extensionFixEnabled()) return;
+        if (ExtensionClassifier.classify(path).isPresent()) return; // named: out of scope
+        // Nothing inside a disc image or zip can be renamed; skip silently
+        // rather than attempting a rename that can only fail.
+        if (ArchivePaths.inArchive(path)) return;
+        if (MoveController.isMoveInFlight()) return;
+        if (!extensionFixAttempted.add(path)) return;
+        service.fileOp(() -> {
+            String extension = ContentSniffer.canonicalExtension(path).orElse(null);
+            if (extension == null) return (Path) null; // uncertain: keep the name
+            try {
+                return FileOps.renameInPlaceWithAutoRename(path,
+                        path.getFileName() + "." + extension);
+            } catch (java.io.IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }).whenComplete((finalPath, error) -> Platform.runLater(() -> {
+            if (error != null) {
+                logError("Extension fix failed for " + path.getFileName(), error);
+                return;
+            }
+            if (finalPath != null) {
+                ActionLog.get().record(ActionLogEntry.extensionFix(path, finalPath));
+                applyExtensionFix(path, finalPath);
+            }
+        }));
+    }
+
+    /**
+     * Lands a completed extension fix in the UI: re-points the sibling ring's
+     * entry at the new path in place (the ring is a snapshot — without this,
+     * next/prev navigation back onto the item would decode a path that no
+     * longer exists), and has the host re-list its folder around the new name,
+     * the same refresh a viewer-performed move uses.
+     */
+    private void applyExtensionFix(Path oldPath, Path newPath) {
+        for (int i = 0; i < siblings.size(); i++) {
+            if (siblings.get(i).path().equals(oldPath)) {
+                var updated = new ArrayList<>(siblings);
+                updated.set(i, new MediaItem(newPath, updated.get(i).kind()));
+                siblings = List.copyOf(updated);
+                break;
+            }
+        }
+        if (host != null) host.refreshAfterExtensionFix(newPath);
     }
 
     private static String timecode(long micros) {

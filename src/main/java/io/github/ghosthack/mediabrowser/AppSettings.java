@@ -51,6 +51,7 @@ public final class AppSettings {
     private static final String MOSAIC_BORDER_WIDTH_KEY = "mosaic.borderWidth";
     private static final String MOSAIC_BORDER_COLOR_KEY = "mosaic.borderColor";
     private static final String MOSAIC_FOLDER_PREVIEW_GRID_KEY = "mosaic.folderPreview.grid";
+    private static final String MOSAIC_FOLDER_PREVIEW_SNIFF_KEY = "mosaic.folderPreview.sniff";
     private static final String MOSAIC_FOLDER_GLYPH_KEY = "mosaic.folderGlyph";
     /** Legacy boolean; read only to migrate older files to the enum above. */
     private static final String MOSAIC_FOLDER_IMAGE_KEY = "mosaic.folderImage";
@@ -58,6 +59,7 @@ public final class AppSettings {
     private static final String MOSAIC_FILE_LABELS_KEY = "mosaic.labels.files";
     private static final String MOSAIC_MEDIA_LABELS_KEY = "mosaic.labels.media";
     private static final String MOVE_HISTORY_LIMIT_KEY = "move.history.limit";
+    private static final String ADJUSTMENTS_VOLATILE_MAX_DIRS_KEY = "adjustments.volatile.maxDirs";
     /** Recent move targets are stored as indexed keys {@code move.history.<n>}. */
     private static final String MOVE_HISTORY_ENTRY_PREFIX = "move.history.";
     /** Recently-used album files are stored as indexed keys {@code album.recent.<n>}. */
@@ -74,7 +76,6 @@ public final class AppSettings {
     private static final String BROWSER_TOOLBAR_KEY = "browser.toolbar.visible";
     private static final String BROWSER_STATUS_BAR_KEY = "browser.statusBar.visible";
     private static final String BROWSER_NAV_TREE_KEY = "browser.navTree.visible";
-    private static final String BROWSER_ACTION_LOG_KEY = "browser.actionLog.visible";
     private static final String VIEWER_MENU_BAR_KEY = "viewer.menuBar.visible";
     private static final String VIEWER_TOOLBAR_KEY = "viewer.toolbar.visible";
     private static final String VIEWER_STATUS_BAR_KEY = "viewer.statusBar.visible";
@@ -89,9 +90,25 @@ public final class AppSettings {
     private static final String MOSAIC_TOOLBAR_KEY = "mosaic.toolbar.visible";
     private static final String MOSAIC_STATUS_BAR_KEY = "mosaic.statusBar.visible";
     private static final String MOSAIC_LOCATION_BAR_KEY = "mosaic.locationBar.visible";
-    private static final String MOSAIC_ACTION_LOG_KEY = "mosaic.actionLog.visible";
+    /**
+     * App-wide: the action-log panel's visibility — one flag for the browser,
+     * mosaic and viewer (replaced the per-view {@code browser.actionLog.visible}
+     * / {@code mosaic.actionLog.visible} pair, which migrate as an OR).
+     */
+    private static final String ACTION_LOG_VISIBLE_KEY = "actionLog.visible";
     /** App-wide: mirror the action log into the append-only JSONL file. */
     private static final String ACTION_LOG_FILE_KEY = "actionLog.file";
+    private static final String EXTENSION_FIX_KEY = "extensionFix.enabled";
+    /** App-wide: width of the Info/Metadata/Diagnostics panel stack (dragged on its divider). */
+    private static final String SIDE_PANEL_WIDTH_KEY = "ui.sidePanels.width";
+
+    /**
+     * Side-panel stack default: the panels' own preferred width, clamped to
+     * something a table still reads in and narrower than any usable window.
+     */
+    private static final int DEFAULT_SIDE_PANEL_WIDTH = 280;
+    private static final int MIN_SIDE_PANEL_WIDTH = 160;
+    private static final int MAX_SIDE_PANEL_WIDTH = 1600;
 
     /** Viewer slideshow defaults: 3-second forward auto-advance, interval clamped 1..10s. */
     private static final int DEFAULT_VIEWER_SLIDESHOW_INTERVAL = 3;
@@ -141,6 +158,17 @@ public final class AppSettings {
     private static final int MIN_MOVE_HISTORY_LIMIT = 1;
     private static final int MAX_MOVE_HISTORY_LIMIT = 100;
 
+    /**
+     * How many directories may hold session-only adjustments when their sidecar
+     * cannot be written (a read-only volume, a locked card): 10 by default,
+     * clamped to {@code [0, 100]}. {@code 0} disables the fallback, restoring
+     * the strict behaviour where an unwritable sidecar means the adjustment does
+     * not apply at all.
+     */
+    private static final int DEFAULT_ADJUSTMENTS_VOLATILE_MAX_DIRS = 10;
+    private static final int MIN_ADJUSTMENTS_VOLATILE_MAX_DIRS = 0;
+    private static final int MAX_ADJUSTMENTS_VOLATILE_MAX_DIRS = 100;
+
     private boolean undecoratedWindows;
     private boolean undecoratedResizable;
     private boolean maximizeOverscan;
@@ -176,18 +204,19 @@ public final class AppSettings {
     private int mosaicBorderWidth;
     private String mosaicBorderColor;
     private int mosaicFolderPreviewGrid;
+    private boolean mosaicFolderPreviewSniff;
     private MosaicFolderGlyph mosaicFolderGlyph;
     private boolean mosaicDirLabelsVisible;
     private boolean mosaicFileLabelsVisible;
     private boolean mosaicMediaLabelsVisible;
     private List<String> moveHistory = new ArrayList<>();
     private int moveHistoryLimit = DEFAULT_MOVE_HISTORY_LIMIT;
+    private int adjustmentsVolatileMaxDirs = DEFAULT_ADJUSTMENTS_VOLATILE_MAX_DIRS;
     private List<String> albumRecents = new ArrayList<>();
     private boolean browserMenuBarVisible;
     private boolean browserToolbarVisible;
     private boolean browserStatusBarVisible;
     private boolean browserNavTreeVisible;
-    private boolean browserActionLogVisible;
     private boolean viewerMenuBarVisible;
     private boolean viewerToolbarVisible;
     private boolean viewerStatusBarVisible;
@@ -200,8 +229,10 @@ public final class AppSettings {
     private boolean mosaicToolbarVisible;
     private boolean mosaicStatusBarVisible;
     private boolean mosaicLocationBarVisible;
-    private boolean mosaicActionLogVisible;
+    private boolean actionLogVisible;
     private boolean actionLogFileEnabled;
+    private boolean extensionFixEnabled;
+    private int sidePanelWidth = DEFAULT_SIDE_PANEL_WIDTH;
     /**
      * The quick-move ({@code F1}–{@code F4}) toggle. Transient: shared
      * process-wide via this singleton so the checkbox state is consistent across
@@ -284,6 +315,8 @@ public final class AppSettings {
         settings.mosaicFolderPreviewGrid = parseBoundedInt(
                 props.getProperty(MOSAIC_FOLDER_PREVIEW_GRID_KEY),
                 DEFAULT_MOSAIC_FOLDER_PREVIEW_GRID, 0, 4);
+        settings.mosaicFolderPreviewSniff = Boolean.parseBoolean(
+                props.getProperty(MOSAIC_FOLDER_PREVIEW_SNIFF_KEY, "false"));
         // Prefer the new enum key; fall back to migrating the legacy boolean
         // (true → IMAGE) so existing users keep their photographic folders.
         MosaicFolderGlyph legacyGlyph = Boolean.parseBoolean(
@@ -304,6 +337,10 @@ public final class AppSettings {
                 props.getProperty(MOVE_HISTORY_LIMIT_KEY), DEFAULT_MOVE_HISTORY_LIMIT,
                 MIN_MOVE_HISTORY_LIMIT, MAX_MOVE_HISTORY_LIMIT);
         settings.moveHistory = loadMoveHistory(props, settings.moveHistoryLimit);
+        settings.adjustmentsVolatileMaxDirs = parseBoundedInt(
+                props.getProperty(ADJUSTMENTS_VOLATILE_MAX_DIRS_KEY),
+                DEFAULT_ADJUSTMENTS_VOLATILE_MAX_DIRS,
+                MIN_ADJUSTMENTS_VOLATILE_MAX_DIRS, MAX_ADJUSTMENTS_VOLATILE_MAX_DIRS);
         settings.albumRecents = loadAlbumRecents(props);
         // Per-window chrome visibility. Defaults: the browser, viewer and mosaic
         // menu bars and the browser nav tree shown, all three toolbars hidden,
@@ -316,8 +353,6 @@ public final class AppSettings {
                 Boolean.parseBoolean(props.getProperty(BROWSER_STATUS_BAR_KEY, "true"));
         settings.browserNavTreeVisible =
                 Boolean.parseBoolean(props.getProperty(BROWSER_NAV_TREE_KEY, "true"));
-        settings.browserActionLogVisible =
-                Boolean.parseBoolean(props.getProperty(BROWSER_ACTION_LOG_KEY, "false"));
         settings.viewerMenuBarVisible =
                 Boolean.parseBoolean(props.getProperty(VIEWER_MENU_BAR_KEY, "true"));
         settings.viewerToolbarVisible =
@@ -346,10 +381,20 @@ public final class AppSettings {
                 Boolean.parseBoolean(props.getProperty(MOSAIC_STATUS_BAR_KEY, "true"));
         settings.mosaicLocationBarVisible =
                 Boolean.parseBoolean(props.getProperty(MOSAIC_LOCATION_BAR_KEY, "false"));
-        settings.mosaicActionLogVisible =
-                Boolean.parseBoolean(props.getProperty(MOSAIC_ACTION_LOG_KEY, "false"));
+        // One flag for all three views; a properties file from before the
+        // unification carries the per-view pair instead — migrate as their OR.
+        String actionLogVisibleProp = props.getProperty(ACTION_LOG_VISIBLE_KEY);
+        settings.actionLogVisible = actionLogVisibleProp != null
+                ? Boolean.parseBoolean(actionLogVisibleProp)
+                : Boolean.parseBoolean(props.getProperty("browser.actionLog.visible", "false"))
+                        || Boolean.parseBoolean(props.getProperty("mosaic.actionLog.visible", "false"));
         settings.actionLogFileEnabled =
                 Boolean.parseBoolean(props.getProperty(ACTION_LOG_FILE_KEY, "false"));
+        settings.extensionFixEnabled =
+                Boolean.parseBoolean(props.getProperty(EXTENSION_FIX_KEY, "false"));
+        settings.sidePanelWidth = parseBoundedInt(
+                props.getProperty(SIDE_PANEL_WIDTH_KEY), DEFAULT_SIDE_PANEL_WIDTH,
+                MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH);
         return settings;
     }
 
@@ -467,11 +512,15 @@ public final class AppSettings {
         props.setProperty(MOSAIC_BORDER_COLOR_KEY, mosaicBorderColor);
         props.setProperty(MOSAIC_FOLDER_PREVIEW_GRID_KEY,
                 Integer.toString(mosaicFolderPreviewGrid));
+        props.setProperty(MOSAIC_FOLDER_PREVIEW_SNIFF_KEY,
+                Boolean.toString(mosaicFolderPreviewSniff));
         props.setProperty(MOSAIC_FOLDER_GLYPH_KEY, mosaicFolderGlyph.name());
         props.setProperty(MOSAIC_DIR_LABELS_KEY, Boolean.toString(mosaicDirLabelsVisible));
         props.setProperty(MOSAIC_FILE_LABELS_KEY, Boolean.toString(mosaicFileLabelsVisible));
         props.setProperty(MOSAIC_MEDIA_LABELS_KEY, Boolean.toString(mosaicMediaLabelsVisible));
         props.setProperty(MOVE_HISTORY_LIMIT_KEY, Integer.toString(moveHistoryLimit));
+        props.setProperty(ADJUSTMENTS_VOLATILE_MAX_DIRS_KEY,
+                Integer.toString(adjustmentsVolatileMaxDirs));
         for (int i = 0; i < moveHistory.size(); i++) {
             props.setProperty(MOVE_HISTORY_ENTRY_PREFIX + i, moveHistory.get(i));
         }
@@ -482,7 +531,6 @@ public final class AppSettings {
         props.setProperty(BROWSER_TOOLBAR_KEY, Boolean.toString(browserToolbarVisible));
         props.setProperty(BROWSER_STATUS_BAR_KEY, Boolean.toString(browserStatusBarVisible));
         props.setProperty(BROWSER_NAV_TREE_KEY, Boolean.toString(browserNavTreeVisible));
-        props.setProperty(BROWSER_ACTION_LOG_KEY, Boolean.toString(browserActionLogVisible));
         props.setProperty(VIEWER_MENU_BAR_KEY, Boolean.toString(viewerMenuBarVisible));
         props.setProperty(VIEWER_TOOLBAR_KEY, Boolean.toString(viewerToolbarVisible));
         props.setProperty(VIEWER_STATUS_BAR_KEY, Boolean.toString(viewerStatusBarVisible));
@@ -496,8 +544,10 @@ public final class AppSettings {
         props.setProperty(MOSAIC_TOOLBAR_KEY, Boolean.toString(mosaicToolbarVisible));
         props.setProperty(MOSAIC_STATUS_BAR_KEY, Boolean.toString(mosaicStatusBarVisible));
         props.setProperty(MOSAIC_LOCATION_BAR_KEY, Boolean.toString(mosaicLocationBarVisible));
-        props.setProperty(MOSAIC_ACTION_LOG_KEY, Boolean.toString(mosaicActionLogVisible));
+        props.setProperty(ACTION_LOG_VISIBLE_KEY, Boolean.toString(actionLogVisible));
         props.setProperty(ACTION_LOG_FILE_KEY, Boolean.toString(actionLogFileEnabled));
+        props.setProperty(EXTENSION_FIX_KEY, Boolean.toString(extensionFixEnabled));
+        props.setProperty(SIDE_PANEL_WIDTH_KEY, Integer.toString(sidePanelWidth));
         Files.createDirectories(file.getParent());
         try (var out = Files.newOutputStream(file)) {
             props.store(out, "Media Browser settings");
@@ -657,7 +707,7 @@ public final class AppSettings {
                 ? "auto" : decodeDevice;
     }
 
-    /** Media detection method: {@code "content"} (default) or {@code "extension"}. */
+    /** Media detection method: {@code "extension"} (default) or {@code "content"}. */
     public String detectionMode() {
         return detectionMode;
     }
@@ -832,6 +882,20 @@ public final class AppSettings {
     }
 
     /**
+     * Whether the folder-preview scan also header-sniffs files the name can't
+     * classify ({@code ContentSniffer}), so unnamed media shows in collage
+     * tiles. Defaults to {@code false}: off, the scan is name-only and never
+     * reads a child file.
+     */
+    public boolean mosaicFolderPreviewSniff() {
+        return mosaicFolderPreviewSniff;
+    }
+
+    public void setMosaicFolderPreviewSniff(boolean sniff) {
+        this.mosaicFolderPreviewSniff = sniff;
+    }
+
+    /**
      * How a mosaic folder tile with no preview collage is drawn: the muted gray
      * vector glyph, its black-on-gray inverse, or a photographic folder image.
      * Defaults to {@link MosaicFolderGlyph#GLYPH}.
@@ -899,6 +963,21 @@ public final class AppSettings {
     public void setMoveHistoryLimit(int limit) {
         this.moveHistoryLimit = Math.max(MIN_MOVE_HISTORY_LIMIT,
                 Math.min(MAX_MOVE_HISTORY_LIMIT, limit));
+    }
+
+    /**
+     * How many directories may hold session-only adjustments when their
+     * {@code .picasa.ini} cannot be written (default 10, clamped to
+     * {@code [0, 100]}; {@code 0} disables the fallback). See
+     * {@link io.github.ghosthack.mediabrowser.media.RotationStore}.
+     */
+    public int adjustmentsVolatileMaxDirs() {
+        return adjustmentsVolatileMaxDirs;
+    }
+
+    public void setAdjustmentsVolatileMaxDirs(int maxDirs) {
+        this.adjustmentsVolatileMaxDirs = Math.max(MIN_ADJUSTMENTS_VOLATILE_MAX_DIRS,
+                Math.min(MAX_ADJUSTMENTS_VOLATILE_MAX_DIRS, maxDirs));
     }
 
     /**
@@ -974,13 +1053,30 @@ public final class AppSettings {
         this.browserStatusBarVisible = visible;
     }
 
-    /** Whether the browser (main) window shows its action log panel (default {@code false}). */
-    public boolean browserActionLogVisible() {
-        return browserActionLogVisible;
+    /**
+     * Whether the action log panel is shown — one flag for the browser, mosaic
+     * and viewer (default {@code false}).
+     */
+    public boolean actionLogVisible() {
+        return actionLogVisible;
     }
 
-    public void setBrowserActionLogVisible(boolean visible) {
-        this.browserActionLogVisible = visible;
+    public void setActionLogVisible(boolean visible) {
+        this.actionLogVisible = visible;
+    }
+
+    /**
+     * Whether a content-promoted file (no classifying extension) that opens
+     * without error in the viewer is automatically renamed to its header's
+     * canonical extension, recorded as an {@code EXTFIX} action-log entry.
+     * Default {@code false}: fully dormant, no renames, no prompts.
+     */
+    public boolean extensionFixEnabled() {
+        return extensionFixEnabled;
+    }
+
+    public void setExtensionFixEnabled(boolean enabled) {
+        this.extensionFixEnabled = enabled;
     }
 
     /** Whether the browser (main) window shows its navigation tree (default {@code true}). */
@@ -1118,15 +1214,6 @@ public final class AppSettings {
         return mosaicLocationBarVisible;
     }
 
-    /** Whether the mosaic window shows its action log panel (default {@code false}). */
-    public boolean mosaicActionLogVisible() {
-        return mosaicActionLogVisible;
-    }
-
-    public void setMosaicActionLogVisible(boolean visible) {
-        this.mosaicActionLogVisible = visible;
-    }
-
     public void setMosaicLocationBarVisible(boolean visible) {
         this.mosaicLocationBarVisible = visible;
     }
@@ -1145,5 +1232,20 @@ public final class AppSettings {
 
     public void setActionLogFileEnabled(boolean enabled) {
         this.actionLogFileEnabled = enabled;
+    }
+
+    /**
+     * Width in pixels of the right-edge Info/Metadata/Diagnostics panel stack
+     * (default 280, clamped 160..1600). Shared by the viewer and the mosaic so
+     * the edge stays put as the single window swaps one view for the other;
+     * written whenever the user drags the stack's divider (see SidePanelSplit).
+     */
+    public int sidePanelWidth() {
+        return sidePanelWidth;
+    }
+
+    public void setSidePanelWidth(int width) {
+        this.sidePanelWidth = Math.max(MIN_SIDE_PANEL_WIDTH,
+                Math.min(MAX_SIDE_PANEL_WIDTH, width));
     }
 }

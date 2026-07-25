@@ -1,14 +1,18 @@
 package io.github.ghosthack.mediabrowser.media;
 
+import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
+
 import java.io.BufferedInputStream;
 import java.io.DataInputStream;
 import java.io.EOFException;
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -40,7 +44,7 @@ import java.util.function.Supplier;
  * {@code path|length|lastModified} so re-evaluating the same item (listing,
  * autoplay arming, viewer re-entry) stays off the hot path.
  *
- * <p>Ported from {@code iris94.services.ImageDecodeUtil}
+ * <p>Ported from the Swing predecessor's {@code ImageDecodeUtil}
  * ({@code isAnimatedImageSequence} / {@code hasTopLevelMoov}); the GIF branch is
  * an additional cheap structural scan.
  */
@@ -87,16 +91,29 @@ public final class ImageSequences {
         if (!gif && !isImageSequenceExtension(ext)) {
             return false;
         }
-        File f = file.toFile();
-        if (!f.isFile()) {
+        // Read through java.nio.file, not java.io.File: this runs during every
+        // directory scan, and an entry inside a ZIP/ISO has no java.io.File at
+        // all. The probes below only walk headers, so they work the same on
+        // either filesystem — and crucially without extracting anything, which
+        // a per-file scan must never trigger.
+        BasicFileAttributes attributes;
+        try {
+            attributes = Files.readAttributes(file, BasicFileAttributes.class);
+        } catch (IOException | RuntimeException e) {
             return false;
         }
-        String key = f.getAbsolutePath() + '|' + f.length() + '|' + f.lastModified();
+        if (!attributes.isRegularFile()) {
+            return false;
+        }
+        // Keyed on the locator so two archives holding the same inner path do
+        // not share a memoised verdict.
+        String key = ArchivePaths.format(file.toAbsolutePath()) + '|' + attributes.size()
+                + '|' + attributes.lastModifiedTime().toMillis();
         Boolean cached = ANIMATED_SEQUENCE_CACHE.get(key);
         if (cached != null) {
             return cached;
         }
-        boolean animated = gif ? hasMultipleGifFrames(f) : hasTopLevelMoov(f);
+        boolean animated = gif ? hasMultipleGifFrames(file) : hasTopLevelMoov(file);
         ANIMATED_SEQUENCE_CACHE.put(key, animated);
         return animated;
     }
@@ -173,20 +190,37 @@ public final class ImageSequences {
                 : MediaKind.IMAGE;
     }
 
+    /** Fills {@code buffer} to its limit; false at end of file. */
+    private static boolean readFully(SeekableByteChannel channel, ByteBuffer buffer)
+            throws IOException {
+        while (buffer.hasRemaining()) {
+            if (channel.read(buffer) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * Scans the top-level ISO-BMFF box list for a {@code moov} box (handles
      * 32-bit, 64-bit {@code largesize}, and the {@code size == 0} "to EOF"
      * forms). Bounded so a malformed file cannot spin.
      */
-    private static boolean hasTopLevelMoov(File file) {
-        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
-            long size = raf.length();
+    private static boolean hasTopLevelMoov(Path file) {
+        try (SeekableByteChannel channel = Files.newByteChannel(file, StandardOpenOption.READ)) {
+            long size = channel.size();
             long pos = 0;
+            ByteBuffer box = ByteBuffer.allocate(16);
             for (int i = 0; i < MAX_TOPLEVEL_BOXES && pos + 8 <= size; i++) {
-                raf.seek(pos);
-                long size32 = Integer.toUnsignedLong(raf.readInt());
+                channel.position(pos);
+                box.clear().limit(8);
+                if (!readFully(channel, box)) {
+                    break;
+                }
+                box.flip();
+                long size32 = Integer.toUnsignedLong(box.getInt());
                 byte[] type = new byte[4];
-                raf.readFully(type);
+                box.get(type);
                 if ("moov".equals(new String(type, StandardCharsets.US_ASCII))) {
                     return true;
                 }
@@ -196,7 +230,11 @@ public final class ImageSequences {
                     if (pos + 16 > size) {
                         break;
                     }
-                    boxSize = raf.readLong();
+                    box.clear().limit(8);
+                    if (!readFully(channel, box)) {
+                        break;
+                    }
+                    boxSize = box.flip().getLong();
                     header = 16;
                 } else if (size32 == 0) {
                     break; // last box, extends to EOF, and it isn't moov
@@ -229,9 +267,9 @@ public final class ImageSequences {
      * skipped via their length prefixes only — never buffered — and the walk is
      * bounded by {@link #MAX_GIF_BLOCKS} so a malformed file cannot spin.
      */
-    private static boolean hasMultipleGifFrames(File file) {
+    private static boolean hasMultipleGifFrames(Path file) {
         try (DataInputStream in = new DataInputStream(
-                new BufferedInputStream(new FileInputStream(file), 1 << 16))) {
+                new BufferedInputStream(Files.newInputStream(file), 1 << 16))) {
             byte[] header = new byte[6];
             in.readFully(header);
             String magic = new String(header, StandardCharsets.US_ASCII);

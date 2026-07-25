@@ -13,9 +13,9 @@ import java.time.Instant;
  * destination) — the JSONL form ({@link #toJsonLine()}/{@link #fromJsonLine})
  * is what the optional append-only {@link ActionLogFile} writes.
  *
- * <p>Ported from {@code iris94.core.models.ActionLogEntry}, trimmed to the
+ * <p>Ported from the Swing predecessor's {@code ActionLogEntry}, trimmed to the
  * action types this app performs (dialog moves, single-file renames and
- * quick-moves; iris's delete and virtual-catalog types have no counterpart
+ * quick-moves; the predecessor's delete and virtual-catalog types have no counterpart
  * here yet).
  */
 public record ActionLogEntry(
@@ -26,7 +26,15 @@ public record ActionLogEntry(
 
     public enum Type {
         MOVE,
-        RENAME
+        RENAME,
+        /**
+         * The automatic extension fix: a content-promoted file (no classifying
+         * extension) renamed in place to its header's canonical extension after
+         * it opened without error. Distinct from {@link #RENAME} so the log —
+         * in the panel and the on-disk JSONL — always distinguishes the app's
+         * automatic renames from the user's own.
+         */
+        EXTFIX
     }
 
     /**
@@ -44,11 +52,18 @@ public record ActionLogEntry(
                 sourcePath.toString(), finalPath.toString());
     }
 
+    /** Entry for one automatic extension fix (see {@link Type#EXTFIX}). */
+    public static ActionLogEntry extensionFix(Path sourcePath, Path finalPath) {
+        return new ActionLogEntry(System.currentTimeMillis(), Type.EXTFIX,
+                sourcePath.toString(), finalPath.toString());
+    }
+
     /** One-line human-readable description, used by the action-log panel. */
     public String summary() {
         return switch (type) {
             case MOVE -> "Moved " + sourcePath + " → " + targetPath;
             case RENAME -> "Renamed " + sourcePath + " → " + leafName(targetPath);
+            case EXTFIX -> "Extension fix: " + sourcePath + " → " + leafName(targetPath);
         };
     }
 

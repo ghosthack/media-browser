@@ -8,8 +8,7 @@ import java.util.Set;
  * The single, shared policy for the hidden per-directory <em>sidecar</em> files
  * the browser writes or consumes but never lists as browsable items: the user
  * rotation store's {@code .picasa.ini} and Apple Photos {@code .AAE} edit
- * sidecars. Centralized (per the rotation handoff's "promote the hidden-file
- * predicate" hardening) so every enumerator inherits the same rules instead of
+ * sidecars. Centralized so every enumerator inherits the same rules instead of
  * re-deriving them.
  *
  * <p>The rotation sidecar is hidden unconditionally (it is purely our

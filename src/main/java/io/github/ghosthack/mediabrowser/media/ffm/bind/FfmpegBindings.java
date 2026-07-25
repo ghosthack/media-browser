@@ -166,6 +166,23 @@ public interface FfmpegBindings {
      */
     void setAutoThreads(MemorySegment cctx);
 
+    /**
+     * Asks the decoder for a power-of-two-reduced frame before {@link #open2},
+     * via {@code av_opt_set_int(cctx, "lowres", n, 0)}. Returns whether the
+     * option was accepted — a decoder that does not support {@code lowres}
+     * reports so rather than silently decoding at full size.
+     *
+     * <p>Set through the AVOption API rather than by poking
+     * {@code AVCodecContext.lowres} directly: the struct write is not
+     * ABI-safe here and was verified to have no effect on the decode, while
+     * reading the field back still returned the written value.</p>
+     *
+     * <p>Used to step down a Kodak Photo CD image pack's resolution pyramid:
+     * FFmpeg's {@code photocd} decoder rejects the 16Base (3072x2048) layer on
+     * some otherwise-valid discs while every lower layer decodes cleanly.</p>
+     */
+    boolean setLowres(MemorySegment cctx, int lowres);
+
     void freeContext(MemorySegment cctxPtr);
 
     /** Allocates and right-sizes an {@code AVPacket}. */

@@ -41,8 +41,8 @@
     <javacpp.platform>macosx-arm64</javacpp.platform>
     <!-- Bundled-FFmpeg backend (FFMPEG_FFM): FFM stubs + self-extracting
          from-source LGPL natives, built in ../ffmpeg-ffm, on Maven Central.
-         Classifier jars exist for macos-arm64 and windows-x64 only. -->
-    <ffmpegffm.version>8.1.2-0.3.0</ffmpegffm.version>
+         Classifier jars exist for macos-arm64, windows-x64, and linux-x64. -->
+    <ffmpegffm.version>8.1.2-0.3.1</ffmpegffm.version>
     <ffmpegffm.natives>macos-arm64</ffmpegffm.natives>
     <!-- libjpeg-turbo JPEG-thumbnail fast path (TurboJpegStills): FFM stubs +
          self-extracting natives, built in ../turbojpeg-ffm. Same platform
@@ -361,6 +361,46 @@
                kernels (AvcDsp & co.) use the incubating Vector API. -->
           <argLine>--add-modules jdk.incubator.vector</argLine>
         </configuration>
+        <!--
+          The bytedeco fixture-minting tests must not share a JVM with anything
+          that loads the bundled ffmpeg-ffm natives.
+
+          On Windows the dynamic loader matches already-loaded modules by BASE
+          NAME, and org.bytedeco:ffmpeg 8.0.1 ships avutil-60.dll / avcodec-62.dll
+          / avformat-62.dll — exactly the names our FFmpeg 8.1.2 bundle uses. Once
+          bytedeco's copies are in the process, ffmpeg-ffm's avcodec-62.dll
+          resolves its imports against bytedeco's avutil-60 and fails to load, so
+          every later ffmpeg-ffm test dies with "Cannot open library". It is
+          permanent for the life of that JVM, not a transient/AV hiccup.
+
+          macOS and Linux are unaffected: those builds resolve dependencies by
+          @loader_path / RPATH, i.e. by path rather than base name.
+
+          Splitting into two executions gives each set a fresh fork — two JVMs
+          total, far cheaper than reuseForks=false per class.
+        -->
+        <executions>
+          <execution>
+            <id>default-test</id>
+            <configuration>
+              <excludes>
+                <exclude>**/BackendEvaluationTest.java</exclude>
+                <exclude>**/JcodecMediaFacadeTest.java</exclude>
+              </excludes>
+            </configuration>
+          </execution>
+          <execution>
+            <id>bytedeco-fixture-tests</id>
+            <phase>test</phase>
+            <goals><goal>test</goal></goals>
+            <configuration>
+              <includes>
+                <include>**/BackendEvaluationTest.java</include>
+                <include>**/JcodecMediaFacadeTest.java</include>
+              </includes>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
       <plugin>
         <groupId>org.openjfx</groupId>

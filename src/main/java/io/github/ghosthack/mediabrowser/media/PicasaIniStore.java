@@ -20,7 +20,7 @@ import java.util.regex.Pattern;
  * format so existing {@code rotate=rotate(N)} entries are honored and the files
  * stay interoperable with Picasa and other tools that consume them.
  *
- * <p>Vendored from the iris94 Swing media browser, which uses the same format.
+ * <p>Ported from this app's Swing predecessor, which uses the same format.
  * The file is a sequence of {@code [section]} headers (one per filename, plus
  * the conventional {@code [Picasa]} album header) followed by {@code key=value}
  * lines:
@@ -54,7 +54,7 @@ public final class PicasaIniStore {
      * Per-file key marking a file as user-<em>filtered</em> (hidden from normal
      * browsing unless the "show filtered" override is active). Stored as
      * {@code filtered=1}; any other/absent value means "not filtered". This is an
-     * iris extension to the Picasa format; other tools ignore the unknown key and
+     * app-specific extension to the Picasa format; other tools ignore the unknown key and
      * this store preserves their keys verbatim.
      */
     private static final String FILTERED_KEY = "filtered";
@@ -466,11 +466,12 @@ public final class PicasaIniStore {
     private static void writeDocument(File iniFile, IniDocument doc) throws IOException {
         if (doc.isEmpty()) {
             // Nothing left to persist — remove an existing (now-empty) sidecar.
-            try {
-                Files.deleteIfExists(iniFile.toPath());
-            } catch (IOException ignored) {
-                // Best effort.
-            }
+            // This must propagate like the write branch below: the callers'
+            // rollback depends on it, and a swallowed failure would leave the
+            // in-memory document claiming "cleared" while the sidecar on disk
+            // still holds the old value (it would come back on the next load).
+            // A missing sidecar is not a failure — deleteIfExists returns false.
+            Files.deleteIfExists(iniFile.toPath());
             return;
         }
 

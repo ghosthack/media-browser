@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code decode.device} setting): an intra-backend routing axis like the
  * TurboJPEG/LibRaw fast paths, never a separate backend. Playback-only for
  * now — poster frames and tile compose stay software until the loaded-queue
- * benchmarks say otherwise (docs/panama-decoder-candidates-handoff.md §3).
+ * benchmarks say otherwise.
  *
  * <p>Policies: {@code auto} routes a video to the platform's hardware decoder
  * when it is worthwhile — HEVC only, per the 2026-07-23 benchmarks (see

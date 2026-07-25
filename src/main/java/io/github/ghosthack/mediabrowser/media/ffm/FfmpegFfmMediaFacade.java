@@ -48,11 +48,24 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
 
     /** Extensions FFmpeg should claim as possible stills (kind refined by probe). */
     private static final Set<String> STILL_EXTENSIONS = Set.of(
-            "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff",
+            "jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "webp", "bmp",
+            "tif", "tiff",
             "avif", "heic", "heif",
             // JPEG XL decodes through the statically linked libjxl (ffmpeg-ffm
             // >= 0.3.0); animated JXL keeps VIDEO via its duration like GIF.
-            "jxl");
+            "jxl",
+            // JPEG 2000 and lossless JPEG-LS: FFmpeg's own jpeg2000/jpegls
+            // decoders, no external libopenjpeg needed.
+            "jp2", "j2k", "jpf", "jls",
+            // Kodak Photo CD image packs (the `photocd` decoder). One file holds
+            // a 192x128..3072x2048 pyramid; FFmpeg hands back the top level.
+            "pcd",
+            // The long tail FFmpeg has always decoded and this facade simply
+            // never claimed: Targa, PCX, Netpbm, X11, SGI, Sun raster, DDS,
+            // Radiance HDR, OpenEXR, ICO, QOI, DPX, Photoshop.
+            "tga", "pcx", "ppm", "pgm", "pbm", "pnm", "pam", "pfm",
+            "xpm", "xbm", "xwd", "sgi", "ras", "dds", "hdr", "exr",
+            "ico", "qoi", "dpx", "psd");
 
     /** AV container/stream extensions FFmpeg should claim (video and audio). */
     private static final Set<String> AV_EXTENSIONS = Set.of(
@@ -158,11 +171,11 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                             + " (lossy/JXL-compressed DNG without a full-size preview?)"));
             return new VisualResult(rawProbe(file), Optional.of(frame));
         }
-        VisualResult result = av.firstFrameWithProbe(file, fileSize(file));
+        VisualResult result = firstFrameSteppingDownPcd(file);
         MediaProbe refined = refineKind(result.probe(), file);
         VisualResult out = refined == result.probe() ? result
                 : new VisualResult(refined, result.frame());
-        return bakeJpegExif(file, out);
+        return bakePcdRotation(file, bakeJpegExif(file, out));
     }
 
     @Override
@@ -185,12 +198,19 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                 return new Thumbnail(fast, MediaKind.IMAGE);
             }
         }
-        Thumbnail thumb = av.thumbnail(file, maxEdge, mode);
+        Thumbnail thumb = thumbnailSteppingDownPcd(file, maxEdge, mode);
         if (jpeg && thumb.frame().isPresent()) {
             int orientation = TurboJpegStills.exifOrientation(file);
             if (orientation != 1) {
                 thumb = new Thumbnail(thumb.frame()
                         .map(f -> RasterFrames.applyExifOrientation(f, orientation)), thumb.kind());
+            }
+        }
+        if (thumb.frame().isPresent() && PcdOrientation.isPcd(extension(file))) {
+            int turns = PcdOrientation.quarterTurnsCw(file);
+            if (turns != 0) {
+                thumb = new Thumbnail(
+                        thumb.frame().map(f -> RasterFrames.rotateCw(f, turns)), thumb.kind());
             }
         }
         if (thumb.kind() == MediaKind.VIDEO && STILL_EXTENSIONS.contains(extension(file))) {
@@ -285,6 +305,69 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                 result.frame().map(f -> RasterFrames.applyExifOrientation(f, orientation)));
     }
 
+    /**
+     * The ordinary full-resolution decode, except that a Photo CD whose top
+     * pyramid layer FFmpeg rejects steps down the pyramid rather than failing
+     * outright. Only {@code .pcd} is retried, and only after a decode error, so
+     * nothing else changes its failure behaviour.
+     */
+    private VisualResult firstFrameSteppingDownPcd(Path file) {
+        long size = fileSize(file);
+        try {
+            return av.firstFrameWithProbe(file, size);
+        } catch (MediaException first) {
+            if (!PcdOrientation.isPcd(extension(file))) {
+                throw first;
+            }
+            for (int lowres : PcdOrientation.FALLBACK_LOWRES) {
+                try {
+                    VisualResult stepped = av.firstFrameWithProbe(file, size, lowres);
+                    PcdOrientation.announceStepDown(file, lowres);
+                    return stepped;
+                } catch (MediaException ignored) {
+                    // next level down; if none decode the caller sees `first`.
+                }
+            }
+            throw first;
+        }
+    }
+
+    /** {@link #firstFrameSteppingDownPcd} for the thumbnail path. */
+    private Thumbnail thumbnailSteppingDownPcd(Path file, int maxEdge, ThumbnailMode mode) {
+        try {
+            return av.thumbnail(file, maxEdge, mode);
+        } catch (MediaException first) {
+            if (!PcdOrientation.isPcd(extension(file))) {
+                throw first;
+            }
+            for (int lowres : PcdOrientation.FALLBACK_LOWRES) {
+                try {
+                    return av.thumbnail(file, maxEdge, mode, lowres);
+                } catch (MediaException ignored) {
+                    // next level down
+                }
+            }
+            throw first;
+        }
+    }
+
+    /**
+     * Applies the Photo CD image pack's stored orientation. FFmpeg's photocd
+     * decoder ignores it, so a portrait original arrives on its side; see
+     * {@link PcdOrientation}.
+     */
+    private static VisualResult bakePcdRotation(Path file, VisualResult result) {
+        if (!PcdOrientation.isPcd(extension(file)) || result.frame().isEmpty()) {
+            return result;
+        }
+        int turns = PcdOrientation.quarterTurnsCw(file);
+        if (turns == 0) {
+            return result;
+        }
+        return new VisualResult(result.probe(),
+                result.frame().map(f -> RasterFrames.rotateCw(f, turns)));
+    }
+
     /** Probe a RAW file via LibRaw metadata (no pixel decode). */
     private static MediaProbe rawProbe(Path file) {
         LibRawStills.RawInfo info = LibRawStills.info(file)
@@ -333,9 +416,15 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         return b.build();
     }
 
+    /**
+     * JFIF-wrapped JPEG by name — the TurboJPEG fast path and the EXIF
+     * orientation bake key off this. {@code .jpe}/{@code .jfif} are the same
+     * bitstream under older Windows/browser spellings, so they get both.
+     */
     private static boolean isJpeg(Path file) {
         String ext = extension(file);
-        return "jpg".equals(ext) || "jpeg".equals(ext);
+        return "jpg".equals(ext) || "jpeg".equals(ext)
+                || "jpe".equals(ext) || "jfif".equals(ext);
     }
 
     private static String extension(Path file) {

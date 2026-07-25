@@ -12,12 +12,12 @@ import java.util.function.UnaryOperator;
  * Pure state-machine logic for the move dialog: open/close, focus cycling,
  * history navigation, mini-tree expand/collapse/flatten/highlight,
  * {@code addToMoveHistory}, and path helpers. Static, no UI, no IO beyond the
- * injected {@link LoadChildren} — mirrors {@code iris94.core.coordinators.MoveDialogCoordinator}.
+ * injected {@link LoadChildren} — mirrors the Swing predecessor's {@code MoveDialogCoordinator}.
  *
- * <p>Differences from iris: methods mutate a {@link MoveDialogModel} (not the
- * whole {@code AppState}), and the move-history list / current directory are
- * passed in explicitly (iris read them off {@code AppState}). Paths are handled
- * as strings throughout — same as iris and {@link TreeNode} — so highlighted
+ * <p>Differences from the predecessor: methods mutate a {@link MoveDialogModel}
+ * (not a whole app state), and the move-history list / current directory are
+ * passed in explicitly. Paths are handled
+ * as strings throughout — same as the predecessor and {@link TreeNode} — so highlighted
  * paths can be compared against node paths directly; conversion to
  * {@link Path}/{@link File} happens only at IO and decomposition boundaries.
  */
@@ -350,8 +350,8 @@ public final class MoveDialogLogic {
      * Canonical form of {@code path}: {@code .}/{@code ..} segments resolved and
      * made absolute (relative to the working directory). Purely syntactic —
      * symlinks are NOT resolved — so history entries stay stable and
-     * predictable. Mirrors the role of {@code iris94.core.util.PathUtils.normalizePath}
-     * (the handoff specifies {@code Path.toAbsolutePath().normalize()} here).
+     * predictable. Mirrors the predecessor's {@code normalizePath}
+     * ({@code Path.toAbsolutePath().normalize()}).
      */
     static String canonicalize(String path) {
         if (path == null) {

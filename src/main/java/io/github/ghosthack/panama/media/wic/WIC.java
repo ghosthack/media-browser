@@ -632,7 +632,7 @@ public final class WIC {
      * decode). Aspect ratio is preserved.
      * <p>
      * This mirrors the CGImageSource {@code decodeThumbnailFromPath} contract so
-     * the iris94 reflective bridge can treat both Windows and macOS native
+     * a reflective facade bridge can treat both Windows and macOS native
      * backends as source-scaling providers.
      *
      * @param arena        the arena that owns the output pixel memory
@@ -684,8 +684,8 @@ public final class WIC {
      * {@code /app1/ifd/exif/{ushort=33437} -> 28/10},
      * {@code /app1/ifd/gps/{ushort=2} -> ...}).
      * <p>
-     * <b>Enumeration, not a curated set.</b> Of the two options the Windows-native
-     * handoff offered, this implements the more complete one: it walks the frame's
+     * <b>Enumeration, not a curated set.</b> Of the two candidate designs,
+     * this implements the more complete one: it walks the frame's
      * {@code IWICMetadataQueryReader} recursively with {@code GetEnumerator}
      * ({@code IEnumString::Next}) and descends every nested metadata block
      * ({@code VT_UNKNOWN} sub-reader — the EXIF/GPS sub-IFDs, XMP, IPTC), prefixing

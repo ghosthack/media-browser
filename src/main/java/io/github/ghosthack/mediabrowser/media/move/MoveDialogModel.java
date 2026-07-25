@@ -8,18 +8,18 @@ import java.util.List;
  * view reconciles itself from. A plain Java object (no JavaFX) so the move
  * logic stays unit-testable headless.
  *
- * <p>Ported from {@code iris94.core.state.MoveDialogState}, with two
+ * <p>Ported from the Swing predecessor's {@code MoveDialogState}, with two
  * deliberate omissions: the {@code requiresCreateConfirmation} /
  * {@code pendingCreateTargetPath} pair is dropped — in this port the
  * create-if-missing confirmation is an inline JavaFX {@code Alert} raised during
  * submit (Phase 5), so it never needs to live in the model. The UI-only flags
- * iris kept in {@code AppState} ({@code showMoveDialog}, {@code focusedPanel})
+ * the predecessor kept in app state ({@code showMoveDialog}, {@code focusedPanel})
  * are likewise the dialog's concern, not the model's.
  *
  * <p>Move history itself is <b>not</b> stored here: it lives in
  * {@link io.github.ghosthack.mediabrowser.AppSettings} and is threaded into
- * {@link MoveDialogLogic} methods that need it, mirroring how iris kept it in
- * {@code AppState} rather than {@code MoveDialogState}.
+ * {@link MoveDialogLogic} methods that need it, mirroring how the predecessor
+ * kept it in app state rather than dialog state.
  */
 public final class MoveDialogModel {
 

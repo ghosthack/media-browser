@@ -12,10 +12,12 @@ import io.github.ghosthack.mediabrowser.media.AaeStore;
 import io.github.ghosthack.mediabrowser.media.DetectionMode;
 import io.github.ghosthack.mediabrowser.media.DirEntry;
 import io.github.ghosthack.mediabrowser.media.MediaBackend;
+import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.MediaItem;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
+import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
 
 import javafx.animation.PauseTransition;
@@ -89,6 +91,7 @@ import javafx.stage.Stage;
 import javafx.util.Duration;
 import javafx.util.StringConverter;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -98,6 +101,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -150,6 +154,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     /** Debounce for the opt-in Auto metadata load; (re)armed on each selection change. */
     private final PauseTransition metadataDebounce = new PauseTransition(Duration.millis(180));
     private final SplitPane splitPane = new SplitPane();
+    /** Keeps the right stack at the width shared with the viewer and mosaic. */
+    private final SidePanelWidth sidePanelWidth;
     private final Label statusLabel = new Label("Ready");
     private final Label countLabel = new Label();
     private final HBox statusBar;
@@ -213,6 +219,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final BooleanProperty forwardDisabledProp = new SimpleBooleanProperty(true);
     /** Folder-tile preview grid edge (0/2/3/4); the Mosaic menu radios share it. */
     private final ObjectProperty<Integer> folderPreviewGridProp = new SimpleObjectProperty<>();
+    private final BooleanProperty folderPreviewSniffProp = new SimpleBooleanProperty();
     /** Logical menu-accelerator modifier scheme (Settings ▸ Keys); read once at start. */
     private final KeyScheme keys;
     /** This view's root, hosted by the shell while the browser is active. */
@@ -250,6 +257,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             @Override public Path nextFocusAfterMove(List<Path> moving) { return MainWindow.this.nextFocusAfterMove(moving); }
             @Override public void refreshAfterMove(Path focusPath) { MainWindow.this.refreshAfterMove(focusPath); }
             @Override public void showStatus(String message) { statusLabel.setText(message); }
+            @Override public void releaseBeforeMove(List<Path> moving) { viewer.releaseBeforeMove(moving); }
         });
 
         // --- navigation tree -------------------------------------------------
@@ -487,6 +495,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
         folderPreviewGridProp.set(settings.mosaicFolderPreviewGrid());
         folderPreviewGridProp.addListener((o, a, v) -> { if (v != null) setFolderPreviewGrid(v); });
+        service.setFolderPreviewSniff(settings.mosaicFolderPreviewSniff());
+        folderPreviewSniffProp.set(settings.mosaicFolderPreviewSniff());
+        folderPreviewSniffProp.addListener((o, a, v) -> setFolderPreviewSniff(v));
 
         this.menuBar = buildMenuBar(MenuOwner.MAIN);
         mosaic.installMenuBar(buildMenuBar(MenuOwner.MOSAIC), keys);
@@ -494,6 +505,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
         // --- layout ----------------------------------------------------------
         splitPane.getItems().addAll(treePanel, listView);
+        // The panel stack's width is the shared, persisted one (the viewer and
+        // mosaic keep it too), not a fraction of this window; applyDividers
+        // hands it the last divider.
+        sidePanelWidth = new SidePanelWidth(splitPane, rightPanels, settings);
         updateRightPanels();   // adds the Info/Metadata right split per the toggles
 
         var spacer = new Region();
@@ -582,8 +597,14 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // the macOS system menu bar honours it from the first frame.)
         toolbarVisibleProp.set(settings.browserToolbarVisible());
         statusVisibleProp.set(settings.browserStatusBarVisible());
-        actionLogVisibleProp.set(settings.browserActionLogVisible());
         treeVisibleProp.set(settings.browserNavTreeVisible());
+
+        // The action log is one app-wide flag (Settings ▸ General): seed it
+        // once, then chain the mosaic's and viewer's panel properties to this
+        // one, so toggling it in any view shows/hides it in all three.
+        actionLogVisibleProp.set(settings.actionLogVisible());
+        mosaic.actionLogVisibleProperty().bindBidirectional(actionLogVisibleProp);
+        viewer.actionLogVisibleProperty().bindBidirectional(actionLogVisibleProp);
     }
 
     /**
@@ -728,6 +749,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         } else if (hasRight) {
             splitPane.setDividerPositions(0.74);
         }
+        // The stack's own divider is the shared width, not a fraction of this
+        // window; set last so it wins over the placement above.
+        if (hasRight && sidePanelWidth != null) sidePanelWidth.apply();
     }
 
     /**
@@ -759,9 +783,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     /** @return whether the target was accepted (the listing itself is async) */
     private boolean navigate(Path dir) {
-        Path target = dir.toAbsolutePath().normalize();
-        if (!Files.isDirectory(target)) {
-            statusLabel.setText("Not a folder: " + target);
+        // An archive browsed earlier may have been evicted under the mount cap;
+        // reviving re-opens it so history and pending selections keep working.
+        Path target = ArchivePaths.revive(dir).toAbsolutePath().normalize();
+        if (!ArchivePaths.isDirectory(target)) {
+            statusLabel.setText("Not a folder: " + ArchivePaths.format(target));
             return false;
         }
         Path select = pendingSelection; // entry to re-select once listed
@@ -773,22 +799,24 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         updateHistoryItems();
         currentDir = target;
-        addressField.setText(target.toString());
-        statusLabel.setText("Scanning " + target + "…");
+        addressField.setText(ArchivePaths.format(target));
+        statusLabel.setText("Scanning " + ArchivePaths.format(target) + "…");
         countLabel.setText("");
         // Immediate feedback in the mosaic while the scan runs off the FX thread
-        // (the content-sniffing classify of every file is the slow part): name
+        // (a big directory enumeration, or content mode's per-file reads): name
         // the target and arm its loading indicator now, so an open into a slow
         // folder isn't a frozen-looking gap until the listing lands. A no-op
         // when the mosaic is hidden.
         mosaic.onDirectoryScanStarted(target);
         int seq = ++scanSequence;
         reclassQueue.clear();   // abandon any corrections still queued for the old folder
-        // Under content-sniff detection the per-file classify is the slow part of
-        // a scan, so paint the folder structure at once from a fast,
-        // extension-classified listing (placeholder tiles), then stream the
-        // content-sniff corrections in progressively as each file is classified
-        // (see streamReclassification) rather than waiting for the whole scan. In
+        // Under content-sniff detection classify still reads files (the header
+        // sniff of every unknown-extension file, the moov check of every
+        // AVIF/HEIC), so paint the folder structure at once from a fast,
+        // name-only listing (placeholder tiles), then stream the content
+        // corrections — promotions of misnamed media, animated-image upgrades —
+        // in progressively as each file is classified (see
+        // streamReclassification) rather than waiting for the whole scan. In
         // extension mode the single listing is already instant and accurate, so
         // it is shown directly.
         if (service.detectionMode() == DetectionMode.CONTENT_SNIFF) {
@@ -914,14 +942,31 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * the file list; an invalid path leaves the field focused for fixing.
      */
     private void navigateFromAddress() {
-        if (navigate(Path.of(addressField.getText().trim()))) {
+        // Accepts both a plain path and an archive locator
+        // (/discs/photos.iso!/DCIM), mounting the container when needed.
+        Path target = ArchivePaths.parse(addressField.getText()).orElse(null);
+        if (target == null) {
+            statusLabel.setText("Cannot open: " + addressField.getText().trim());
+            return;
+        }
+        if (navigate(target)) {
             listView.requestFocus();
         }
     }
 
-    /** Navigates and mirrors the new location into the folder tree. */
+    /**
+     * Navigates and mirrors the new location into the folder tree. Locations
+     * inside an archive are skipped for the tree, which shows the real
+     * filesystem only — the archive itself stays selected there instead.
+     */
     private void navigateAndSync(Path dir) {
         navigate(dir);
+        if (ArchivePaths.inArchive(dir)) {
+            ArchivePaths.hostArchive(dir)
+                    .map(archive -> archive.toAbsolutePath().normalize().getParent())
+                    .ifPresent(this::expandAndSelect);
+            return;
+        }
         expandAndSelect(dir.toAbsolutePath().normalize());
     }
 
@@ -929,9 +974,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * navigates the listing to the current folder's parent. */
     @Override
     public void navigateToParent() {
-        Path parent = currentDir == null ? null : currentDir.getParent();
+        // From an archive root this steps back out to the folder holding the
+        // container, rather than dead-ending at a filesystem root.
+        Path parent = ArchivePaths.parentOf(currentDir);
         if (parent == null) return;
-        pendingSelection = currentDir; // land on the folder we came from
+        pendingSelection = ArchivePaths.hostArchive(currentDir)
+                .filter(archive -> ArchivePaths.isArchiveRoot(currentDir))
+                .orElse(currentDir);   // land on the archive we came out of
         navigateAndSync(parent);
     }
 
@@ -971,7 +1020,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private void applyFilter() {
         filteredEntries.setPredicate(e -> switch (e.type()) {
             case PARENT -> true;
-            case DIRECTORY -> showDirsProp.get();
+            // An archive is browsed as a folder, so it follows the folder
+            // toggle rather than the non-viewable-file one it would otherwise
+            // hide behind.
+            case DIRECTORY, ARCHIVE -> showDirsProp.get();
             case MEDIA -> showViewableProp.get();
             case OTHER -> showNonViewableProp.get();
         });
@@ -1079,12 +1131,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             case MOSAIC -> mosaic.diagnosticsPanelVisibleProperty();
             case VIEWER -> viewer.diagnosticsPanelVisibleProperty();
         };
-        // The browser and the mosaic each own an action-log panel; the viewer
-        // has none, so its bar's item acts on the browser's (like Address Bar).
-        BooleanProperty showActionLogProp = switch (owner) {
-            case MAIN, VIEWER -> actionLogVisibleProp;
-            case MOSAIC -> mosaic.actionLogVisibleProperty();
-        };
+        // Every view hosts an action-log panel over the one app-wide flag:
+        // the mosaic's and viewer's properties are bound bidirectionally to
+        // the browser's, so any bar's item toggles the panel in all three.
+        BooleanProperty showActionLogProp = actionLogVisibleProp;
         // Menu-bar runtime visibility: per-window, toggled by mod1+\ and the
         // modifier-2 peek (see WindowChrome.bindMenuAutoHide).
         BooleanProperty showMenuBarProp = switch (owner) {
@@ -1134,7 +1184,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 boundCheck("_Keep Focus on Open", keepFocusProp));
 
         // Order: the sort key and direction (folder placement — Top/Bottom/Natural —
-        // is not yet modelled here; see docs/menu-port-handoff.md).
+        // is not yet modelled here).
         var keyGroup = new ToggleGroup();
         var dirGroup = new ToggleGroup();
         var orderMenu = new Menu("_Order", null,
@@ -1255,7 +1305,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 objRadio("None", 0, folderPreviewGridProp, fpGroup),
                 objRadio("2 × 2", 2, folderPreviewGridProp, fpGroup),
                 objRadio("3 × 3", 3, folderPreviewGridProp, fpGroup),
-                objRadio("4 × 4", 4, folderPreviewGridProp, fpGroup));
+                objRadio("4 × 4", 4, folderPreviewGridProp, fpGroup),
+                new SeparatorMenuItem(),
+                // Extends the collage scan to unnamed media (a curated header
+                // sniff of extension-less/unknown-suffix children); independent
+                // of Show ▸ Detection so it reads the same in both modes.
+                boundCheck("Sniff _Unnamed Files", folderPreviewSniffProp));
         var fgGroup = new ToggleGroup();
         var folderGlyph = new Menu("Folder _Glyph", null,
                 objRadio(MosaicFolderGlyph.GLYPH.label(), MosaicFolderGlyph.GLYPH,
@@ -1500,6 +1555,22 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     }
 
     /**
+     * Toggles the folder-preview sniff of unnamed files, persists it, and
+     * drops the mosaic's cached collage scans so tiles re-scan under the new
+     * policy.
+     */
+    private void setFolderPreviewSniff(boolean sniff) {
+        service.setFolderPreviewSniff(sniff);
+        settings.setMosaicFolderPreviewSniff(sniff);
+        try {
+            settings.save();
+        } catch (java.io.IOException e) {
+            statusLabel.setText("Cannot save settings: " + e.getMessage());
+        }
+        mosaic.refreshFolderPreviews();
+    }
+
+    /**
      * Switches how files are classified, persists the choice, and re-scans the
      * current folder so the listing reflects the new method immediately.
      */
@@ -1538,7 +1609,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private static int sortGroup(DirEntry e) {
         return switch (e.type()) {
             case PARENT -> 0;
-            case DIRECTORY -> 1;
+            case DIRECTORY, ARCHIVE -> 1;
             case MEDIA, OTHER -> 2;
         };
     }
@@ -1546,7 +1617,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     /** Puts the entry's absolute path on the system clipboard. */
     private void copyPathToClipboard(DirEntry entry) {
         if (entry == null) return;
-        String path = entry.path().toAbsolutePath().normalize().toString();
+        // The locator form, so a path copied from inside an archive can be
+        // pasted back into the address bar and reach the same entry.
+        String path = ArchivePaths.format(entry.path().toAbsolutePath().normalize());
         var content = new ClipboardContent();
         content.putString(path);
         Clipboard.getSystemClipboard().setContent(content);
@@ -1557,6 +1630,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         return switch (entry.type()) {
             case PARENT -> "⬆";
             case DIRECTORY -> "📁";
+            case ARCHIVE -> "🗄";
             case MEDIA -> switch (entry.mediaKind()) {
                 case IMAGE -> "🖼";
                 case VIDEO -> "🎬";
@@ -1685,8 +1759,14 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             infoPanel.showMessage(switch (entry.type()) {
                 case PARENT -> "Parent folder";
                 case DIRECTORY -> "Folder";
+                // Browsable, so "not viewable media" would be actively
+                // misleading — it reads as a dead end.
+                case ARCHIVE -> "iso".equals(entry.extension())
+                        ? "Reading disc image…"
+                        : "Reading archive…";
                 default -> "Not viewable media";
             });
+            if (entry.type() == DirEntry.Type.ARCHIVE) showArchiveInfo(entry, seq);
             return;
         }
         if (mirroringSelection) {
@@ -1735,13 +1815,43 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     }
 
     /**
+     * Fills the Info panel's detail table for a selected archive: the format
+     * and naming scheme in force, plus whatever identity the container carries
+     * (an ISO's publisher and mastering date, a ZIP's entry count).
+     *
+     * <p>Only for the container itself — once inside, entries are ordinary
+     * files and the panel behaves exactly as it does in a folder. Reads without
+     * mounting and off the FX thread, guarded on {@code probeSequence} like the
+     * probe, so arrowing quickly through a folder of images neither stalls nor
+     * lands stale rows.</p>
+     */
+    private void showArchiveInfo(DirEntry entry, int seq) {
+        service.archiveInfo(entry.path()).whenComplete((info, error) ->
+                Platform.runLater(() -> {
+                    if (seq != probeSequence) return;
+                    if (error != null) {
+                        infoPanel.showMessage(rootMessage(error));
+                        return;
+                    }
+                    var rows = new ArrayList<InfoPanel.Row>();
+                    rows.add(new InfoPanel.Row("Format", info.summary()));
+                    for (var field : info.fields()) {
+                        rows.add(new InfoPanel.Row(field.name(), field.value()));
+                    }
+                    infoPanel.showDetailRows(rows);
+                }));
+    }
+
+    /**
      * Starts the on-demand metadata read for the selected item (a manual Load
      * click or the opt-in Auto debounce), mirroring the viewer. A later
      * selection bumps {@code probeSequence}, so a superseded read is dropped.
      */
     private void fireMetadataRead() {
         DirEntry entry = listView.getSelectionModel().getSelectedItem();
-        if (entry == null || !entry.viewable()) {
+        // An archive has metadata worth reading — its volume descriptor — even
+        // though it is not viewable media.
+        if (entry == null || !(entry.viewable() || entry.type() == DirEntry.Type.ARCHIVE)) {
             metadataPanel.showMessage(entry == null ? "No selection" : "Not viewable media");
             return;
         }
@@ -1765,6 +1875,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         switch (entry.type()) {
             case PARENT -> navigateToParent();
             case DIRECTORY -> navigateAndSync(entry.path());
+            case ARCHIVE -> openArchive(entry.path());
             // Keep Focus only means something across separate windows (the
             // viewer opens without stealing focus); the single window always
             // switches, since it can't show a second view.
@@ -1772,6 +1883,33 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     shell.singleWindow() || !keepFocusProp.get(), this);
             case OTHER -> statusLabel.setText("Not viewable: " + entry.displayName());
         }
+    }
+
+    /**
+     * Enters an archive: mounts it off the FX thread — reading a large zip's
+     * central directory or an image's descriptors is real I/O — then navigates
+     * to its root. A container that cannot be opened (truncated, UDF-only,
+     * unreadable) says so in the status bar and leaves the listing alone,
+     * rather than silently doing nothing.
+     */
+    private void openArchive(Path archive) {
+        statusLabel.setText("Opening " + archive.getFileName() + "…");
+        service.fileOp(() -> {
+            try {
+                // Lands inside a solitary top-level folder, the shape almost
+                // every "compress this folder" archive has.
+                return ArchivePaths.browseRoot(archive);
+            } catch (IOException e) {
+                throw new MediaException(e.getMessage(), e);
+            }
+        }).whenComplete((root, error) -> Platform.runLater(() -> {
+            if (error != null) {
+                statusLabel.setText("Cannot open " + archive.getFileName() + ": "
+                        + rootMessage(error));
+                return;
+            }
+            navigateAndSync(root);
+        }));
     }
 
     /** The currently visible viewable media as a viewer/mosaic navigation list. */
@@ -1835,8 +1973,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     /**
      * Refresh the listing after a move and land selection on {@code focusPath}.
      * Sets {@link #pendingSelection} so the post-listing hook in {@link #navigate}
-     * re-selects it once the async scan returns (the "refresh → then focus"
-     * sequencing from the handoff §2.8); a null path clears the selection.
+     * re-selects it once the async scan returns (the ported "refresh → then
+     * focus" sequencing); a null path clears the selection.
      */
     private void refreshAfterMove(Path focusPath) {
         pendingSelection = focusPath;
@@ -1918,6 +2056,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         overscanBox.disableProperty().bind(chromeBox.selectedProperty().not());
         var inWindowMenuBox = new CheckBox("In-window menu bar (instead of the macOS menu bar)");
         inWindowMenuBox.setSelected(settings.inWindowMenu());
+        var actionLogBox = new CheckBox(
+                "Show the action log (browser, mosaic and viewer)");
+        // Seed from the LIVE visibility, not the persisted startup default:
+        // Show ▸ Action Log (mod1+J) toggles only the live prop, so seeding
+        // from settings would let an untouched checkbox hide a panel the user
+        // just showed the moment Settings is saved.
+        actionLogBox.setSelected(actionLogVisibleProp.get());
         var actionLogFileBox = new CheckBox(
                 "Write the action log to disk (append-only JSONL, applies immediately)");
         actionLogFileBox.setSelected(settings.actionLogFileEnabled());
@@ -1926,6 +2071,15 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 + "~/.media-browser/action-log.jsonl, one JSON object per line. "
                 + "The file is never trimmed; at startup the panel is seeded "
                 + "with its last few entries."));
+        var extensionFixBox = new CheckBox(
+                "Fix extensions of sniffed files on open (applies immediately)");
+        extensionFixBox.setSelected(settings.extensionFixEnabled());
+        extensionFixBox.setTooltip(new Tooltip(
+                "A file with no classifying extension that opens without error "
+                + "in the viewer is renamed in place to its content's canonical "
+                + "extension (mystery → mystery.jpg). Every rename lands in the "
+                + "action log as an Extension fix entry; nothing is renamed "
+                + "while this is off."));
         var windowModeCombo = new ComboBox<WindowMode>();
         windowModeCombo.getItems().setAll(WindowMode.values());
         windowModeCombo.setValue(settings.windowMode());
@@ -1959,7 +2113,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         loadingDelayRow.setAlignment(Pos.CENTER_LEFT);
         var hint = new Label("Applies after restarting the application.");
         hint.setStyle("-fx-text-fill: gray;");
-        var generalContent = new VBox(8, themeRow, backendRow, decodeRow, actionLogFileBox,
+        var generalContent = new VBox(8, themeRow, backendRow, decodeRow,
+                actionLogBox, actionLogFileBox, extensionFixBox,
                 new Separator(), loadingIndicatorRow, loadingDelayRow,
                 new Separator(),
                 chromeBox, resizeBox, overscanBox, inWindowMenuBox, windowModeRow,
@@ -1975,13 +2130,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         browserStatusBox.setSelected(settings.browserStatusBarVisible());
         var browserNavTreeBox = new CheckBox("Show the navigation tree");
         browserNavTreeBox.setSelected(settings.browserNavTreeVisible());
-        var browserActionLogBox = new CheckBox("Show the action log");
-        browserActionLogBox.setSelected(settings.browserActionLogVisible());
         var browserHint = new Label("Startup defaults for the file-browser window; "
                 + "also applied immediately.");
         browserHint.setStyle("-fx-text-fill: gray;");
         var browserContent = new VBox(8, browserMenuBox, browserToolbarBox,
-                browserStatusBox, browserNavTreeBox, browserActionLogBox,
+                browserStatusBox, browserNavTreeBox,
                 new Separator(), browserHint);
         browserContent.setPadding(new Insets(12));
 
@@ -2010,8 +2163,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         mosaicStatusBox.setSelected(settings.mosaicStatusBarVisible());
         var mosaicLocationBox = new CheckBox("Show the location bar");
         mosaicLocationBox.setSelected(settings.mosaicLocationBarVisible());
-        var mosaicActionLogBox = new CheckBox("Show the action log");
-        mosaicActionLogBox.setSelected(settings.mosaicActionLogVisible());
 
         var layoutTitle = new Label("Grid layout & appearance");
         layoutTitle.setStyle("-fx-font-weight: bold;");
@@ -2100,7 +2251,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         mosaicHint.setMaxWidth(420);
 
         var mosaicContent = new VBox(8, mosaicMenuBox, mosaicToolbarBox, mosaicStatusBox,
-                mosaicLocationBox, mosaicActionLogBox,
+                mosaicLocationBox,
                 new Separator(), layoutTitle, tileSizeRow, marginRow, borderWidthRow,
                 borderColorRow, folderGridRow, folderGlyphRow, thumbnailsBox, fillBox,
                 seamlessBox,
@@ -2174,6 +2325,14 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setWindowMode(windowModeCombo.getValue());
         settings.setStartupLayout(startupLayoutCombo.getValue());
         settings.setActionLogFileEnabled(actionLogFileBox.isSelected());
+        // Applies immediately: the viewer re-reads this per open. The revision
+        // bump keeps every action-log panel's Extension fix checkbox in step.
+        settings.setExtensionFixEnabled(extensionFixBox.isSelected());
+        ActionLog.get().touchMoveTargets();
+        // One flag for all three views: the mosaic's and viewer's panels are
+        // bound bidirectionally to this prop, so one set reaches them all.
+        settings.setActionLogVisible(actionLogBox.isSelected());
+        actionLogVisibleProp.set(actionLogBox.isSelected());
         // Loading indicator: push live into the viewer; its property listener
         // persists the choice (the same value the menu/toolbar picker edits) and
         // the mosaic reads it from settings on each load. The delay gate has no
@@ -2186,12 +2345,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setBrowserToolbarVisible(browserToolbarBox.isSelected());
         settings.setBrowserStatusBarVisible(browserStatusBox.isSelected());
         settings.setBrowserNavTreeVisible(browserNavTreeBox.isSelected());
-        settings.setBrowserActionLogVisible(browserActionLogBox.isSelected());
         menuBarVisibleProp.set(browserMenuBox.isSelected());
         toolbarVisibleProp.set(browserToolbarBox.isSelected());
         statusVisibleProp.set(browserStatusBox.isSelected());
         treeVisibleProp.set(browserNavTreeBox.isSelected());
-        actionLogVisibleProp.set(browserActionLogBox.isSelected());
 
         // --- Viewer: persist + push live via the viewer's exposed properties ---
         // Viewport drag applies live: the viewer's drag handler reads this each drag.
@@ -2208,12 +2365,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setMosaicToolbarVisible(mosaicToolbarBox.isSelected());
         settings.setMosaicStatusBarVisible(mosaicStatusBox.isSelected());
         settings.setMosaicLocationBarVisible(mosaicLocationBox.isSelected());
-        settings.setMosaicActionLogVisible(mosaicActionLogBox.isSelected());
         mosaic.menuBarVisibleProperty().set(mosaicMenuBox.isSelected());
         mosaic.toolbarVisibleProperty().set(mosaicToolbarBox.isSelected());
         mosaic.statusBarVisibleProperty().set(mosaicStatusBox.isSelected());
         mosaic.locationBarVisibleProperty().set(mosaicLocationBox.isSelected());
-        mosaic.actionLogVisibleProperty().set(mosaicActionLogBox.isSelected());
 
         settings.setMosaicTileSize(tileSizeSpinner.getValue());
         settings.setMosaicMargin(marginSpinner.getValue());

@@ -19,22 +19,27 @@ mvn javafx:run -Djavafx.args="/some/dir"        # opens at /some/dir
 ## Decode backends
 
 The decode backend is chosen at startup (Preferences ▸ Media decode backend);
-the default is `ffmpeg-ffm-turbojpeg` (bundled FFmpeg for stills and video,
-plus a TurboJPEG thumbnail fast path) where the ffmpeg-ffm/turbojpeg-ffm
-natives cover the platform (macos-arm64, windows-x64), degrading to
-`twelvemonkeys-javacv` elsewhere:
+the default is `ffmpeg-ffm-turbojpeg` everywhere — bundled FFmpeg for stills
+and video plus a libjpeg-turbo JPEG-thumbnail fast path, with natives fetched
+from Maven Central for macOS (Apple silicon), Windows x64, and Linux x64.
+There is deliberately no silent fallback: if the default cannot initialize,
+startup reports it visibly and switches the setting to the pure-Java
+`twelvemonkeys-jcodec`; backends for another OS simply don't appear in the
+menu.
 
 | Backend | Stills | Video | Native? |
 |---|---|---|---|
-| `ffmpeg-ffm-turbojpeg` *(default)* | FFmpeg + JPEG thumbnails via libjpeg-turbo | FFmpeg (all codecs) | yes, fetched by Maven (classifier jars) |
-| `ffmpeg-ffm` | FFmpeg only (incl. HEIC/AVIF) | FFmpeg (all codecs) | yes, fetched by Maven (classifier jars) |
+| `ffmpeg-ffm-turbojpeg` *(default)* | FFmpeg (incl. HEIC/AVIF/JXL; camera RAW via LibRaw) + baseline-JPEG thumbnails via libjpeg-turbo | FFmpeg (all codecs) | yes, fetched by Maven (classifier jars) |
+| `ffmpeg-ffm` | FFmpeg (incl. HEIC/AVIF/JXL; camera RAW via LibRaw) | FFmpeg (all codecs) | yes, fetched by Maven (classifier jars) |
 | `twelvemonkeys-ffmpeg-ffm` | TwelveMonkeys ImageIO (JPEG/CMYK, TIFF, WebP, PSD, …) | GIF + bundled FFmpeg (ffmpeg-ffm) | yes, fetched by Maven (classifier jars) |
 | `apple` | Apple ImageIO | AVFoundation | macOS system frameworks |
 | `windows-native` | WIC | Media Foundation | Windows system APIs |
-| `javacv` | JavaCV (FFmpeg) | JavaCV (FFmpeg, all codecs) | yes (~28 MB/OS) |
 | `twelvemonkeys` | TwelveMonkeys ImageIO | animated GIF only | no (pure Java) |
 | `twelvemonkeys-jcodec` | TwelveMonkeys ImageIO | GIF + jcodec (H.264/MPEG/ProRes) | no (pure Java) |
-| `twelvemonkeys-javacv` | TwelveMonkeys ImageIO | GIF + JavaCV (bundled FFmpeg, all codecs) | yes, fetched by Maven (~29 MB/OS) |
+
+The paired backends split work by media *kind* (stills engine vs. video
+engine) at classify time; they do not fall back on failure — a file either
+decodes through its assigned engine or reports the error.
 
 ## About this repository
 

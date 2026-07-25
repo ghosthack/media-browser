@@ -136,13 +136,19 @@ final class FfmpegAv {
      * has no decodable visual.
      */
     VisualResult firstFrameWithProbe(Path file, long fileSize) {
+        return firstFrameWithProbe(file, fileSize, 0);
+    }
+
+    /** As above, decoding at a reduced {@code lowres} level (0 = full). */
+    VisualResult firstFrameWithProbe(Path file, long fileSize, int lowres) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment ctxPtr = ff.openInput(arena, file);
             try {
                 MemorySegment ctx = ff.derefFormatContext(ctxPtr);
                 MediaProbe probe = describe(ctx, file, fileSize);
                 return new VisualResult(probe,
-                        Optional.ofNullable(decodeFirstFrame(arena, ctx, -1, ThumbnailMode.FIT)));
+                        Optional.ofNullable(
+                                decodeFirstFrame(arena, ctx, -1, ThumbnailMode.FIT, lowres)));
             } finally {
                 ff.closeInput(ctxPtr);
             }
@@ -157,12 +163,17 @@ final class FfmpegAv {
      * has no decodable visual.
      */
     Thumbnail thumbnail(Path file, int maxEdge, ThumbnailMode mode) {
+        return thumbnail(file, maxEdge, mode, 0);
+    }
+
+    /** As above, decoding at a reduced {@code lowres} level (0 = full). */
+    Thumbnail thumbnail(Path file, int maxEdge, ThumbnailMode mode, int lowres) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment ctxPtr = ff.openInput(arena, file);
             try {
                 MemorySegment ctx = ff.derefFormatContext(ctxPtr);
                 MediaProbe probe = describe(ctx, file, -1);
-                RasterFrame poster = decodeFirstFrame(arena, ctx, maxEdge, mode);
+                RasterFrame poster = decodeFirstFrame(arena, ctx, maxEdge, mode, lowres);
                 return new Thumbnail(Optional.ofNullable(poster), probe.kind());
             } finally {
                 ff.closeInput(ctxPtr);
@@ -177,6 +188,16 @@ final class FfmpegAv {
      */
     private RasterFrame decodeFirstFrame(Arena arena, MemorySegment ctx, int maxEdge,
                                          ThumbnailMode mode) {
+        return decodeFirstFrame(arena, ctx, maxEdge, mode, 0);
+    }
+
+    /**
+     * As above, but asking the decoder for a {@code lowres}-reduced frame. Only
+     * Photo CD uses a non-zero value today, to step down its pyramid when the
+     * top layer will not decode; see {@link FfmpegBindings#setLowres}.
+     */
+    private RasterFrame decodeFirstFrame(Arena arena, MemorySegment ctx, int maxEdge,
+                                         ThumbnailMode mode, int lowres) {
         MemorySegment cctxPtr = MemorySegment.NULL;
         MemorySegment pktPtr = MemorySegment.NULL;
         MemorySegment framePtr = MemorySegment.NULL;
@@ -191,9 +212,8 @@ final class FfmpegAv {
             TileGrid grid = findTileGrid(ctx, vIdx);
             if (grid != null) {
                 // Tiled HEIF/AVIF still: vIdx carries one tile, not the
-                // picture. Thumbnails pick the smallest baked representation
-                // (docs/heic-followups-handoff.md); the viewer composes the
-                // primary grid.
+                // picture. Thumbnails pick the smallest baked representation;
+                // the viewer composes the primary grid.
                 return maxEdge > 0
                         ? decodeSmallestRepresentation(arena, ctx, grid, maxEdge, mode)
                         : decodeTileGrid(arena, ctx, grid, maxEdge, mode);
@@ -207,6 +227,9 @@ final class FfmpegAv {
 
             ff.check(ff.parametersToContext(cctx, ff.codecpar(ff.stream(ctx, vIdx))),
                     "avcodec_parameters_to_context");
+            if (lowres > 0 && !ff.setLowres(cctx, lowres)) {
+                throw new MediaException("ffmpeg: decoder does not support lowres=" + lowres);
+            }
             ff.check(ff.open2(cctx, codec), "avcodec_open2");
 
             MemorySegment pkt = ff.packetAlloc();
@@ -499,7 +522,7 @@ final class FfmpegAv {
 
     /**
      * Thumbnail-path representation selection over the pyramid Apple bakes
-     * into every HEIC (docs/heic-followups-handoff.md): smaller TILE_GRID
+     * into every HEIC: smaller TILE_GRID
      * variants and standalone preview/thumbnail streams, all reachable as
      * plain streams. Picks the smallest representation that still covers the
      * request without upscaling; candidates must match the primary grid's

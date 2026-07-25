@@ -97,10 +97,15 @@ public final class MetadataPanel extends VBox {
         filterRow.setAlignment(Pos.CENTER_LEFT);
         filterRow.setPadding(new Insets(2, 6, 4, 6));
 
-        var keyCol = new TreeTableColumn<Object, String>("Key");
+        // "Property", not "Key": the Info and Diagnostics tables next to this one
+        // in the stack head their first column that way, and the panel titles
+        // (Info / Metadata) already say which facts a table holds.
+        var keyCol = new TreeTableColumn<Object, String>("Property");
         keyCol.setCellValueFactory(d -> new ReadOnlyStringWrapper(keyText(d.getValue().getValue())));
         keyCol.setCellFactory(c -> styledKeyCell());
-        keyCol.setPrefWidth(170);
+        // Pinned to the Info and Diagnostics tables' Property column, so every
+        // table in the stack breaks at the same x (see InfoPanel.fixWidth).
+        InfoPanel.fixWidth(keyCol);
         var valueCol = new TreeTableColumn<Object, String>("Value");
         valueCol.setCellValueFactory(d -> new ReadOnlyStringWrapper(valueText(d.getValue().getValue())));
         valueCol.setCellFactory(c -> styledValueCell());
@@ -115,8 +120,11 @@ public final class MetadataPanel extends VBox {
         VBox.setVgrow(table, Priority.ALWAYS);
 
         getChildren().addAll(titleRow, filterRow, table);
-        setPrefWidth(360);
-        setMinWidth(200);
+        // The same preferred width as the Info and Diagnostics panels: the
+        // stack is sized by the widest panel in it, so a differing width here
+        // moved the window's panel edge whenever this panel was toggled on.
+        setPrefWidth(280);
+        setMinWidth(160);
     }
 
     // --- viewer-facing API --------------------------------------------------
@@ -265,9 +273,9 @@ public final class MetadataPanel extends VBox {
         var menu = new ContextMenu();
         var copyValue = new MenuItem("Copy value");
         copyValue.setOnAction(e -> withEntry(row, en -> copyToClipboard(en.fullValue())));
-        var copyKey = new MenuItem("Copy key");
+        var copyKey = new MenuItem("Copy property");
         copyKey.setOnAction(e -> withEntry(row, en -> copyToClipboard(en.key())));
-        var copyPair = new MenuItem("Copy key = value");
+        var copyPair = new MenuItem("Copy property = value");
         copyPair.setOnAction(e -> withEntry(row, en -> copyToClipboard(en.key() + " = " + en.fullValue())));
         menu.getItems().addAll(copyValue, copyKey, copyPair);
         // Only entry rows get the copy menu; group headers get none.

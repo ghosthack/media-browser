@@ -4,14 +4,18 @@ package io.github.ghosthack.mediabrowser.media;
  * How a directory listing decides whether (and as what kind) a file is media.
  *
  * <ul>
- *   <li>{@link #CONTENT_SNIFF} — asks the native facade to look
- *       at the file's bytes (libvips loader sniffing / FFmpeg demuxer probe,
- *       or Apple's ImageIO/AVFoundation). Accurate but pays a native probe per
- *       file.</li>
+ *   <li>{@link #CONTENT_SNIFF} — the extension verdict plus a header-magic
+ *       rescue: files whose name classifies (a known media extension) keep
+ *       the extension result untouched, and only the files the name can't
+ *       classify (extension-less, or an unknown suffix) get their first bytes
+ *       matched against a curated magic-number table
+ *       ({@link ContentSniffer}), promoting misnamed media into the listing.
+ *       Promotion-only — content never demotes a named file; a wrong name
+ *       fails loudly at view time instead.</li>
  *   <li>{@link #FILE_EXTENSION} — the default; classifies purely by filename
  *       extension (see {@link ExtensionClassifier}). Fast and never touches
- *       the file, but trusts the name and cannot see inside extension-less or
- *       mislabelled files.</li>
+ *       the file, but cannot see inside extension-less or unknown-suffix
+ *       files.</li>
  * </ul>
  *
  * <p>Chosen from {@code AppSettings.detectionMode()} and switchable at runtime

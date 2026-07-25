@@ -17,7 +17,7 @@ import java.util.List;
  * no UI and no threading. All methods are blocking and must be called off the FX
  * thread.
  *
- * <p>Ported from {@code iris94.services.FileSystemService}
+ * <p>Ported from the Swing predecessor's {@code FileSystemService}
  * ({@code moveItemWithAutoRename}, {@code createDirectoryRecursive},
  * {@code listSubdirectories}, {@code availableDestination}).
  */
@@ -66,6 +66,30 @@ public final class FileOps {
             Files.move(source, target);
         }
         return target;
+    }
+
+    /**
+     * Rename {@code source} in place to {@code desiredName} (same directory),
+     * with the same {@code " (N)"} collision suffix policy as
+     * {@link #moveWithAutoRename} — used by the automatic extension fix, where
+     * {@code mystery → mystery.jpg} must not fail just because a
+     * {@code mystery.jpg} already exists.
+     *
+     * @return the final path the file now lives at (suffix included if one
+     *         was needed)
+     */
+    public static Path renameInPlaceWithAutoRename(Path source, String desiredName)
+            throws IOException {
+        if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Source does not exist: " + source);
+        }
+        Path parent = source.toAbsolutePath().getParent();
+        if (parent == null) {
+            throw new IOException("Source has no parent directory: " + source);
+        }
+        Path destination = availableDestination(parent, desiredName);
+        Files.move(source, destination);
+        return destination;
     }
 
     /** Create {@code dir} and any missing parents (like {@code mkdir -p}). */

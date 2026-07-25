@@ -197,8 +197,8 @@ final class FfmpegVideoStream implements VideoStream {
     }
 
     /**
-     * Auto-policy codec gate, from the 2026-07-23 solo-stream benchmarks
-     * (docs/panama-decoder-candidates-handoff.md §3): hardware slashes CPU
+     * Auto-policy codec gate, from the 2026-07-23 solo-stream benchmarks:
+     * hardware slashes CPU
      * >10× on heavy HEVC (38 → 3 ms/frame at 4K/40 Mbps — every iPhone
      * video), but on h264 the readback+swscale tax eats the win (par CPU,
      * one third the wall throughput). So {@code auto} routes only HEVC;

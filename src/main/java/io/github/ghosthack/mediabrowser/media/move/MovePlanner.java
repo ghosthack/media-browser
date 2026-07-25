@@ -6,8 +6,8 @@ import java.util.List;
 /**
  * The pure decision logic of a move submit: resolve the target, detect a
  * single-file rename, decide whether the target must be created, and reject an
- * empty / non-directory / same-directory target — everything iris's
- * {@code AppStore.submitMoveDialog} computes before it touches the filesystem.
+ * empty / non-directory / same-directory target — everything the Swing
+ * predecessor's {@code submitMoveDialog} computes before it touches the filesystem.
  * Headless and FX-free (it only inspects the filesystem via {@link File}), so
  * the Phase&nbsp;5 submit rules are unit-testable without a UI.
  *
@@ -49,8 +49,8 @@ public final class MovePlanner {
     /**
      * Plan a submit of {@code sources} to {@code rawTargetPath}, with relative
      * targets resolved against {@code currentDirectory}. Ports the validation
-     * and branching of {@code submitMoveDialog} (handoff §2.8 steps&nbsp;2–7,
-     * 10): empty check, relative resolve, single-file-rename detection,
+     * and branching of the predecessor's {@code submitMoveDialog}: empty
+     * check, relative resolve, single-file-rename detection,
      * create-if-missing, not-a-directory, and the same-directory guard (skipped
      * for a rename).
      */
@@ -89,7 +89,7 @@ public final class MovePlanner {
         // Same-directory guard (skipped for a rename — same parent, new name).
         // It can never fire while needsCreate is true: a not-yet-created target
         // directory has no source living inside it, so checking it before the
-        // create confirmation is equivalent to iris's after-confirm order.
+        // create confirmation is equivalent to the predecessor's after-confirm order.
         if (!singleFileRename) {
             for (String source : sources) {
                 String sourceParent = new File(source).getParent();

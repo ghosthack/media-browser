@@ -33,16 +33,27 @@ import java.util.List;
  * directories the F1–F4 shortcuts move to ({@code moveHistory[0..3]}),
  * dimmed while the shortcuts are disabled. The pane's header is a checkbox
  * that enables/disables the shortcuts, mirroring the toggle in the move
- * dialog. The browser and the mosaic each
- * host their own instance above their status bar (all instances observe the
- * one shared {@link ActionLog}); hidden by default, toggled via Show ▸
- * Action Log (startup defaults in Settings ▸ Browser / Mosaic). Ported from
- * {@code iris94.ui.ActionLogPanel}.
+ * dialog; below the targets sits the persisted Extension fix toggle
+ * (mirroring Settings ▸ General), so the feature whose renames land in this
+ * log is switchable where the log is read.
+ * The browser, the mosaic and the viewer each host their own instance
+ * above their status bar (all instances observe the one shared
+ * {@link ActionLog}); hidden by default behind one app-wide visibility flag,
+ * toggled via Show ▸ Action Log / modifier1+J in any view (startup default in
+ * Settings ▸ General). Ported from the Swing predecessor's {@code ActionLogPanel}.
  */
 public final class ActionLogPanel extends VBox {
 
     /** Panel height: a handful of rows without crowding the browser. */
     private static final double PANEL_HEIGHT = 120;
+
+    /**
+     * Every log row is one 11px line, so pin the cell height instead of
+     * letting VirtualFlow sample it: an unsampled/empty cell measuring ~0
+     * throws off the flow's max-cell estimate and logs "index exceeds
+     * maxCellCount … ActionLogPanel$EntryCell" during layout.
+     */
+    private static final double ROW_HEIGHT = 22;
 
     /** Right-hand quick-move targets pane width. */
     private static final double MOVE_TARGETS_WIDTH = 230;
@@ -55,6 +66,7 @@ public final class ActionLogPanel extends VBox {
     private final AppSettings settings;
     private final ListView<ActionLogEntry> listView = new ListView<>(ActionLog.get().entries());
     private final CheckBox targetsToggle = new CheckBox("Move targets");
+    private final CheckBox extensionFixToggle = new CheckBox("Extension fix");
     private final Label[] targetKeyLabels = new Label[MOVE_TARGET_KEYS.length];
     private final Label[] targetValueLabels = new Label[MOVE_TARGET_KEYS.length];
 
@@ -65,6 +77,7 @@ public final class ActionLogPanel extends VBox {
         setStyle("-fx-font-size: 11px; -fx-background-color: -fx-background;");
 
         listView.setPrefHeight(PANEL_HEIGHT);
+        listView.setFixedCellSize(ROW_HEIGHT);
         listView.setFocusTraversable(false);
         listView.setPlaceholder(new Label("No file actions this session"));
         listView.setCellFactory(view -> new EntryCell());
@@ -72,13 +85,17 @@ public final class ActionLogPanel extends VBox {
 
         // Follow the tail, like a terminal: the newest action stays visible.
         // Deferred so the virtual flow has re-laid-out for the new row first.
+        // Only while this panel is actually shown — three instances observe the
+        // shared log, and scrolling a hidden, zero-height flow is exactly the
+        // degenerate layout the maxCellCount INFO points at; a hidden panel
+        // catches up the moment it is shown instead (listener below).
         ActionLog.get().entries().addListener((ListChangeListener<ActionLogEntry>) change ->
                 Platform.runLater(() -> {
-                    int size = listView.getItems().size();
-                    if (size > 0) {
-                        listView.scrollTo(size - 1);
-                    }
+                    if (isVisible()) scrollToTail();
                 }));
+        visibleProperty().addListener((o, was, shown) -> {
+            if (shown) Platform.runLater(this::scrollToTail);
+        });
 
         var content = new HBox(listView, new Separator(Orientation.VERTICAL),
                 buildMoveTargetsPane());
@@ -88,9 +105,20 @@ public final class ActionLogPanel extends VBox {
         refreshMoveTargets();
 
         // Entries seeded from the on-disk log (actionLog.file) predate this
-        // panel; start scrolled to the newest, like the live tail-follow above.
+        // panel; start scrolled to the newest, like the live tail-follow above
+        // (same visibility guard: a panel constructed hidden scrolls on show).
         if (!listView.getItems().isEmpty()) {
-            Platform.runLater(() -> listView.scrollTo(listView.getItems().size() - 1));
+            Platform.runLater(() -> {
+                if (isVisible()) scrollToTail();
+            });
+        }
+    }
+
+    /** Scrolls the log list to its newest (last) entry. */
+    private void scrollToTail() {
+        int size = listView.getItems().size();
+        if (size > 0) {
+            listView.scrollTo(size - 1);
         }
     }
 
@@ -133,16 +161,43 @@ public final class ActionLogPanel extends VBox {
             targetKeyLabels[i] = key;
             targetValueLabels[i] = value;
         }
+
+        // The automatic extension fix's toggle, same style as Move targets but
+        // persisted (it mirrors Settings ▸ General ▸ Fix extensions of sniffed
+        // files on open, unlike the transient quick-move toggle above). Every
+        // panel instance stays in sync through the same revision bump.
+        extensionFixToggle.setStyle("-fx-font-weight: bold;");
+        extensionFixToggle.setFocusTraversable(false);
+        extensionFixToggle.setTooltip(new Tooltip(
+                "When checked, a file with no classifying extension that opens "
+                + "without error in the viewer is renamed in place to its "
+                + "content's canonical extension and logged here as an "
+                + "Extension fix. Persisted (Settings ▸ General)."));
+        extensionFixToggle.setOnAction(e -> {
+            settings.setExtensionFixEnabled(extensionFixToggle.isSelected());
+            try {
+                settings.save();
+            } catch (java.io.IOException ex) {
+                System.err.println("media-browser: cannot save settings: "
+                        + ex.getMessage());
+            }
+            ActionLog.get().touchMoveTargets();
+        });
+        pane.add(extensionFixToggle, 0, MOVE_TARGET_KEYS.length + 1, 2, 1);
+        GridPane.setMargin(extensionFixToggle, new Insets(6, 0, 0, 0));
         return pane;
     }
 
     /**
-     * Re-read the quick-move targets (persisted move history) and the transient
-     * toggle from {@link AppSettings}; called on every targets-revision bump.
+     * Re-read the quick-move targets (persisted move history), the transient
+     * quick-move toggle and the persisted extension-fix toggle from
+     * {@link AppSettings}; called on every targets-revision bump (which the
+     * Settings dialog and the other panels' toggles also fire).
      */
     private void refreshMoveTargets() {
         boolean enabled = settings.quickMoveShortcutsEnabled();
         targetsToggle.setSelected(enabled);
+        extensionFixToggle.setSelected(settings.extensionFixEnabled());
         List<String> history = settings.moveHistory();
         for (int i = 0; i < MOVE_TARGET_KEYS.length; i++) {
             Label value = targetValueLabels[i];

@@ -10,8 +10,7 @@ import java.util.List;
  *
  * <p>{@link #FFMPEG_FFM} decodes everything (stills included) through the
  * bundled-FFmpeg ffmpeg-ffm artifact alone. The user-install FFmpeg/libvips
- * wirings that once sat beside it are retired — see
- * {@code docs/ffm-retirement-handoff.md}.</p>
+ * wirings that once sat beside it were retired 2026-07-22.</p>
  *
  * <p>{@link #APPLE} uses Apple's ImageIO/AVFoundation exclusively (images,
  * video, and audio) with no FFmpeg/libvips dependency; {@link #WINDOWS_NATIVE}
@@ -63,7 +62,7 @@ public enum MediaBackend {
             nullFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade")),
     // TwelveMonkeys stills/GIF + bundled FFmpeg (ffmpeg-ffm artifact) for
     // video/audio. Was the default 2026-07-21..22; FFMPEG_FFM's faster JPEG
-    // decode won (docs/ffm-retirement-handoff.md), but this pairing keeps
+    // decode won the benchmarks, but this pairing keeps
     // the wider ImageIO still-format coverage (PSD/ICO/CMYK exotics).
     TWELVEMONKEYS_FFMPEG_FFM("twelvemonkeys-ffmpeg-ffm", "TwelveMonkeys ImageIO + bundled FFmpeg video",
             videoFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade",
@@ -241,7 +240,7 @@ public enum MediaBackend {
      * The default backend: {@link #FFMPEG_FFM_TURBOJPEG} — stills and video
      * through the bundled-FFmpeg (ffmpeg-ffm artifact) path plus the explicit
      * TurboJPEG thumbnail fast path, the fastest measured JPEG option
-     * (benchmarks in docs/ffm-retirement-handoff.md; formats FFmpeg doesn't
+     * (formats FFmpeg doesn't
      * claim, e.g. PSD/ICO, need an explicit TwelveMonkeys-paired backend).
      * Unconditional — deliberately no availability probe: in a tree or on a
      * platform where this backend cannot run, {@link #create()} fails loudly

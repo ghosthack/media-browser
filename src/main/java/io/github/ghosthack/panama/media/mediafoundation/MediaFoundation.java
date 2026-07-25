@@ -54,8 +54,10 @@ public final class MediaFoundation {
     public static final int MF_E_TRANSFORM_NEED_MORE_INPUT  = 0xC00D6D72;
     public static final int MF_E_TRANSFORM_TYPE_NOT_SET     = 0xC00D6D61;
     public static final int MF_E_TRANSFORM_STREAM_CHANGE    = 0xC00D6D62;
+    public static final int MF_E_NOTACCEPTING               = 0xC00D36B5;
     private static final int E_INVALIDARG                    = 0x80070057;
 
+    public static final int MFT_MESSAGE_COMMAND_FLUSH          = 0x00000000;
     public static final int MFT_MESSAGE_SET_D3D_MANAGER       = 0x00000002;
     public static final int MFT_MESSAGE_COMMAND_DRAIN          = 0x00000001;
     public static final int MFT_MESSAGE_NOTIFY_BEGIN_STREAMING = 0x10000000;
@@ -169,6 +171,12 @@ public final class MediaFoundation {
             FunctionDescriptor.of(ValueLayout.JAVA_INT,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
+    /** IMFAttributes::GetBlob -- vtable[15] (GetBlobSize=14, GetBlob=15). */
+    public static final MethodHandle IMFAttributes_GetBlob = LINKER.downcallHandle(
+            FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+
     /** IMFMediaBuffer::Lock -- vtable[3] */
     public static final MethodHandle IMFMediaBuffer_Lock = LINKER.downcallHandle(
             FunctionDescriptor.of(ValueLayout.JAVA_INT,
@@ -178,6 +186,11 @@ public final class MediaFoundation {
     /** IMFMediaBuffer::Unlock -- vtable[4] */
     public static final MethodHandle IMFMediaBuffer_Unlock = LINKER.downcallHandle(
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+
+    /** IMFMediaBuffer::SetCurrentLength -- vtable[6] (GetCurrentLength=5, SetCurrentLength=6). */
+    public static final MethodHandle IMFMediaBuffer_SetCurrentLength = LINKER.downcallHandle(
+            FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
 
     /** IMFSample::ConvertToContiguousBuffer -- vtable[41] */
     public static final MethodHandle IMFSample_ConvertToContiguousBuffer = LINKER.downcallHandle(
@@ -197,10 +210,21 @@ public final class MediaFoundation {
             FunctionDescriptor.of(ValueLayout.JAVA_INT,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
+    /** IMFSample::SetSampleTime -- vtable[36] (GetSampleTime=35, SetSampleTime=36). */
+    public static final MethodHandle IMFSample_SetSampleTime = LINKER.downcallHandle(
+            FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+
     /** IMFTransform::GetOutputStreamInfo -- vtable[7] */
     public static final MethodHandle IMFTransform_GetOutputStreamInfo = LINKER.downcallHandle(
             FunctionDescriptor.of(ValueLayout.JAVA_INT,
                     ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+
+    /** IMFTransform::GetInputAvailableType -- vtable[13] */
+    public static final MethodHandle IMFTransform_GetInputAvailableType = LINKER.downcallHandle(
+            FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
 
     /** IMFTransform::GetOutputAvailableType -- vtable[14] */
     public static final MethodHandle IMFTransform_GetOutputAvailableType = LINKER.downcallHandle(
@@ -265,6 +289,22 @@ public final class MediaFoundation {
     public static final MemorySegment MFMediaType_Video;
     public static final MemorySegment MFVideoFormat_RGB32;
     public static final MemorySegment MFVideoFormat_NV12;
+    /** MFVideoFormat_P010 ('P010' — semi-planar 10-bit 4:2:0, samples left-justified in 16 bits). */
+    public static final MemorySegment MFVideoFormat_P010;
+    /** MFVideoFormat_AV1 ('AV01' — compressed AV1 low-overhead OBU bitstream). */
+    public static final MemorySegment MFVideoFormat_AV01;
+    /** MFVideoFormat_H264 ('H264' — compressed H.264 Annex-B byte stream). */
+    public static final MemorySegment MFVideoFormat_H264;
+    /** MFVideoFormat_HEVC ('HEVC' — compressed H.265 Annex-B byte stream). */
+    public static final MemorySegment MFVideoFormat_HEVC;
+    /** MF_MT_DEFAULT_STRIDE {644B4E48-1E02-4516-B0EB-C01CA9D49AC6} (UINT32, signed stride). */
+    public static final MemorySegment MF_MT_DEFAULT_STRIDE;
+    /** MF_MT_INTERLACE_MODE {E2724BB8-E676-4806-B4B2-A8D6EFB44CCD} (UINT32, MFVideoInterlace_*). */
+    public static final MemorySegment MF_MT_INTERLACE_MODE;
+    /** MF_MT_PIXEL_ASPECT_RATIO {C6376A1E-8D0A-4027-BE45-6D9A0AD39BB6} (UINT64 ratio). */
+    public static final MemorySegment MF_MT_PIXEL_ASPECT_RATIO;
+    /** MF_MT_MINIMUM_DISPLAY_APERTURE {D7388766-18FE-48C6-A177-EE894867C8C4} (BLOB, MFVideoArea). */
+    public static final MemorySegment MF_MT_MINIMUM_DISPLAY_APERTURE;
     public static final MemorySegment MF_MT_FRAME_SIZE;
     /** MF_MT_VIDEO_ROTATION {C380465D-2271-428C-9B83-ECEA3B4A85C1} (UINT32, MFVideoRotationFormat). */
     public static final MemorySegment MF_MT_VIDEO_ROTATION;
@@ -318,6 +358,14 @@ public final class MediaFoundation {
         MemorySegment gMfMediaTypeVideo = null;
         MemorySegment gMfVideoFormatRgb32 = null;
         MemorySegment gMfVideoFormatNv12 = null;
+        MemorySegment gMfVideoFormatP010 = null;
+        MemorySegment gMfVideoFormatAv01 = null;
+        MemorySegment gMfVideoFormatH264 = null;
+        MemorySegment gMfVideoFormatHevc = null;
+        MemorySegment gMfMtDefaultStride = null;
+        MemorySegment gMfMtInterlaceMode = null;
+        MemorySegment gMfMtPixelAspectRatio = null;
+        MemorySegment gMfMtMinimumDisplayAperture = null;
         MemorySegment gMfMtFrameSize = null;
         MemorySegment gMfMtVideoRotation = null;
         MemorySegment gMfMtFrameRate = null;
@@ -431,6 +479,22 @@ public final class MediaFoundation {
                 gMfMediaTypeVideo = Ole32.guid(g, 0x73646976, (short) 0x0000, (short) 0x0010, mf);
                 gMfVideoFormatRgb32 = Ole32.guid(g, 0x00000016, (short) 0x0000, (short) 0x0010, mf);
                 gMfVideoFormatNv12 = Ole32.guid(g, 0x3231564E, (short) 0x0000, (short) 0x0010, mf);
+                gMfVideoFormatP010 = Ole32.guid(g, 0x30313050, (short) 0x0000, (short) 0x0010, mf);
+                gMfVideoFormatAv01 = Ole32.guid(g, 0x31305641, (short) 0x0000, (short) 0x0010, mf);
+                gMfVideoFormatH264 = Ole32.guid(g, 0x34363248, (short) 0x0000, (short) 0x0010, mf);
+                gMfVideoFormatHevc = Ole32.guid(g, 0x43564548, (short) 0x0000, (short) 0x0010, mf);
+                gMfMtDefaultStride = Ole32.guid(g, 0x644B4E48, (short) 0x1E02, (short) 0x4516,
+                        new byte[]{(byte) 0xB0, (byte) 0xEB, (byte) 0xC0, 0x1C,
+                                   (byte) 0xA9, (byte) 0xD4, (byte) 0x9A, (byte) 0xC6});
+                gMfMtInterlaceMode = Ole32.guid(g, 0xE2724BB8, (short) 0xE676, (short) 0x4806,
+                        new byte[]{(byte) 0xB4, (byte) 0xB2, (byte) 0xA8, (byte) 0xD6,
+                                   (byte) 0xEF, (byte) 0xB4, 0x4C, (byte) 0xCD});
+                gMfMtPixelAspectRatio = Ole32.guid(g, 0xC6376A1E, (short) 0x8D0A, (short) 0x4027,
+                        new byte[]{(byte) 0xBE, 0x45, 0x6D, (byte) 0x9A,
+                                   0x0A, (byte) 0xD3, (byte) 0x9B, (byte) 0xB6});
+                gMfMtMinimumDisplayAperture = Ole32.guid(g, 0xD7388766, (short) 0x18FE, (short) 0x48C6,
+                        new byte[]{(byte) 0xA1, 0x77, (byte) 0xEE, (byte) 0x89,
+                                   0x48, 0x67, (byte) 0xC8, (byte) 0xC4});
                 gMfMtFrameSize = Ole32.guid(g, 0x1652c33d, (short) 0xd6b2, (short) 0x4012,
                         new byte[]{(byte) 0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, (byte) 0xa3, 0x7d});
                 gMfMtVideoRotation = Ole32.guid(g, 0xC380465D, (short) 0x2271, (short) 0x428C,
@@ -491,6 +555,14 @@ public final class MediaFoundation {
         MFMediaType_Video = gMfMediaTypeVideo;
         MFVideoFormat_RGB32 = gMfVideoFormatRgb32;
         MFVideoFormat_NV12 = gMfVideoFormatNv12;
+        MFVideoFormat_P010 = gMfVideoFormatP010;
+        MFVideoFormat_AV01 = gMfVideoFormatAv01;
+        MFVideoFormat_H264 = gMfVideoFormatH264;
+        MFVideoFormat_HEVC = gMfVideoFormatHevc;
+        MF_MT_DEFAULT_STRIDE = gMfMtDefaultStride;
+        MF_MT_INTERLACE_MODE = gMfMtInterlaceMode;
+        MF_MT_PIXEL_ASPECT_RATIO = gMfMtPixelAspectRatio;
+        MF_MT_MINIMUM_DISPLAY_APERTURE = gMfMtMinimumDisplayAperture;
         MF_MT_FRAME_SIZE = gMfMtFrameSize;
         MF_MT_VIDEO_ROTATION = gMfMtVideoRotation;
         MF_MT_FRAME_RATE = gMfMtFrameRate;
@@ -2207,7 +2279,42 @@ public final class MediaFoundation {
         int hr = (int) IMFAttributes_GetGUID.invokeExact(
                 vtable(nativeType, 10), nativeType, MF_MT_SUBTYPE, subtype);
         if (failed(hr)) return MemorySegment.NULL;
+        // Keep this path's historical behavior (all MFT kinds, SORTANDFILTER
+        // ranking) — the sync-first preference below is for the raw-sample path.
+        return activateDecoderForSubtype(temp, subtype, 0x3F);
+    }
 
+    /**
+     * As {@link #activateDecoderForType(Arena, MemorySegment)} but from a
+     * compressed-video subtype GUID directly (e.g.
+     * {@link #MFVideoFormat_AV01}) — the raw-sample path, where there is no
+     * Source Reader native media type to read the subtype from. Call
+     * {@link #registerStoreCodecs()} first so Store-distributed decoders are
+     * discoverable.
+     *
+     * @param temp    arena for temporary allocations
+     * @param subtype the compressed video subtype GUID (16 bytes)
+     * @return the activated {@code IMFTransform}, or {@code MemorySegment.NULL} if none found
+     */
+    public static MemorySegment activateDecoderForSubtype(Arena temp, MemorySegment subtype)
+            throws Throwable {
+        // Prefer a synchronous MFT (the Store-distributed software decoders,
+        // e.g. the AV1 Video Extension) — async hardware MFTs require the
+        // event-driven protocol the raw-sample path does not speak. Fall back
+        // to the full set if no sync MFT matches.
+        MemorySegment decoder = activateDecoderForSubtype(temp, subtype,
+                0x59 /* SYNCMFT | FIELDOFUSE | LOCALMFT | SORTANDFILTER */);
+        if (MemorySegment.NULL.equals(decoder)) {
+            decoder = activateDecoderForSubtype(temp, subtype,
+                    0x3F /* + ASYNCMFT | HARDWARE */);
+        }
+        return decoder;
+    }
+
+    /** As {@link #activateDecoderForSubtype(Arena, MemorySegment)} with explicit {@code MFT_ENUM_FLAG_*}s. */
+    public static MemorySegment activateDecoderForSubtype(Arena temp, MemorySegment subtype,
+            int enumFlags) throws Throwable {
+        int hr;
         // Build MFT_REGISTER_TYPE_INFO for input filter: { MFMediaType_Video, subtype }
         // MFT_REGISTER_TYPE_INFO is two GUIDs (32 bytes): majorType + subtype
         MemorySegment inputFilter = temp.allocate(32);

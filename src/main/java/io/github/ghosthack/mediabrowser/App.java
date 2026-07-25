@@ -98,7 +98,9 @@ public final class App extends Application {
 
         // One shared rotation store backs all views (mirrors how the single
         // MediaService is shared), so a rotate in any is seen by the others.
-        var rotationStore = new RotationStore();
+        // Its bound caps how many read-only directories may keep adjustments in
+        // memory for the session when their sidecar cannot be written.
+        var rotationStore = new RotationStore(settings.adjustmentsVolatileMaxDirs());
         // Likewise one shared AAE edit store: resolves an image to its Apple
         // Photos .AAE edit (crop/straighten), composed above the decoders.
         var aaeStore = new AaeStore();

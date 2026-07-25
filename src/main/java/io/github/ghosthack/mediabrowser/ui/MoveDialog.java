@@ -38,20 +38,20 @@ import java.util.Objects;
  * <em>view</em>: it holds no move logic and never mutates the model. A driver
  * (a Phase&nbsp;5 controller, a window, or the manual harness) handles each
  * intent, mutates the model, and calls {@link #refresh()} to reconcile the UI —
- * exactly mirroring iris's {@code MoveDialog.syncFromState} reacting to store
+ * exactly mirroring the Swing predecessor's {@code syncFromState} reacting to store
  * change events.
  *
  * <p>Three keyboard-focus zones (target {@code INPUT}, recent-targets
  * {@code HISTORY}, browse {@code TREE}) are framed by a border that brightens
  * and thickens on the active zone. Tab/Shift-Tab/Esc/Enter and the per-zone
  * arrow keys are intercepted by a single {@code KEY_PRESSED} filter on the root
- * so JavaFX's native focus traversal never interferes (ported from iris's
+ * so JavaFX's native focus traversal never interferes (ported from the predecessor's
  * {@code setFocusTraversalKeysEnabled(false)} + {@code handleDialogKey}).
  *
  * <p>All programmatic writes back into the {@link TextField}, {@link ListView},
  * {@link TreeView} and {@link CheckBox} happen under the {@link #syncing} guard
  * so they never re-fire the change listeners that emit intents — the JavaFX
- * equivalent of iris's {@code suppressTargetSync} / {@code suppressQuickMoveSync}
+ * equivalent of the predecessor's {@code suppressTargetSync} / {@code suppressQuickMoveSync}
  * / {@code suppressTreeExpansionEvents} flags.
  */
 public final class MoveDialog {
@@ -81,7 +81,7 @@ public final class MoveDialog {
      * The recent-target list to display. Owned by the driver (it lives in
      * {@code AppSettings}, not the model), so it is pushed in via
      * {@link #setHistory(List)} rather than read off the model — mirroring how
-     * iris's view read {@code state.getMoveHistory()} rather than the dialog
+     * the predecessor's view read {@code state.getMoveHistory()} rather than the dialog
      * state. Empty until the driver supplies it.
      */
     private List<String> history = List.of();
@@ -89,7 +89,7 @@ public final class MoveDialog {
     /**
      * True while {@link #refresh()} is pushing model state into the controls, so
      * the controls' own change listeners short-circuit instead of emitting
-     * intents back. The suppress-flag discipline from the handoff §2.9.
+     * intents back. The ported suppress-flag discipline.
      */
     private boolean syncing = false;
 
@@ -217,7 +217,7 @@ public final class MoveDialog {
             }
         });
 
-        // History: click-select fills the target field (matches iris mouseClicked).
+        // History: click-select fills the target field (matches the predecessor's click handling).
         historyList.setOnMouseClicked(e -> {
             int index = historyList.getSelectionModel().getSelectedIndex();
             if (!syncing && index >= 0) {
@@ -254,7 +254,7 @@ public final class MoveDialog {
     }
 
     /**
-     * The single dialog-level key router (ported from iris's
+     * The single dialog-level key router (ported from the predecessor's
      * {@code handleDialogKey}). Esc cancels and Tab cycles zones from anywhere;
      * Enter submits from anywhere (one handler, so no double submit); arrows
      * route per the active zone. INPUT deliberately leaves arrows alone so the
@@ -303,7 +303,7 @@ public final class MoveDialog {
 
     /**
      * Reconcile every control from the current {@link MoveDialogModel} — the
-     * analog of iris's {@code syncFromState}. Idempotent and re-entrancy-safe:
+     * analog of the predecessor's {@code syncFromState}. Idempotent and re-entrancy-safe:
      * all writes happen under {@link #syncing} so the controls' listeners do not
      * feed intents back while we are pushing state in. Call this after handling
      * any intent that mutated the model.
@@ -518,7 +518,7 @@ public final class MoveDialog {
         // Keyboard focus only ever rests on the text field (INPUT). For HISTORY
         // and TREE we keep focus on the root so stray keystrokes can't disturb
         // the list/tree; the bright zone border + selection make the active zone
-        // obvious. Mirrors iris, which parked focus on the dialog itself.
+        // obvious. Mirrors the predecessor, which parked focus on the dialog itself.
         if (model.getFocusZone() == MoveDialogFocusZone.INPUT) {
             targetField.requestFocus();
             targetField.positionCaret(targetField.getText().length());

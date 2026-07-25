@@ -2,6 +2,7 @@ package io.github.ghosthack.mediabrowser.ui;
 
 import io.github.ghosthack.mediabrowser.AppSettings;
 import io.github.ghosthack.mediabrowser.media.MediaService;
+import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 import io.github.ghosthack.mediabrowser.media.move.FileOps;
 import io.github.ghosthack.mediabrowser.media.move.MoveDialogIntents;
@@ -24,8 +25,8 @@ import java.util.List;
 
 /**
  * Drives the {@link MoveDialog}: owns the {@link MoveDialogModel}, handles every
- * {@link MoveDialogIntents} the view emits, and ports iris's
- * {@code AppStore.submitMoveDialog} as {@link #submit()}. Window-agnostic — a
+ * {@link MoveDialogIntents} the view emits, and ports the Swing predecessor's
+ * {@code submitMoveDialog} as {@link #submit()}. Window-agnostic — a
  * {@link Host} supplies the current directory, the selection, the post-move
  * focus target and the refresh, so the <em>same</em> controller serves both the
  * main window (Phase&nbsp;5) and the mosaic (Phase&nbsp;6).
@@ -58,7 +59,7 @@ public final class MoveController implements MoveDialogIntents {
         /**
          * The path of the next item to focus once {@code movingPaths} leave the
          * listing, or {@code null} if nothing suitable remains. Computed against
-         * the <em>pre-move</em> listing and cursor (see iris's
+         * the <em>pre-move</em> listing and cursor (see the predecessor's
          * {@code computeNextFocusAfterMove}).
          */
         Path nextFocusAfterMove(List<Path> movingPaths);
@@ -76,7 +77,7 @@ public final class MoveController implements MoveDialogIntents {
         /**
          * Re-list the current directory and, once the async listing arrives,
          * select {@code focusPath} (or clear selection when {@code null}). The
-         * "synchronous refresh before focus" sequencing from the handoff §2.8:
+         * ported "synchronous refresh before focus" sequencing:
          * implementations set their pending-selection hook and re-navigate so the
          * post-listing selection lands without a race.
          */
@@ -118,16 +119,25 @@ public final class MoveController implements MoveDialogIntents {
 
     /**
      * Reentrancy guard: a move (dialog submit or quick-move) is in flight.
-     * Process-wide — static, like iris's single {@code AppStore.isSubmittingMoveDialog}
+     * Process-wide — static, like the predecessor's single {@code isSubmittingMoveDialog}
      * — because each window has its <em>own</em> controller and a move can
      * shift keyboard focus to another window mid-flight (the mosaic's post-move
      * refresh auto-opens the viewer), where a per-instance guard would not
      * block a queued auto-repeating F1–F4. Held from launch until the finish
-     * handler has applied the post-move refresh/focus, again matching iris:
+     * handler has applied the post-move refresh/focus, again matching the predecessor:
      * released any earlier, a queued keystroke would launch the next move
      * against a half-refreshed listing. FX thread only.
      */
     private static boolean moveInFlight = false;
+
+    /**
+     * Whether a move is in flight right now (FX thread only) — lets the
+     * viewer's automatic extension fix stand down instead of renaming a path
+     * a move may be about to relocate.
+     */
+    static boolean isMoveInFlight() {
+        return moveInFlight;
+    }
 
     public MoveController(MediaService service, AppSettings settings, Host host) {
         this.service = service;
@@ -139,7 +149,7 @@ public final class MoveController implements MoveDialogIntents {
 
     /**
      * Resolve the selection and, when non-empty, open the modal move dialog. An
-     * empty source set shows a status note and does not open (mirrors iris's
+     * empty source set shows a status note and does not open (mirrors the predecessor's
      * {@code openMoveDialog}).
      */
     public void open() {
@@ -153,6 +163,8 @@ public final class MoveController implements MoveDialogIntents {
                     : "No files selected to move.");
             return;
         }
+
+        if (refusesArchiveSources(selection)) return;
 
         workingHistory = new ArrayList<>(settings.moveHistory());
         Path dir = host.currentDirectory();
@@ -169,6 +181,22 @@ public final class MoveController implements MoveDialogIntents {
         dialog.showAndWait();
     }
 
+    /**
+     * Whether the move must be refused because its sources live inside an
+     * archive, reporting why when it does.
+     *
+     * <p>A disc image or zip is immutable, so there is nothing to move
+     * <em>from</em> — and the move machinery works in path strings, which for an
+     * archive entry name only its position inside the container. Refusing here,
+     * before the dialog opens, is the honest answer; the alternative would be a
+     * dialog that can only fail on submit.</p>
+     */
+    private boolean refusesArchiveSources(Selection selection) {
+        if (selection.sources().stream().noneMatch(ArchivePaths::inArchive)) return false;
+        host.showStatus("Files inside an archive are read-only — extract them first.");
+        return true;
+    }
+
     /** Whether the dialog is currently showing. */
     public boolean isShowing() {
         return dialog != null && dialog.stage().isShowing();
@@ -178,7 +206,7 @@ public final class MoveController implements MoveDialogIntents {
 
     /**
      * Quick-move the current selection straight to {@code moveHistory[index]}
-     * without opening the dialog — the F1–F4 shortcuts (handoff §2.10). A
+     * without opening the dialog — the F1–F4 shortcuts. A
      * no-op (returns {@code false}, so the keystroke can pass through) unless the
      * transient quick-move toggle is on and that history slot exists.
      *
@@ -206,6 +234,8 @@ public final class MoveController implements MoveDialogIntents {
                     : "No files selected to move.");
             return true;
         }
+
+        if (refusesArchiveSources(selection)) return true;
 
         String target = history.get(index);
         Path targetDir = Path.of(target);
