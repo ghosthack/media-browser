@@ -23,7 +23,8 @@ Self-contained installers are published on the
 
 - macOS Apple silicon: DMG
 - Windows x64: EXE installer or portable ZIP
-- Linux x64: Debian package or portable tarball
+- Linux x64 (glibc 2.38+, including Ubuntu 24.04): Debian package or
+  portable tarball
 
 The installers include their own Java 26 runtime and the correct native
 libraries for that platform; users do not need to install Java.

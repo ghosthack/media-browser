@@ -5,7 +5,8 @@ with the JDK's `jpackage` tool. It supports:
 
 - macOS Apple silicon: `.dmg`
 - Windows x64: `.exe` plus a portable `.zip`
-- Linux x64: `.deb` plus a portable `.tar.gz`
+- Linux x64 with glibc 2.38+ (including Ubuntu 24.04): `.deb` plus a
+  portable `.tar.gz`
 
 The script first builds an `app-image` and runs `scripts/smoke-package.sh`
 against the Java runtime and dependency jars inside that image. Only after the
