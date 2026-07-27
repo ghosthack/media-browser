@@ -51,6 +51,7 @@ final class SingleWindowShell extends AppShell {
         super(settings);
         this.stage = stage;
         this.undecorated = settings.undecoratedWindows();
+        installApplicationIcon(stage);
         // Black fill so a root swap never flashes white while the incoming
         // view runs its first CSS/layout pass.
         this.scene = new Scene(new StackPane(), 1200, 760);

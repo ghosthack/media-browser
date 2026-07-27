@@ -81,6 +81,7 @@ final class MultiWindowShell extends AppShell {
 
     private void initStage(AppView v, int width, int height, String title) {
         Stage stage = stages.get(v);
+        installApplicationIcon(stage);
         var scene = new Scene(new StackPane(), width, height);
         // Paint the first frame black (the scene's default fill is white), so
         // there is no white flash before the view's content renders.

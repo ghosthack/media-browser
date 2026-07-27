@@ -21,19 +21,20 @@ Release CI derives the numeric version from its `vX.Y.Z` tag. Maven uses the
 same value through `-Drevision=X.Y.Z`, so the JAR manifest, staged filename,
 application bundle, installer, and release assets agree.
 
-## Optional icons
+## Application icons
 
-If present, the packaging script automatically uses:
+The packaging script automatically uses the disco-ball application icon in
+the native format for each platform:
 
 - `packaging/icons/media-browser.icns` on macOS
 - `packaging/icons/media-browser.ico` on Windows
 - `packaging/icons/media-browser.png` on Linux
 
-Until those files are added, `jpackage` uses its default application icon.
-
 ## Optional signing
 
 Signing is off for local builds unless the relevant variables are set.
+See [Release signing setup](SIGNING.md) for the complete GitHub environment,
+certificate, notarization, and verification procedure.
 
 macOS:
 
@@ -67,5 +68,6 @@ approval. Add these environment secrets as applicable:
 
 The certificate values are base64 encodings of the binary PKCS#12/PFX files.
 If no signing secrets are configured, manual workflow runs still produce
-unsigned packages for pipeline testing. A public release should be signed and
-the macOS DMG notarized.
+unsigned packages. The project currently publishes unsigned releases, so
+macOS Gatekeeper and Windows SmartScreen may require users to approve the app
+manually. Signing can be enabled later without changing the artifact layout.

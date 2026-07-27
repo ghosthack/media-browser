@@ -9,6 +9,7 @@ import javafx.beans.property.ReadOnlyStringProperty;
 import javafx.scene.Parent;
 import javafx.scene.control.MenuBar;
 import javafx.scene.control.ToolBar;
+import javafx.scene.image.Image;
 import javafx.stage.Stage;
 
 import java.util.EnumMap;
@@ -37,6 +38,9 @@ import java.util.Map;
  */
 public abstract class AppShell {
 
+    private static final String APPLICATION_ICON_RESOURCE =
+            "/io/github/ghosthack/mediabrowser/media-browser.png";
+
     /** The three views the shell hosts. */
     public enum AppView { BROWSER, MOSAIC, VIEWER }
 
@@ -61,6 +65,24 @@ public abstract class AppShell {
 
     protected AppShell(AppSettings settings) {
         this.maximizer = new WindowMaximizer(settings.maximizeOverscan());
+    }
+
+    /** Applies the packaged application artwork to a JavaFX window. */
+    protected static void installApplicationIcon(Stage stage) {
+        Image icon = ApplicationIconHolder.ICON;
+        if (icon != null) {
+            stage.getIcons().add(icon);
+        }
+    }
+
+    private static Image loadApplicationIcon() {
+        var resource = AppShell.class.getResource(APPLICATION_ICON_RESOURCE);
+        return resource == null ? null : new Image(resource.toExternalForm());
+    }
+
+    /** Loads the shared image only if a window shell is actually constructed. */
+    private static final class ApplicationIconHolder {
+        private static final Image ICON = loadApplicationIcon();
     }
 
     /** The shell for the persisted {@code window.mode} setting. */
