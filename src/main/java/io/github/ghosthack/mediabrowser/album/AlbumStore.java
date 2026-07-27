@@ -6,11 +6,13 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -90,7 +92,10 @@ public final class AlbumStore {
     public Album createAlbum() throws IOException {
         Files.createDirectories(dir);
         int number = nextFreeNumber();
-        Path file = dir.resolve(String.format("%s%03d%s", PREFIX, number, SUFFIX));
+        // Locale.ROOT so the number is always ASCII digits: under a default
+        // locale with non-Latin digits (fa-IR, ar-EG) the formatted name would
+        // not match NUMBERED, and every album written became invisible.
+        Path file = dir.resolve(String.format(Locale.ROOT, "%s%03d%s", PREFIX, number, SUFFIX));
         if (!Files.exists(file)) {
             Files.createFile(file);
         }
@@ -114,7 +119,13 @@ public final class AlbumStore {
                     // listing, the same way a deleted member would.
                     ArchivePaths.parse(trimmed).ifPresent(paths::add);
                 } else {
-                    paths.add(Path.of(trimmed));
+                    try {
+                        paths.add(Path.of(trimmed));
+                    } catch (InvalidPathException ignored) {
+                        // One unparseable line (a stray NUL, a Windows path read
+                        // on POSIX) drops that member rather than failing the
+                        // whole album, matching how a deleted member behaves.
+                    }
                 }
             }
             return paths;

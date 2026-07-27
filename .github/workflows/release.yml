@@ -1,0 +1,219 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Numeric release version (X.Y.Z)
+        required: true
+        default: "1.0.0"
+      publish:
+        description: Publish/update a GitHub Release after packaging
+        type: boolean
+        required: true
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Validate release version
+        id: release
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="$GITHUB_REF_NAME"
+            version="${tag#v}"
+          else
+            version="$INPUT_VERSION"
+            tag="v$version"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must be exactly vX.Y.Z (got '$tag')" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  package:
+    needs: metadata
+    name: Package ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            asset: macos-arm64
+          - runner: windows-2025-vs2026
+            asset: windows-x64
+          - runner: ubuntu-22.04
+            asset: linux-x64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 26
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: "26"
+          cache: maven
+
+      - name: Install Linux packaging prerequisites
+        if: matrix.asset == 'linux-x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fakeroot
+
+      - name: Import macOS signing certificate
+        if: matrix.asset == 'macos-arm64'
+        shell: bash
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [[ -z "$CERTIFICATE_BASE64" ]]; then
+            echo "No macOS certificate configured; producing an unsigned package."
+            exit 0
+          fi
+          certificate="$RUNNER_TEMP/media-browser-signing.p12"
+          keychain="$RUNNER_TEMP/media-browser-signing.keychain-db"
+          printf '%s' "$CERTIFICATE_BASE64" |
+            openssl base64 -d -A -out "$certificate"
+          security create-keychain -p actions "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p actions "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k actions "$keychain"
+          echo "MACOS_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          rm -f "$certificate"
+
+      - name: Prepare Windows signing certificate
+        if: matrix.asset == 'windows-x64'
+        shell: pwsh
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CERTIFICATE_BASE64)) {
+            Write-Host "No Windows certificate configured; producing an unsigned package."
+            exit 0
+          }
+          $certificate = Join-Path $env:RUNNER_TEMP "media-browser-signing.pfx"
+          [IO.File]::WriteAllBytes(
+            $certificate,
+            [Convert]::FromBase64String($env:CERTIFICATE_BASE64)
+          )
+          "WINDOWS_PFX_FILE=$certificate" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build and package
+        shell: bash
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: bash scripts/package.sh all "${{ needs.metadata.outputs.version }}"
+
+      - name: Notarize and staple macOS DMG
+        if: matrix.asset == 'macos-arm64'
+        shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          if [[ -z "$NOTARY_APPLE_ID" ||
+                -z "$NOTARY_PASSWORD" ||
+                -z "$NOTARY_TEAM_ID" ]]; then
+            echo "No complete notarization credentials configured; skipping notarization."
+            exit 0
+          fi
+          if [[ -z "$SIGNING_IDENTITY" ]]; then
+            echo "Notarization credentials exist but MACOS_SIGNING_IDENTITY is missing." >&2
+            exit 1
+          fi
+          shopt -s nullglob
+          images=(target/jpackage/release/*.dmg)
+          if (( ${#images[@]} != 1 )); then
+            echo "Expected exactly one DMG to notarize." >&2
+            exit 1
+          fi
+          xcrun notarytool submit "${images[0]}" --wait \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --password "$NOTARY_PASSWORD" \
+            --team-id "$NOTARY_TEAM_ID"
+          xcrun stapler staple "${images[0]}"
+          xcrun stapler validate "${images[0]}"
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: packages-${{ matrix.asset }}
+          path: target/jpackage/release/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove temporary signing keychain
+        if: always() && matrix.asset == 'macos-arm64'
+        shell: bash
+        run: |
+          if [[ -n "${MACOS_KEYCHAIN:-}" && -f "$MACOS_KEYCHAIN" ]]; then
+            security delete-keychain "$MACOS_KEYCHAIN"
+          fi
+
+  publish:
+    needs: [metadata, package]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    runs-on: ubuntu-22.04
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: packages-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        working-directory: dist
+        run: |
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' |
+            sort -z |
+            xargs -0 sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "Media Browser $RELEASE_VERSION" \
+              --generate-notes
+          fi

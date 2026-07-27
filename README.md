@@ -16,6 +16,31 @@ mvn javafx:run                                  # opens at $HOME
 mvn javafx:run -Djavafx.args="/some/dir"        # opens at /some/dir
 ```
 
+## Download
+
+Self-contained installers are published on the
+[GitHub Releases](https://github.com/ghosthack/media-browser/releases) page:
+
+- macOS Apple silicon: DMG
+- Windows x64: EXE installer or portable ZIP
+- Linux x64: Debian package or portable tarball
+
+The installers include their own Java 26 runtime and the correct native
+libraries for that platform; users do not need to install Java.
+
+Maintainers create a release by pushing an exact numeric tag:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The public release workflow builds and smoke-tests all three self-contained
+application images on native GitHub runners, optionally signs them, and
+publishes the installers with SHA-256 checksums. See
+[`packaging/README.md`](packaging/README.md) for local packaging and signing
+configuration.
+
 ## Decode backends
 
 The decode backend is chosen at startup (Preferences ▸ Media decode backend);

@@ -6,13 +6,16 @@
 
   <groupId>io.github.ghosthack</groupId>
   <artifactId>media-browser</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>${revision}</version>
   <packaging>jar</packaging>
 
   <name>Media Browser</name>
   <description>Pure-Java desktop media browser: JavaFX UI with selectable decode backends.</description>
 
   <properties>
+    <!-- CI-friendly version: release builds override with
+         -Drevision=<tag-without-v>; normal development stays a snapshot. -->
+    <revision>1.0.0-SNAPSHOT</revision>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>26</maven.compiler.release>
     <javafx.version>24.0.2</javafx.version>
@@ -57,6 +60,7 @@
     <librawffm.natives>macos-arm64</librawffm.natives>
     <junit.version>5.11.4</junit.version>
     <app.mainClass>io.github.ghosthack.mediabrowser.App</app.mainClass>
+    <app.launcherClass>io.github.ghosthack.mediabrowser.Launcher</app.launcherClass>
     <!-- Mosaic thumbnail/UI telemetry knobs, forwarded to the forked javafx:run
          JVM via the plugin <options> below. Override on the command line, e.g.
          mvn javafx:run -Dmosaic.telemetry=true. Defaults keep it off. -->
@@ -335,10 +339,63 @@
         <librawffm.natives>linux-x64</librawffm.natives>
       </properties>
     </profile>
+    <!-- Stage the application and runtime-scope dependencies exactly as
+         jpackage expects them. The native profile above ensures this directory
+         contains one OS/architecture's native classifier jars, never all of
+         them. scripts/package.sh activates this profile after cleaning target. -->
+    <profile>
+      <id>dist</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-jar-plugin</artifactId>
+            <version>3.5.0</version>
+            <configuration>
+              <outputDirectory>${project.build.directory}/jpackage-input</outputDirectory>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-dependency-plugin</artifactId>
+            <version>3.11.0</version>
+            <executions>
+              <execution>
+                <id>stage-jpackage-runtime-dependencies</id>
+                <phase>package</phase>
+                <goals><goal>copy-dependencies</goal></goals>
+                <configuration>
+                  <includeScope>runtime</includeScope>
+                  <outputDirectory>${project.build.directory}/jpackage-input</outputDirectory>
+                  <overWriteIfNewer>true</overWriteIfNewer>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
   </profiles>
 
   <build>
     <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.5.0</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>${app.launcherClass}</mainClass>
+            </manifest>
+            <manifestEntries>
+              <Implementation-Title>${project.name}</Implementation-Title>
+              <Implementation-Version>${project.version}</Implementation-Version>
+              <Implementation-Vendor>ghosthack contributors</Implementation-Vendor>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>

@@ -1,11 +1,14 @@
 # Third-party dependencies
 
-This repository distributes **source only**; Maven downloads the artifacts
-below at build time. This list is a courtesy overview, not a license text —
-each project's own license governs.
+Maven downloads the artifacts below at build time. GitHub source archives
+contain source only; the self-contained installers on the Releases page also
+convey the runtime dependency JARs and the single matching platform's native
+libraries. This list is a courtesy overview, not a license text — each
+project's own license governs.
 
 | Dependency | Version | License | Used for |
 |---|---|---|---|
+| [Azul Zulu OpenJDK](https://www.azul.com/downloads/) | 26 | OpenJDK licenses and notices included under the packaged runtime's `legal/` directory | self-contained Java runtime |
 | [OpenJFX (JavaFX)](https://openjfx.io) | 24.0.2 | GPLv2 + Classpath Exception | UI toolkit |
 | [LWJGL 3](https://www.lwjgl.org) (core, opengl, glfw) | 3.4.1 | BSD 3-Clause | offscreen GL video rendering |
 | [TwelveMonkeys ImageIO](https://github.com/haraldk/TwelveMonkeys) (14 plugins) | 3.13.1 | BSD 3-Clause | still-image decoding (JPEG/CMYK, TIFF, WebP, PSD, …) |
