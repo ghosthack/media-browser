@@ -466,6 +466,8 @@
         <configuration>
           <mainClass>${app.mainClass}</mainClass>
           <options>
+            <!-- JavaFX 26 EXTENDED/HeaderBar window chrome is a preview API. -->
+            <option>-Djavafx.enablePreview=true</option>
             <option>--enable-native-access=javafx.graphics,ALL-UNNAMED</option>
             <!-- Vendored pure-Java decoders use the incubating Vector API -->
             <option>--add-modules=jdk.incubator.vector</option>

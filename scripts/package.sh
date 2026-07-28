@@ -117,6 +117,7 @@ IMAGE_ARGS=(
     --main-class "$MAIN_CLASS"
     --add-modules "$RUNTIME_MODULES"
     --java-options "--add-modules=$RUNTIME_MODULES"
+    --java-options "-Djavafx.enablePreview=true"
     --java-options "--enable-native-access=ALL-UNNAMED"
     --java-options "--sun-misc-unsafe-memory-access=allow"
 )
