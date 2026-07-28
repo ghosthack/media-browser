@@ -18,3 +18,14 @@
 .app-window-icon {
     -fx-opacity: 0.92;
 }
+
+/*
+ * Top-level menus are part of the window chrome, not toolbar buttons. Some
+ * themes also style .menu-button controls with a border; MenuBar uses that
+ * same style class internally, so explicitly keep its menu labels borderless.
+ * Hover, focus, and open-state backgrounds remain theme-controlled.
+ */
+.menu-bar > .container > .menu-button {
+    -fx-border-color: transparent;
+    -fx-border-width: 0;
+}
