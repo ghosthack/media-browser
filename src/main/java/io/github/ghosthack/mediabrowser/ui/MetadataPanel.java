@@ -59,6 +59,7 @@ public final class MetadataPanel extends VBox {
     private final Label placeholder = new Label(PLACEHOLDER);
     private final Button loadButton = new Button("Load");
     private final ToggleButton autoToggle = new ToggleButton("Auto");
+    private final ToggleButton toolsToggle = new ToggleButton("...");
     private final TextField filterField = new TextField();
     private final HBox titleRow;
 
@@ -76,9 +77,12 @@ public final class MetadataPanel extends VBox {
         autoToggle.setTooltip(new Tooltip(
                 "Auto-load metadata on navigation (off by default; debounced)"));
 
+        toolsToggle.setTooltip(new Tooltip("Show or hide filter and copy controls"));
+        toolsToggle.setAccessibleText("Show metadata filter and copy controls");
+
         var titleSpacer = new Region();
         HBox.setHgrow(titleSpacer, Priority.ALWAYS);
-        titleRow = new HBox(6, title, titleSpacer, loadButton, autoToggle);
+        titleRow = new HBox(6, title, titleSpacer, loadButton, autoToggle, toolsToggle);
         titleRow.setAlignment(Pos.CENTER_LEFT);
         titleRow.setPadding(new Insets(0, 6, 0, 0));
 
@@ -96,6 +100,8 @@ public final class MetadataPanel extends VBox {
         var filterRow = new HBox(6, filterField, copyAll);
         filterRow.setAlignment(Pos.CENTER_LEFT);
         filterRow.setPadding(new Insets(2, 6, 4, 6));
+        filterRow.visibleProperty().bind(toolsToggle.selectedProperty());
+        filterRow.managedProperty().bind(toolsToggle.selectedProperty());
 
         // "Property", not "Key": the Info and Diagnostics tables next to this one
         // in the stack head their first column that way, and the panel titles
@@ -114,6 +120,7 @@ public final class MetadataPanel extends VBox {
         table.setRoot(root);
         table.setShowRoot(false);
         table.getColumns().setAll(List.of(keyCol, valueCol));
+        table.getStyleClass().add("headerless-table");
         table.setColumnResizePolicy(TreeTableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         table.setPlaceholder(placeholder);
         table.setRowFactory(tv -> rowWithCopyMenu());

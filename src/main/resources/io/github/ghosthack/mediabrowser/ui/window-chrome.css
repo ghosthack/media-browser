@@ -29,3 +29,14 @@
     -fx-border-color: transparent;
     -fx-border-width: 0;
 }
+
+/*
+ * Property/value tables are self-explanatory inside the named Info and
+ * Metadata panels. Remove the otherwise-repeated "Property" / "Value" strip
+ * without affecting tables elsewhere in the application.
+ */
+.headerless-table .column-header-background {
+    -fx-min-height: 0;
+    -fx-pref-height: 0;
+    -fx-max-height: 0;
+}

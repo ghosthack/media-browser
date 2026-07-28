@@ -5,7 +5,6 @@ import io.github.ghosthack.mediabrowser.media.MediaService;
 
 import javafx.beans.binding.Bindings;
 import javafx.beans.property.ReadOnlyStringWrapper;
-import javafx.beans.property.SimpleDoubleProperty;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
@@ -67,19 +66,13 @@ public final class InfoPanel extends VBox {
         header.setAlignment(Pos.CENTER_LEFT);
 
         addPropertyValueColumns(fileTable);
+        fileTable.getStyleClass().add("headerless-table");
         fileTable.setFocusTraversable(false);
         fileTable.setFixedCellSize(FILE_TABLE_ROW_HEIGHT);
-        // Exactly as tall as its rows plus the column-header strip (measured
-        // once the skin builds it; a typical default until then), so it never
-        // scrolls and the probe table below keeps the remaining height.
-        var fileHeaderHeight = new SimpleDoubleProperty(26);
-        fileTable.skinProperty().addListener((o, was, skin) -> {
-            if (fileTable.lookup(".column-header-background") instanceof Region bg) {
-                fileHeaderHeight.bind(bg.heightProperty());
-            }
-        });
+        // Exactly as tall as its rows (the column-header strip is hidden), so
+        // it never scrolls and the probe table below keeps the remaining height.
         fileTable.prefHeightProperty().bind(Bindings.size(fileTable.getItems())
-                .multiply(FILE_TABLE_ROW_HEIGHT).add(fileHeaderHeight).add(2));
+                .multiply(FILE_TABLE_ROW_HEIGHT).add(2));
         // The two tables stack flush and each draws its own 1px box, so their
         // seam came out a doubled line. Overlap by exactly that pixel — the
         // themes draw the box as a border (Cupertino) or as background layers
@@ -90,6 +83,7 @@ public final class InfoPanel extends VBox {
         setFileSectionVisible(false);
 
         addPropertyValueColumns(table);
+        table.getStyleClass().add("headerless-table");
         table.setPlaceholder(placeholder);
         VBox.setVgrow(table, Priority.ALWAYS);
 
