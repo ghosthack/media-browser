@@ -18,14 +18,17 @@ case "$(uname -s)" in
     Darwin)
         LAUNCHER="$IMAGE/Contents/MacOS/Media Browser"
         APP_DIR="$IMAGE/Contents/app"
+        RUNTIME_RELEASE="$IMAGE/Contents/runtime/Contents/Home/release"
         ;;
     Linux)
         LAUNCHER="$IMAGE/bin/Media Browser"
         APP_DIR="$IMAGE/lib/app"
+        RUNTIME_RELEASE="$IMAGE/lib/runtime/release"
         ;;
     MINGW*|MSYS*|CYGWIN*)
         LAUNCHER="$IMAGE/Media Browser.exe"
         APP_DIR="$IMAGE/app"
+        RUNTIME_RELEASE="$IMAGE/runtime/release"
         ;;
     *)
         echo "error: unsupported host: $(uname -s)" >&2
@@ -40,6 +43,18 @@ esac
 for required in LICENSE THIRD-PARTY.md; do
     [[ -f "$APP_DIR/$required" ]] || {
         echo "error: packaged notice is missing: $APP_DIR/$required" >&2
+        exit 1
+    }
+done
+
+[[ -f "$RUNTIME_RELEASE" ]] || {
+    echo "error: packaged Java runtime metadata is missing: $RUNTIME_RELEASE" >&2
+    exit 1
+}
+PACKAGED_MODULES="$(sed -n 's/^MODULES="\(.*\)"$/\1/p' "$RUNTIME_RELEASE" | tr ' ' '\n')"
+for required in jdk.incubator.vector java.xml jdk.unsupported; do
+    grep -Fxq "$required" <<<"$PACKAGED_MODULES" || {
+        echo "error: packaged Java runtime is missing module: $required" >&2
         exit 1
     }
 done

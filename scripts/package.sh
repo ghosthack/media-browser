@@ -15,6 +15,7 @@ VERSION="${2:-${APP_VERSION:-1.0.0}}"
 APP_NAME="Media Browser"
 APP_ID="io.github.ghosthack.mediabrowser"
 MAIN_CLASS="io.github.ghosthack.mediabrowser.Launcher"
+RUNTIME_MODULES="jdk.incubator.vector,java.xml,jdk.unsupported"
 INPUT_DIR="$ROOT/target/jpackage-input"
 PACKAGE_ROOT="$ROOT/target/jpackage"
 IMAGE_DIR="$PACKAGE_ROOT/images"
@@ -114,8 +115,8 @@ IMAGE_ARGS=(
     --input "$INPUT_DIR"
     --main-jar "$MAIN_JAR"
     --main-class "$MAIN_CLASS"
-    --add-modules jdk.incubator.vector
-    --java-options "--add-modules=jdk.incubator.vector"
+    --add-modules "$RUNTIME_MODULES"
+    --java-options "--add-modules=$RUNTIME_MODULES"
     --java-options "--enable-native-access=ALL-UNNAMED"
     --java-options "--sun-misc-unsafe-memory-access=allow"
 )

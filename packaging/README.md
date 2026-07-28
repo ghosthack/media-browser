@@ -17,6 +17,13 @@ scripts/package.sh app-image 1.0.0
 scripts/package.sh all 1.0.0
 ```
 
+When testing a quarantined macOS app during development, clear the quarantine
+attribute from the installed bundle:
+
+```sh
+sudo xattr -dr com.apple.quarantine "/Applications/Media Browser.app"
+```
+
 Release CI derives the numeric version from its `vX.Y.Z` tag. Maven uses the
 same value through `-Drevision=X.Y.Z`, so the JAR manifest, staged filename,
 application bundle, installer, and release assets agree.
