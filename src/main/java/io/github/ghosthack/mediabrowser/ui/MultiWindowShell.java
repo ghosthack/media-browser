@@ -10,7 +10,7 @@ import javafx.beans.value.ChangeListener;
 import javafx.beans.value.ObservableValue;
 import javafx.scene.Scene;
 import javafx.scene.input.KeyCombination;
-import javafx.scene.layout.StackPane;
+import javafx.scene.layout.BorderPane;
 import javafx.scene.paint.Color;
 import javafx.stage.Stage;
 import javafx.stage.StageStyle;
@@ -46,6 +46,7 @@ final class MultiWindowShell extends AppShell {
 
     private final AppSettings settings;
     private final Map<AppView, Stage> stages = new EnumMap<>(AppView.class);
+    private final Map<AppView, BorderPane> shellRoots = new EnumMap<>(AppView.class);
     /** Window geometry captured as an aux stage hides; re-applied before show. */
     private final Map<AppView, double[]> hiddenGeometry = new HashMap<>();
     private final ArrayDeque<AppView> backStack = new ArrayDeque<>();
@@ -58,11 +59,13 @@ final class MultiWindowShell extends AppShell {
      */
     private long passiveRevealSeq;
     private final boolean undecorated;
+    private final StageStyle stageStyle;
 
     MultiWindowShell(Stage primaryStage, AppSettings settings) {
         super(settings);
         this.settings = settings;
-        this.undecorated = settings.undecoratedWindows();
+        this.stageStyle = WindowChrome.stageStyle(settings.windowDecorations());
+        this.undecorated = stageStyle == StageStyle.UNDECORATED;
         stages.put(AppView.BROWSER, primaryStage);
         stages.put(AppView.MOSAIC, new Stage());
         stages.put(AppView.VIEWER, new Stage());
@@ -82,15 +85,18 @@ final class MultiWindowShell extends AppShell {
     private void initStage(AppView v, int width, int height, String title) {
         Stage stage = stages.get(v);
         installApplicationIcon(stage);
-        var scene = new Scene(new StackPane(), width, height);
-        // Paint the first frame black (the scene's default fill is white), so
-        // there is no white flash before the view's content renders.
+        stage.initStyle(stageStyle);
+        stage.setTitle(title);
+        BorderPane shellRoot = WindowChrome.createShellRoot(stage, stageStyle);
+        shellRoots.put(v, shellRoot);
+        var scene = new Scene(shellRoot, width, height);
+        // ThemeManager replaces this initial black with the active theme's
+        // fill. EXTENDED caption buttons also use that fill's brightness.
         scene.setFill(Color.BLACK);
         ThemeManager.get().register(scene);
+        WindowChrome.installStylesheet(scene);
         stage.setScene(scene);
-        stage.setTitle(title);
         if (undecorated) {
-            stage.initStyle(StageStyle.UNDECORATED);
             WindowChrome.installShellChrome(stage, settings.undecoratedResizable());
         }
     }
@@ -99,7 +105,7 @@ final class MultiWindowShell extends AppShell {
     public void register(AppView v, ShellView view) {
         views.put(v, view);
         Stage stage = stages.get(v);
-        stage.getScene().setRoot(view.root());
+        WindowChrome.setContent(shellRoots.get(v), view.root());
         stage.titleProperty().bind(view.titleProperty());
         // The view's lifecycle rides the window's: activate on show (any
         // source — showView, revealPassive, the OS restoring it), deactivate

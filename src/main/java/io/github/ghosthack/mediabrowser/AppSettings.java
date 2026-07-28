@@ -12,14 +12,14 @@ import java.util.Properties;
  * Persisted application settings, stored as a properties file at
  * {@code ~/.media-browser/app.properties}. Loaded once at startup;
  * {@link #save} writes the current values back. Settings that affect window
- * construction (such as {@link #undecoratedWindows()}) take effect on the
+ * construction (such as {@link #windowDecorations()}) take effect on the
  * next start.
  */
 public final class AppSettings {
 
     private static final Path FILE = Path.of(System.getProperty("user.home"),
             ".media-browser", "app.properties");
-    private static final String UNDECORATED_KEY = "window.undecorated";
+    private static final String WINDOW_DECORATIONS_KEY = "window.decorations";
     private static final String UNDECORATED_RESIZABLE_KEY = "window.undecorated.resizable";
     private static final String MAXIMIZE_OVERSCAN_KEY = "window.maximize.overscan";
     private static final String VIEWER_DRAG_VIEWPORT_KEY = "viewer.dragViewport";
@@ -169,7 +169,7 @@ public final class AppSettings {
     private static final int MIN_ADJUSTMENTS_VOLATILE_MAX_DIRS = 0;
     private static final int MAX_ADJUSTMENTS_VOLATILE_MAX_DIRS = 100;
 
-    private boolean undecoratedWindows;
+    private WindowDecorations windowDecorations;
     private boolean undecoratedResizable;
     private boolean maximizeOverscan;
     private boolean viewerDragViewport;
@@ -259,8 +259,8 @@ public final class AppSettings {
             }
         }
         var settings = new AppSettings();
-        settings.undecoratedWindows =
-                Boolean.parseBoolean(props.getProperty(UNDECORATED_KEY, "false"));
+        settings.windowDecorations = WindowDecorations.fromSettings(
+                props.getProperty(WINDOW_DECORATIONS_KEY), WindowDecorations.DEFAULT);
         settings.undecoratedResizable =
                 Boolean.parseBoolean(props.getProperty(UNDECORATED_RESIZABLE_KEY, "true"));
         settings.maximizeOverscan =
@@ -481,7 +481,7 @@ public final class AppSettings {
     /** Writes the current values to {@code file}, creating parent dirs. */
     void save(Path file) throws IOException {
         var props = new Properties();
-        props.setProperty(UNDECORATED_KEY, Boolean.toString(undecoratedWindows));
+        props.setProperty(WINDOW_DECORATIONS_KEY, windowDecorations.name());
         props.setProperty(UNDECORATED_RESIZABLE_KEY,
                 Boolean.toString(undecoratedResizable));
         props.setProperty(MAXIMIZE_OVERSCAN_KEY, Boolean.toString(maximizeOverscan));
@@ -554,13 +554,14 @@ public final class AppSettings {
         }
     }
 
-    /** Render windows without OS chrome (title bar, borders). */
-    public boolean undecoratedWindows() {
-        return undecoratedWindows;
+    /** Decoration policy applied when application stages are constructed. */
+    public WindowDecorations windowDecorations() {
+        return windowDecorations;
     }
 
-    public void setUndecoratedWindows(boolean undecorated) {
-        this.undecoratedWindows = undecorated;
+    public void setWindowDecorations(WindowDecorations decorations) {
+        this.windowDecorations =
+                decorations == null ? WindowDecorations.DEFAULT : decorations;
     }
 
     /** Allow edge-drag resizing of chromeless windows; no effect when decorated. */

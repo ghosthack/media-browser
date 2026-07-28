@@ -5,6 +5,7 @@ import io.github.ghosthack.mediabrowser.Theme;
 import javafx.collections.ObservableList;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
+import javafx.scene.paint.Color;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -52,7 +53,7 @@ public final class ThemeManager {
     /** Switches the theme and re-applies it live to every registered target. */
     public void setCurrent(Theme theme) {
         current = theme == null ? Theme.DEFAULT : theme;
-        for (Scene s : scenes) applyTo(s.getStylesheets());
+        for (Scene s : scenes) applyTo(s);
         for (Parent p : parents) applyTo(p.getStylesheets());
     }
 
@@ -60,7 +61,7 @@ public final class ThemeManager {
     public void register(Scene scene) {
         if (scene == null) return;
         scenes.add(scene);
-        applyTo(scene.getStylesheets());
+        applyTo(scene);
     }
 
     /**
@@ -78,5 +79,21 @@ public final class ThemeManager {
         sheets.removeAll(allThemeUrls);
         String url = current.stylesheetUrl();
         if (url != null) sheets.add(0, url);
+    }
+
+    /**
+     * Applies both CSS and the otherwise-hidden scene fill. EXTENDED stages use
+     * the fill's brightness to choose legible platform caption-button glyphs,
+     * so it must follow live light/dark theme changes.
+     */
+    private void applyTo(Scene scene) {
+        applyTo(scene.getStylesheets());
+        scene.setFill(switch (current) {
+            case DEFAULT -> Color.WHITE;
+            case PLAIN_DARK -> Color.BLACK;
+            case PLAIN_DARK_GRAY -> Color.web("#333333");
+            case CUPERTINO_LIGHT -> Color.web("#e5e5ea");
+            case CUPERTINO_DARK -> Color.web("#2c2c2e");
+        });
     }
 }

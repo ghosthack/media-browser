@@ -7,6 +7,7 @@ import io.github.ghosthack.mediabrowser.MosaicSelectionAnimation;
 import io.github.ghosthack.mediabrowser.album.AlbumStore;
 import io.github.ghosthack.mediabrowser.StartupLayout;
 import io.github.ghosthack.mediabrowser.Theme;
+import io.github.ghosthack.mediabrowser.WindowDecorations;
 import io.github.ghosthack.mediabrowser.WindowMode;
 import io.github.ghosthack.mediabrowser.media.AaeStore;
 import io.github.ghosthack.mediabrowser.media.DetectionMode;
@@ -2046,14 +2047,26 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var themeRow = new HBox(8, new Label("Theme:"), themeCombo);
         themeRow.setAlignment(Pos.CENTER_LEFT);
 
-        var chromeBox = new CheckBox("Remove OS window chrome (title bar, borders)");
-        chromeBox.setSelected(settings.undecoratedWindows());
+        var decorationsCombo = new ComboBox<WindowDecorations>();
+        decorationsCombo.getItems().setAll(WindowDecorations.values());
+        decorationsCombo.setValue(settings.windowDecorations());
+        var decorationsRow = new HBox(8,
+                new Label("Windows decorations:"), decorationsCombo);
+        decorationsRow.setAlignment(Pos.CENTER_LEFT);
+        var decorationsHint = new Label(
+                "Automatic uses JavaFX themed chrome when supported; Themed requests it; "
+                + "Native keeps the Windows title bar. Undecorated keeps the manual "
+                + "cross-platform chrome.");
+        decorationsHint.setStyle("-fx-text-fill: gray;");
+        decorationsHint.setWrapText(true);
         var resizeBox = new CheckBox("Resizable chromeless windows (drag the edges)");
         resizeBox.setSelected(settings.undecoratedResizable());
-        resizeBox.disableProperty().bind(chromeBox.selectedProperty().not());
+        resizeBox.disableProperty().bind(decorationsCombo.valueProperty()
+                .isNotEqualTo(WindowDecorations.UNDECORATED));
         var overscanBox = new CheckBox("Overscan maximize (hide window edges on F)");
         overscanBox.setSelected(settings.maximizeOverscan());
-        overscanBox.disableProperty().bind(chromeBox.selectedProperty().not());
+        overscanBox.disableProperty().bind(decorationsCombo.valueProperty()
+                .isNotEqualTo(WindowDecorations.UNDECORATED));
         var inWindowMenuBox = new CheckBox("In-window menu bar (instead of the macOS menu bar)");
         inWindowMenuBox.setSelected(settings.inWindowMenu());
         var actionLogBox = new CheckBox(
@@ -2117,7 +2130,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 actionLogBox, actionLogFileBox, extensionFixBox,
                 new Separator(), loadingIndicatorRow, loadingDelayRow,
                 new Separator(),
-                chromeBox, resizeBox, overscanBox, inWindowMenuBox, windowModeRow,
+                decorationsRow, decorationsHint, resizeBox, overscanBox,
+                inWindowMenuBox, windowModeRow,
                 startupLayoutRow, hint);
         generalContent.setPadding(new Insets(12));
 
@@ -2318,7 +2332,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         String decodeDevice = decodeCombo.getValue().name().toLowerCase(java.util.Locale.ROOT);
         settings.setDecodeDevice(decodeDevice);
         HwDecode.configure(decodeDevice);
-        settings.setUndecoratedWindows(chromeBox.isSelected());
+        settings.setWindowDecorations(decorationsCombo.getValue());
         settings.setUndecoratedResizable(resizeBox.isSelected());
         settings.setMaximizeOverscan(overscanBox.isSelected());
         settings.setInWindowMenu(inWindowMenuBox.isSelected());

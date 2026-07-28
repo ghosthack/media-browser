@@ -9,7 +9,7 @@ import javafx.beans.property.ReadOnlyBooleanProperty;
 import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.scene.Scene;
 import javafx.scene.input.KeyCombination;
-import javafx.scene.layout.StackPane;
+import javafx.scene.layout.BorderPane;
 import javafx.scene.paint.Color;
 import javafx.stage.Stage;
 import javafx.stage.StageStyle;
@@ -40,6 +40,7 @@ final class SingleWindowShell extends AppShell {
 
     private final Stage stage;
     private final Scene scene;
+    private final BorderPane shellRoot;
     private final boolean undecorated;
     private final ArrayDeque<AppView> backStack = new ArrayDeque<>();
     private final ReadOnlyObjectWrapper<AppView> activeView =
@@ -50,21 +51,24 @@ final class SingleWindowShell extends AppShell {
     SingleWindowShell(Stage stage, AppSettings settings) {
         super(settings);
         this.stage = stage;
-        this.undecorated = settings.undecoratedWindows();
         installApplicationIcon(stage);
-        // Black fill so a root swap never flashes white while the incoming
-        // view runs its first CSS/layout pass.
-        this.scene = new Scene(new StackPane(), 1200, 760);
+        StageStyle style = WindowChrome.stageStyle(settings.windowDecorations());
+        this.undecorated = style == StageStyle.UNDECORATED;
+        stage.initStyle(style);
+        stage.setTitle("Media Browser");
+        this.shellRoot = WindowChrome.createShellRoot(stage, style);
+        // ThemeManager replaces this initial black with the active theme's
+        // fill. EXTENDED caption buttons also use that fill's brightness.
+        this.scene = new Scene(shellRoot, 1200, 760);
         scene.setFill(Color.BLACK);
         ThemeManager.get().register(scene);
+        WindowChrome.installStylesheet(scene);
         stage.setScene(scene);
-        stage.setTitle("Media Browser");
         // Escape is handled by the viewer's own key filter, where it can mean
         // "leave full screen" or "back to the previous view".
         stage.setFullScreenExitKeyCombination(KeyCombination.NO_MATCH);
         stage.setFullScreenExitHint("");
         if (undecorated) {
-            stage.initStyle(StageStyle.UNDECORATED);
             WindowChrome.installShellChrome(stage, settings.undecoratedResizable());
         }
         // The views deactivate as they are swapped out, so on stage close only
@@ -157,7 +161,7 @@ final class SingleWindowShell extends AppShell {
             }
         }
         activeView.set(v);
-        scene.setRoot(next.root());
+        WindowChrome.setContent(shellRoot, next.root());
         stage.titleProperty().bind(next.titleProperty());
         next.activate();
     }

@@ -1,6 +1,9 @@
 package io.github.ghosthack.mediabrowser.ui;
 
+import io.github.ghosthack.mediabrowser.WindowDecorations;
+
 import javafx.animation.AnimationTimer;
+import javafx.application.ConditionalFeature;
 import javafx.application.Platform;
 import javafx.beans.Observable;
 import javafx.beans.binding.Bindings;
@@ -9,21 +12,28 @@ import javafx.beans.property.SimpleBooleanProperty;
 import javafx.beans.value.ObservableValue;
 import javafx.scene.Cursor;
 import javafx.scene.Node;
+import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Control;
+import javafx.scene.control.Label;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
 import javafx.scene.control.ToolBar;
 import javafx.scene.control.Tooltip;
+import javafx.scene.image.ImageView;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseEvent;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HeaderBar;
+import javafx.scene.layout.HeaderDragType;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.stage.Stage;
+import javafx.stage.StageStyle;
 
 import java.util.function.BooleanSupplier;
 
@@ -31,13 +41,18 @@ import java.util.function.BooleanSupplier;
  * Substitute window controls for undecorated stages: drag-to-move on the
  * toolbar's empty space, edge/corner resizing at the scene borders, and a
  * ✕ button appended to the toolbar. Installed only when the app runs
- * without OS window chrome (see {@code AppSettings.undecoratedWindows}).
+ * without OS window chrome (see {@code AppSettings.windowDecorations}).
  */
 final class WindowChrome {
+
+    private static final String CHROME_STYLESHEET =
+            "/io/github/ghosthack/mediabrowser/ui/window-chrome.css";
 
     /** macOS hosts the menu bar as a single, global, top-of-screen system bar. */
     private static final boolean IS_MAC =
             System.getProperty("os.name", "").toLowerCase().contains("mac");
+    private static final boolean IS_WINDOWS =
+            System.getProperty("os.name", "").toLowerCase().startsWith("windows");
 
     /** Resize grip thickness, in pixels, inside each scene edge. */
     private static final double EDGE = 6;
@@ -45,6 +60,72 @@ final class WindowChrome {
     private static final double MIN_HEIGHT = 220;
 
     private WindowChrome() {}
+
+    /**
+     * Resolves the persisted decoration policy to a JavaFX stage style.
+     * Automatic checks the preview feature before requesting it; Themed
+     * deliberately requests EXTENDED and relies on JavaFX's specified
+     * DECORATED fallback when a platform does not support it.
+     */
+    @SuppressWarnings({"deprecation", "removal"})
+    static StageStyle stageStyle(WindowDecorations decorations) {
+        WindowDecorations selected = decorations == null
+                ? WindowDecorations.DEFAULT : decorations;
+        boolean extended = Platform.isSupported(ConditionalFeature.EXTENDED_WINDOW);
+        return switch (selected.requestedStyle(IS_WINDOWS, extended)) {
+            case EXTENDED -> StageStyle.EXTENDED;
+            case DECORATED -> StageStyle.DECORATED;
+            case UNDECORATED -> StageStyle.UNDECORATED;
+        };
+    }
+
+    /**
+     * Creates the stable scene root owned by a shell. Extended stages get a
+     * JavaFX HeaderBar above the swappable view content; all other modes use
+     * the same wrapper without a header.
+     */
+    @SuppressWarnings({"deprecation", "removal"})
+    static BorderPane createShellRoot(Stage stage, StageStyle style) {
+        var root = new BorderPane();
+        root.getStyleClass().add("app-shell-root");
+        if (style == StageStyle.EXTENDED) {
+            var title = new Label();
+            title.textProperty().bind(stage.titleProperty());
+            title.getStyleClass().add("app-window-title");
+            // A label is passive: let pointer hits pass through to the
+            // HeaderBar's native move/double-click/maximize handling.
+            HeaderBar.setDragType(title, HeaderDragType.TRANSPARENT_SUBTREE);
+
+            Node icon = null;
+            if (!stage.getIcons().isEmpty()) {
+                var image = new ImageView(stage.getIcons().get(0));
+                image.setFitWidth(16);
+                image.setFitHeight(16);
+                image.setPreserveRatio(true);
+                image.getStyleClass().add("app-window-icon");
+                HeaderBar.setDragType(image, HeaderDragType.TRANSPARENT_SUBTREE);
+                icon = image;
+            }
+
+            var header = new HeaderBar(icon, title, null);
+            header.getStyleClass().add("app-header-bar");
+            root.setTop(header);
+        }
+        return root;
+    }
+
+    /** Swaps the view inside a shell without disturbing its extended header. */
+    static void setContent(BorderPane shellRoot, Parent content) {
+        shellRoot.setCenter(content);
+    }
+
+    /** Adds the stable chrome rules after the selected theme overlay. */
+    static void installStylesheet(Scene scene) {
+        var resource = WindowChrome.class.getResource(CHROME_STYLESHEET);
+        if (resource != null) {
+            scene.getStylesheets().add(resource.toExternalForm());
+        }
+    }
 
     /**
      * Gives a context menu the "dismiss readily" behaviour shared by the

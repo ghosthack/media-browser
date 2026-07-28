@@ -18,7 +18,7 @@
     <revision>1.0.0-SNAPSHOT</revision>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>26</maven.compiler.release>
-    <javafx.version>24.0.2</javafx.version>
+    <javafx.version>26</javafx.version>
     <lwjgl.version>3.4.1</lwjgl.version>
     <twelvemonkeys.version>3.13.1</twelvemonkeys.version>
     <!-- JavaCV (bundled FFmpeg), test scope only: mints video fixtures via
