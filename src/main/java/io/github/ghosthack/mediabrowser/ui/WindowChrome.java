@@ -96,18 +96,20 @@ final class WindowChrome {
             // HeaderBar's native move/double-click/maximize handling.
             HeaderBar.setDragType(title, HeaderDragType.TRANSPARENT_SUBTREE);
 
-            Node icon = null;
             if (!stage.getIcons().isEmpty()) {
                 var image = new ImageView(stage.getIcons().get(0));
                 image.setFitWidth(16);
                 image.setFitHeight(16);
                 image.setPreserveRatio(true);
                 image.getStyleClass().add("app-window-icon");
-                HeaderBar.setDragType(image, HeaderDragType.TRANSPARENT_SUBTREE);
-                icon = image;
+                title.setGraphic(image);
+                title.setGraphicTextGap(6);
             }
 
-            var header = new HeaderBar(icon, title, null);
+            // Keep the app icon with the title in the centered slot. Putting
+            // the icon in HeaderBar's left slot pins it to the window edge on
+            // Windows while the title remains centered.
+            var header = new HeaderBar(null, title, null);
             header.getStyleClass().add("app-header-bar");
             root.setTop(header);
         }
