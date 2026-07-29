@@ -85,6 +85,7 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.stage.DirectoryChooser;
@@ -136,6 +137,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final HBox addressBar;
     private final TreeView<Path> tree;
     private final ListView<DirEntry> listView = new ListView<>();
+    /** The browser's empty state — see {@link #updateEmptyState}. */
+    private final Label emptyStateLabel = new Label("Nothing to show in this folder");
     private final ObservableList<DirEntry> entries = FXCollections.observableArrayList();
     private final FilteredList<DirEntry> filteredEntries = new FilteredList<>(entries);
     /**
@@ -193,7 +196,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private boolean mirroringSelection;
 
     /** What the Sort menu orders entries by, within the folders-then-files grouping. */
-    private enum SortKey { NAME, EXTENSION, SIZE, DATE }
+    enum SortKey { NAME, EXTENSION, SIZE, DATE }
 
     // --- shared menu-bar state -------------------------------------------------
     // The application has one menu bar, built once for this window and once for
@@ -204,6 +207,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final BooleanProperty showNonViewableProp = new SimpleBooleanProperty(true);
     private final BooleanProperty showDirsProp = new SimpleBooleanProperty(true);
     private final ObjectProperty<DetectionMode> detectionProp = new SimpleObjectProperty<>();
+    // docs/empty-states.md listing filters. Shared by this window and the
+    // mosaic, since both draw from the same MediaService listing.
+    private final BooleanProperty ignoreJunkProp = new SimpleBooleanProperty(true);
+    private final BooleanProperty hideEmptyFilesProp = new SimpleBooleanProperty();
+    private final BooleanProperty hideEmptyFoldersProp = new SimpleBooleanProperty();
+    private final BooleanProperty collapseChainsProp = new SimpleBooleanProperty(true);
     private final ObjectProperty<SortKey> sortKeyProp = new SimpleObjectProperty<>(SortKey.NAME);
     private final BooleanProperty sortDescendingProp = new SimpleBooleanProperty(false);
     private final BooleanProperty toolbarVisibleProp = new SimpleBooleanProperty(false);
@@ -241,7 +250,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         this.aaeStore = aaeStore;
         this.keys = KeyScheme.fromSettings(settings);
         this.diagnosticsPanel = new DiagnosticsPanel(service::thumbnailStats);
-        this.mosaic = new MosaicWindow(shell, service, viewer, settings, rotationStore, aaeStore);
+        this.mosaic = new MosaicWindow(shell, service, viewer, settings, rotationStore, aaeStore,
+                sortKeyProp, sortDescendingProp);
         // Navigating a folder / .. tile in the mosaic drives the shared location
         // here; the new listing then flows back into the mosaic's grid.
         mosaic.setNavigator(this::navigateAndSync);
@@ -302,7 +312,15 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // Multi-select so Move (and future bulk ops) can act on several entries;
         // Shift-click / Shift-arrow / Cmd-click come from the ListView for free.
         listView.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
-        listView.setPlaceholder(new Label("Nothing to show in this folder"));
+        // A ListView placeholder cannot represent an empty folder here because
+        // the navigable ".." row keeps the list non-empty. Overlay the message
+        // instead, leaving that parent row usable underneath it.
+        listView.setPlaceholder(new Region());
+        emptyStateLabel.setMouseTransparent(true);
+        emptyStateLabel.setVisible(false);
+        emptyStateLabel.setStyle("-fx-text-fill: -fx-mid-text-color;");
+        var listPane = new StackPane(listView, emptyStateLabel);
+        StackPane.setAlignment(emptyStateLabel, Pos.CENTER);
         listView.setCellFactory(lv -> new ListCell<>() {
             private final Label icon = new Label();
             private final ContextMenu menu = new ContextMenu();
@@ -421,7 +439,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         HBox.setHgrow(addressField, Priority.ALWAYS);
         var goButton = new Button("Go");
         goButton.setOnAction(e -> navigateFromAddress());
-        addressBar = new HBox(6, new Label("Location:"), addressField, goButton);
+        var drivesButton = new DriveMenuButton(root -> {
+            navigateAndSync(root);
+            listView.requestFocus();
+        });
+        addressBar = new HBox(6, new Label("Location:"), drivesButton, addressField, goButton);
         addressBar.setPadding(new Insets(4, 8, 4, 8));
         addressBar.setStyle("-fx-alignment: center-left;");
 
@@ -490,6 +512,33 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         detectionProp.set(detection);
         detectionProp.addListener((o, a, v) -> { if (v != null) setDetectionMode(v); });
 
+        service.setListingIgnoreJunk(settings.listingIgnoreJunkFiles());
+        service.setListingHideEmptyFiles(settings.listingHideEmptyFiles());
+        service.setListingHideEmptyFolders(settings.listingHideEmptyFolders());
+        ignoreJunkProp.set(settings.listingIgnoreJunkFiles());
+        hideEmptyFilesProp.set(settings.listingHideEmptyFiles());
+        hideEmptyFoldersProp.set(settings.listingHideEmptyFolders());
+        collapseChainsProp.set(settings.listingCollapseFolderChains());
+        ignoreJunkProp.addListener((o, a, v) -> {
+            service.setListingIgnoreJunk(v);
+            settings.setListingIgnoreJunkFiles(v);
+            relist();
+        });
+        hideEmptyFilesProp.addListener((o, a, v) -> {
+            service.setListingHideEmptyFiles(v);
+            settings.setListingHideEmptyFiles(v);
+            relist();
+        });
+        hideEmptyFoldersProp.addListener((o, a, v) -> {
+            service.setListingHideEmptyFolders(v);
+            settings.setListingHideEmptyFolders(v);
+            relist();
+        });
+        collapseChainsProp.addListener((o, a, v) -> {
+            settings.setListingCollapseFolderChains(v);
+            saveSettingsQuietly();
+        });
+
         sortKeyProp.addListener((o, a, v) -> applySort());
         sortDescendingProp.addListener((o, a, v) -> applySort());
         applySort();
@@ -505,7 +554,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         viewer.installMenuBar(buildMenuBar(MenuOwner.VIEWER), keys);
 
         // --- layout ----------------------------------------------------------
-        splitPane.getItems().addAll(treePanel, listView);
+        splitPane.getItems().addAll(treePanel, listPane);
         // The panel stack's width is the shared, persisted one (the viewer and
         // mosaic keep it too), not a fraction of this window; applyDividers
         // hands it the last divider.
@@ -1041,8 +1090,67 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 case PARENT -> { }
             }
         }
-        countLabel.setText(dirs + " folders · " + (media + other) + " files · "
-                + media + " viewable");
+        String text = dirs + " folders · " + (media + other) + " files · "
+                + media + " viewable";
+        // Disclose what the opt-in filters removed — the user turned them on,
+        // so the count is the receipt. Junk is not reported: a dropped
+        // .DS_Store changes nothing about the folder, and a suffix on every
+        // folder on the disk is noise rather than honesty.
+        var hidden = currentDir == null ? null : service.hiddenIn(currentDir);
+        if (hidden != null && hidden.anyOptIn()) {
+            var parts = new ArrayList<String>(2);
+            if (hidden.emptyFiles() > 0) parts.add(hidden.emptyFiles() + " empty");
+            if (hidden.emptyFolders() > 0) {
+                parts.add(hidden.emptyFolders()
+                        + (hidden.emptyFolders() == 1 ? " empty folder" : " empty folders"));
+            }
+            text += " · " + String.join(", ", parts) + " hidden";
+        }
+        countLabel.setText(text);
+        updateEmptyState();
+    }
+
+    /**
+     * Says which nothing an empty listing is, rather than leaving a bare
+     * "nothing to show". When a filter caused it the filter is named, since
+     * that turns a dead end into a one-key fix — the folder is genuinely full.
+     */
+    private void updateEmptyState() {
+        if (hasNonParentEntry(visibleEntries)) {
+            emptyStateLabel.setVisible(false);
+            return;
+        }
+        var offFilters = new ArrayList<String>(3);
+        if (!showViewableProp.get()) offFilters.add("Viewable Media");
+        if (!showNonViewableProp.get()) offFilters.add("Non-viewable Files");
+        if (!showDirsProp.get()) offFilters.add("Folders");
+        long listed = entries.stream().filter(e -> e.type() != DirEntry.Type.PARENT).count();
+        if (listed > 0 && !offFilters.isEmpty()) {
+            emptyStateLabel.setText(listed + (listed == 1 ? " item" : " items")
+                    + " hidden by " + String.join(", ", offFilters));
+            return;
+        }
+        var hidden = currentDir == null ? null : service.hiddenIn(currentDir);
+        if (hidden != null && hidden.junkFiles() > 0) {
+            // Never a bare "Empty" that a Finder window would contradict.
+            emptyStateLabel.setText("Empty folder (" + hidden.junkFiles()
+                    + (hidden.junkFiles() == 1 ? " system file)" : " system files)"));
+        } else {
+            emptyStateLabel.setText("Empty folder");
+        }
+        emptyStateLabel.setVisible(true);
+    }
+
+    /**
+     * Whether a rendered listing contains anything besides the navigational
+     * {@code ..} row. Shared with the mosaic so both views agree about when an
+     * empty-state message is warranted.
+     */
+    static boolean hasNonParentEntry(Iterable<DirEntry> listing) {
+        for (DirEntry entry : listing) {
+            if (entry.type() != DirEntry.Type.PARENT) return true;
+        }
+        return false;
     }
 
     // --- sorting -------------------------------------------------------------
@@ -1175,6 +1283,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 boundCheck("_Viewable Media", showViewableProp),
                 boundCheck("Non-viewable _Files", showNonViewableProp),
                 boundCheck("Fol_ders", showDirsProp),
+                // docs/empty-states.md. "System files" on screen, "junk" in the
+                // code: a menu item should not call a user's disk junk.
+                boundCheck("Hide S_ystem Files", ignoreJunkProp),
+                boundCheck("Hide _Empty Files", hideEmptyFilesProp),
+                boundCheck("Hide Empty F_olders", hideEmptyFoldersProp),
+                boundCheck("_Collapse Folder Chains", collapseChainsProp),
                 new SeparatorMenuItem(),
                 header("Detection"),
                 objRadio("Detect by _Content", DetectionMode.CONTENT_SNIFF,
@@ -1352,6 +1466,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                         () -> mosaic.nudgeTileSize(-32)),
                 folderPreviews,
                 folderGlyph,
+                boundCheck("Mark _Dead Ends", mosaic.emptyReticuleProperty()),
+                boundCheck("Check Whole Su_btree", mosaic.barrenCheckProperty()),
                 showThumbnails,
                 fillTiles,
                 tileLabels,
@@ -1384,15 +1500,15 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         playPause.disableProperty().bind(viewer.playDisabledProperty());
         var scaleGroup = new ToggleGroup();
         var scaleProp = viewer.scaleModeProperty();
-        // The loading indicator is a three-way choice (None / Default / Game
-        // Console); the historical single checkbox becomes a radio submenu bound
-        // to the viewer's ObjectProperty, mirrored by the toolbar's picker.
+        // The loading-indicator radios bind to the viewer's ObjectProperty and
+        // mirror the toolbar picker.
         var loadingGroup = new ToggleGroup();
         var loadingProp = viewer.loadingIndicatorProperty();
         var loadingMenu = new Menu("_Loading Indicator", null,
                 objRadio("_None", LoadingIndicator.NONE, loadingProp, loadingGroup),
                 objRadio("_Default", LoadingIndicator.DEFAULT, loadingProp, loadingGroup),
-                objRadio("_Game Console", LoadingIndicator.GAME_CONSOLE, loadingProp, loadingGroup));
+                objRadio("_Game Console", LoadingIndicator.GAME_CONSOLE, loadingProp, loadingGroup),
+                objRadio("_ASCII Matrix", LoadingIndicator.ASCII_MATRIX, loadingProp, loadingGroup));
         var panelsMenu = new Menu("_Panels", null,
                 boundCheck("_Info Panel", viewer.infoPanelVisibleProperty()),
                 boundCheck("_Metadata", viewer.metadataPanelVisibleProperty()),
@@ -1578,12 +1694,22 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private void setDetectionMode(DetectionMode mode) {
         service.setDetectionMode(mode);
         settings.setDetectionMode(mode.settingsValue());
+        saveSettingsQuietly();
+        if (currentDir != null) navigate(currentDir);
+    }
+
+    /** Persists and re-lists after a listing filter changed what the scan keeps. */
+    private void relist() {
+        saveSettingsQuietly();
+        if (currentDir != null) navigate(currentDir);
+    }
+
+    private void saveSettingsQuietly() {
         try {
             settings.save();
         } catch (java.io.IOException e) {
             statusLabel.setText("Cannot save settings: " + e.getMessage());
         }
-        if (currentDir != null) navigate(currentDir);
     }
 
     /**
@@ -1644,7 +1770,14 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private void expandAndSelect(Path target) {
         TreeItem<Path> node = tree.getRoot();
         Path root = node.getValue();
-        if (!target.startsWith(root)) return;
+        if (!target.startsWith(root)) {
+            Path targetRoot = target.getRoot();
+            if (targetRoot == null) return;
+            node = new DirTreeItem(targetRoot);
+            node.setExpanded(true);
+            tree.setRoot(node);
+            root = targetRoot;
+        }
         outer:
         for (Path name : root.relativize(target)) {
             for (TreeItem<Path> child : node.getChildren()) {
@@ -1875,7 +2008,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         if (entry == null) return;
         switch (entry.type()) {
             case PARENT -> navigateToParent();
-            case DIRECTORY -> navigateAndSync(entry.path());
+            case DIRECTORY -> enterFolder(entry.path());
             case ARCHIVE -> openArchive(entry.path());
             // Keep Focus only means something across separate windows (the
             // viewer opens without stealing focus); the single window always
@@ -1884,6 +2017,38 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     shell.singleWindow() || !keepFocusProp.get(), this);
             case OTHER -> statusLabel.setText("Not viewable: " + entry.displayName());
         }
+    }
+
+
+    /**
+     * Descent cap for {@link MediaService#collapseChain}, the same bound
+     * {@code ArchivePaths.MAX_DESCENT} uses for the identical shape inside an
+     * archive. Nothing sane nests this deep with one child per level, and the
+     * cap means a pathological tree costs eight listings, not a walk.
+     */
+    private static final int MAX_CHAIN_DESCENT = 8;
+
+    /**
+     * Enters a folder, landing past any run of levels that hold exactly one
+     * subfolder and nothing else — the click-click-click descent.
+     *
+     * <p>Only ever on the way <em>in</em>. Going up must not collapse, or
+     * {@code ..} out of a chain would fall straight back down it and the user
+     * could never leave. The descent runs off the FX thread (it is up to
+     * {@code MAX_CHAIN_DESCENT} listings) and falls back to the folder itself
+     * if anything goes wrong, so a slow or unreadable tree still navigates.</p>
+     *
+     * <p>Nothing is hidden: the location bar shows where you landed, and
+     * {@code ..} walks back up through every level that was skipped.</p>
+     */
+    private void enterFolder(Path dir) {
+        if (!collapseChainsProp.get()) {
+            navigateAndSync(dir);
+            return;
+        }
+        service.fileOp(() -> MediaService.collapseChain(dir, MAX_CHAIN_DESCENT))
+                .whenComplete((target, error) -> Platform.runLater(() ->
+                        navigateAndSync(error != null || target == null ? dir : target)));
     }
 
     /**
@@ -2257,6 +2422,17 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var animationPeriodRow = new HBox(8, new Label("Animation cycle duration (ms, lower = faster):"),
                 animationPeriodSpinner);
         animationPeriodRow.setAlignment(Pos.CENTER_LEFT);
+        var screensaverBox = new CheckBox(
+                "Start the Matrix screensaver automatically while Mosaic is idle");
+        screensaverBox.setSelected(settings.mosaicScreensaverEnabled());
+        var screensaverDelaySpinner = new Spinner<Integer>(1, 120,
+                settings.mosaicScreensaverDelayMinutes(), 1);
+        screensaverDelaySpinner.setEditable(true);
+        screensaverDelaySpinner.setPrefWidth(100);
+        screensaverDelaySpinner.disableProperty().bind(screensaverBox.selectedProperty().not());
+        var screensaverDelayRow = new HBox(8,
+                new Label("Screensaver idle delay (minutes):"), screensaverDelaySpinner);
+        screensaverDelayRow.setAlignment(Pos.CENTER_LEFT);
         var mosaicHint = new Label("Layout, appearance, selection and behaviour apply "
                 + "immediately; the preview max edge applies to newly generated "
                 + "previews and the cache budget applies after restart.");
@@ -2271,7 +2447,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 seamlessBox,
                 new Separator(), renditionTitle, maxEdgeRow, budgetRow,
                 new Separator(), behaviourTitle, autoOpenBox, mosaicDragBox,
-                animationRow, animationPeriodRow, mosaicHint);
+                animationRow, animationPeriodRow, screensaverBox,
+                screensaverDelayRow, mosaicHint);
         mosaicContent.setPadding(new Insets(12));
         var mosaicScroll = new ScrollPane(mosaicContent);
         mosaicScroll.setFitToWidth(true);
@@ -2399,11 +2576,14 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setMosaicDragBackground(mosaicDragBox.isSelected());
         settings.setMosaicSelectionAnimation(animationCombo.getValue());
         settings.setMosaicPulsePeriodMs(animationPeriodSpinner.getValue());
+        settings.setMosaicScreensaverEnabled(screensaverBox.isSelected());
+        settings.setMosaicScreensaverDelayMinutes(screensaverDelaySpinner.getValue());
         // Push the layout / appearance / selection changes live into the open
         // mosaic, and sync the Mosaic menu's folder-preview radios to the value.
         // The folder glyph goes through the mosaic's property: its listener
         // persists the choice, and the menu radios are bound to the same property.
         mosaic.applyLayoutSettings();
+        mosaic.applyScreensaverSettings();
         folderPreviewGridProp.set(folderGridSpinner.getValue());
         mosaic.folderGlyphProperty().set(folderGlyphCombo.getValue());
 

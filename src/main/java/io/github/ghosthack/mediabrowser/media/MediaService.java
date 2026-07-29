@@ -52,7 +52,24 @@ public final class MediaService implements AutoCloseable {
      * case-insensitively.
      */
     private static final Set<String> JUNK_NAMES = Set.of(
-            ".ds_store", "thumbs.db", "desktop.ini");
+            ".ds_store", "thumbs.db", "desktop.ini",
+            // The rest of the usual per-directory cruft. These four already
+            // carry this meaning in ArchivePaths.IGNORED_WHEN_DESCENDING; the
+            // two after them matter on external volumes, which is where the
+            // droppings outnumber the media.
+            "__macosx", ".trashes", ".spotlight-v100", ".fseventsd",
+            ".localized", "system volume information");
+
+    /**
+     * Directory listings a single {@link #barren} check will make before it
+     * gives up and answers {@link Barren#UNKNOWN}. Four times the p99 subtree
+     * size measured by {@code scripts/empty-tree-survey.py} over 324,843
+     * folders (p50 1, p90 4, p99 50), so better than 99% of folders get an
+     * exact answer, while the tail — one folder whose subtree was the entire
+     * 324,843-folder disk — costs a fifth of a second instead of eight
+     * minutes.
+     */
+    public static final int DEFAULT_BARREN_BUDGET = 200;
 
     /** Default in-memory rendition budget when none is supplied (256 MiB). */
     public static final long DEFAULT_THUMBNAIL_BUDGET_BYTES = 256L * 1024 * 1024;
@@ -60,6 +77,18 @@ public final class MediaService implements AutoCloseable {
     private final MediaFacade facade;
     private volatile DetectionMode detectionMode = DetectionMode.FILE_EXTENSION;
     private volatile boolean folderPreviewSniff;
+    /** Listing filters; see the setters for why the first defaults on. */
+    private volatile boolean listingIgnoreJunk = true;
+    /**
+     * What the most recent {@link #scan} dropped, so a view can put a count on
+     * screen rather than omitting silently. Scans are serialized on one
+     * executor and a view reads this immediately after its own listing lands,
+     * matching on {@link ListingHidden#dir()}; a mismatch simply means no
+     * suffix, never a wrong one.
+     */
+    private volatile ListingHidden lastHidden = ListingHidden.NONE;
+    private volatile boolean listingHideEmptyFiles;
+    private volatile boolean listingHideEmptyFolders;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "media-facade");
         t.setDaemon(true);
@@ -411,20 +440,100 @@ public final class MediaService implements AutoCloseable {
 
     /**
      * The first {@code limit} visual media files (by name) directly inside
-     * {@code dir} — still images and videos, both of which yield a frame for a
-     * mosaic folder tile's preview collage. Classified by filename extension
-     * (no native probe, no recursion) so scanning many folders stays cheap;
-     * with {@link #setFolderPreviewSniff the sniff toggle} on, files the name
+     * {@code dir}: still images, videos, and audio whose leading ID3v2 tag
+     * contains embedded {@code APIC}/{@code PIC} cover art. All three yield a
+     * frame for a mosaic folder tile's preview collage.
+     *
+     * <p>Classification stays cheap: filename extension, no native probe and
+     * no recursion, plus a header/frame-header-only ID3 walk for named audio.
+     * With {@link #setFolderPreviewSniff the sniff toggle} on, files the name
      * can't classify additionally get the curated {@link ContentSniffer}
-     * header check (one small read each), so unnamed media shows in collages
-     * too. Runs on the dedicated thumbnail pool. Audio is excluded (no
-     * reliable visual). Returns an empty list for {@code limit <= 0}, an
-     * unreadable directory, or one with no visual media.
+     * header check, and covered unnamed ID3 audio qualifies too. Children are
+     * checked in name order and the scan stops as soon as the collage is full,
+     * so later audio tags are never touched unnecessarily. Runs on the
+     * dedicated thumbnail pool. Audio without embedded artwork is excluded.
+     * Returns an empty list for {@code limit <= 0}, an unreadable directory,
+     * or one with no visual media.</p>
      */
-    public CompletableFuture<List<Path>> folderPreview(Path dir, int limit) {
+    public CompletableFuture<FolderPreview> folderPreview(Path dir, int limit) {
         boolean sniff = folderPreviewSniff;
         return CompletableFuture.supplyAsync(() -> scanFolderPreview(dir, limit, sniff),
                 thumbnailExecutor);
+    }
+
+    /**
+     * Whether nothing anywhere under {@code dir} is media — the recursive half
+     * of {@code docs/empty-states.md}, and the expensive one.
+     *
+     * <p>Costs what the subtree costs, so it is bounded: the walk stops after
+     * {@code budget} directory listings and answers {@link Barren#UNKNOWN}
+     * rather than guessing. The early exit is asymmetric on purpose — one
+     * media file proves {@link Barren#NO} immediately, while proving
+     * {@link Barren#YES} means exhausting the subtree, which is exactly the
+     * case with no shortcut. An unreadable directory anywhere below also
+     * yields {@code UNKNOWN}: we cannot see in there, so we cannot claim the
+     * subtree is empty, the same rule {@link FolderVerdict#UNREADABLE} follows.
+     *
+     * <p>Runs on the thumbnail pool, beside the folder previews, so it can
+     * never stall navigation.</p>
+     */
+    public CompletableFuture<Barren> barren(Path dir, int budget) {
+        return CompletableFuture.supplyAsync(() -> scanBarren(dir, budget), thumbnailExecutor);
+    }
+
+    /** Whether a subtree holds any media, when the answer is affordable. */
+    public enum Barren {
+        /** Proven: nothing below is media. */
+        YES,
+        /** Disproven: media found below. */
+        NO,
+        /** Budget spent, or something below could not be read. Draw nothing. */
+        UNKNOWN
+    }
+
+    /**
+     * Breadth-first so the cheap answer arrives first: media sitting directly
+     * in {@code dir} disproves barrenness on listing one, without descending
+     * into a deep subtree that happens to sort first.
+     */
+    private static Barren scanBarren(Path dir, int budget) {
+        var queue = new java.util.ArrayDeque<Path>();
+        queue.add(dir);
+        int listings = 0;
+        while (!queue.isEmpty()) {
+            if (listings >= budget) return Barren.UNKNOWN;
+            Path at = queue.poll();
+            listings++;
+            try (Stream<Path> children = Files.list(at)) {
+                for (Path child : children.toList()) {
+                    // Junk is an entry-name rule, not a regular-file rule.
+                    // Several members of JUNK_NAMES are normally directories
+                    // (.Spotlight-V100, __MACOSX, System Volume Information);
+                    // do not walk those trees or let them make a barren folder
+                    // look populated.
+                    if (isJunk(child)) {
+                        continue;
+                    } else if (Files.isDirectory(child)) {
+                        queue.add(child);
+                    } else if (isContent(child)) {
+                        return Barren.NO;
+                    }
+                }
+            } catch (IOException | RuntimeException e) {
+                return Barren.UNKNOWN;      // cannot see in there; do not guess
+            }
+        }
+        return Barren.YES;
+    }
+
+    /**
+     * Whether a file is something the browser would navigate to see: media by
+     * extension, or an archive, which is browsed as a folder and so keeps its
+     * holder off the dead-end list.
+     */
+    private static boolean isContent(Path file) {
+        return ExtensionClassifier.classify(file).isPresent()
+                || ArchiveFormat.looksLikeArchive(file);
     }
 
     /**
@@ -438,34 +547,218 @@ public final class MediaService implements AutoCloseable {
         this.folderPreviewSniff = sniff;
     }
 
-    private static List<Path> scanFolderPreview(Path dir, int limit, boolean sniff) {
-        if (limit <= 0) return List.of();
-        var previews = new ArrayList<Path>(limit);
-        try (Stream<Path> children = Files.list(dir)) {
-            children.filter(p -> !Files.isDirectory(p))
-                    .filter(p -> isVisualPreview(p, sniff))
-                    .sorted(Comparator.comparing(p -> p.getFileName().toString(),
-                            String.CASE_INSENSITIVE_ORDER))
-                    .limit(limit)
-                    .forEach(previews::add);
-        } catch (IOException | RuntimeException e) {
-            return List.of();
+    /**
+     * Whether junk files ({@link #JUNK_NAMES}) are dropped from listings
+     * instead of shown as OTHER rows. On by default: {@link #scan} already
+     * drops rotation and matched {@code .AAE} sidecars unconditionally as
+     * "internal bookkeeping, not browsable rows", and a {@code .DS_Store} is
+     * the same thing wearing another program's name.
+     *
+     * <p>Independent of hidden-file handling, which is a different axis:
+     * {@code Thumbs.db} is not dot-prefixed, and someone who deliberately
+     * shows hidden files still does not want {@code .DS_Store} back.</p>
+     */
+    public void setListingIgnoreJunk(boolean ignore) {
+        this.listingIgnoreJunk = ignore;
+    }
+
+    /**
+     * What the last listing scan filtered out, for the status-bar disclosure.
+     * Only the opt-in filters are worth reporting everywhere; a dropped
+     * {@code .DS_Store} changes nothing about a folder and is disclosed only
+     * where it does — on a junk-only folder's empty state.
+     *
+     * @param dir the directory this tally belongs to
+     */
+    public record ListingHidden(Path dir, int junkFiles, int emptyFiles, int emptyFolders) {
+        static final ListingHidden NONE = new ListingHidden(null, 0, 0, 0);
+
+        /** Whether anything the user opted to hide was hidden. */
+        public boolean anyOptIn() {
+            return emptyFiles > 0 || emptyFolders > 0;
         }
-        return List.copyOf(previews);
+    }
+
+    /** The tally for {@code dir}, or an all-zero tally when the last scan was elsewhere. */
+    public ListingHidden hiddenIn(Path dir) {
+        ListingHidden last = lastHidden;
+        return last.dir() != null && last.dir().equals(dir) ? last : ListingHidden.NONE;
+    }
+
+    /** Whether zero-byte files are dropped from listings. Off by default. */
+    public void setListingHideEmptyFiles(boolean hide) {
+        this.listingHideEmptyFiles = hide;
+    }
+
+    /**
+     * Whether {@link FolderVerdict#EMPTY} and {@link FolderVerdict#JUNK_ONLY}
+     * subfolders are dropped from listings. Off by default, and deliberately
+     * so: this is the one listing filter that costs I/O, one extra directory
+     * listing per subfolder, paid eagerly for the whole directory rather than
+     * lazily per visible tile. Bounded (never recursive), and only paid by a
+     * user who asked for it.
+     *
+     * <p>{@link FolderVerdict#UNREADABLE} is never hidden — losing a folder
+     * you own behind a permission error is not a tidier listing.</p>
+     */
+    public void setListingHideEmptyFolders(boolean hide) {
+        this.listingHideEmptyFolders = hide;
+    }
+
+    /**
+     * Where a browse into {@code dir} should land: past any run of folders that
+     * hold exactly one subfolder and nothing but junk beside it.
+     *
+     * <p>The filesystem twin of {@link ArchivePaths#browseRoot}, which has
+     * collapsed this same shape inside archives since archives shipped. Costs
+     * one listing per level and is capped at {@code maxDescent}, so it is
+     * bounded no matter how pathological the tree — and the levels it skips are
+     * ones the user was about to click through by hand, which now never render
+     * a tile or decode a thumbnail.</p>
+     *
+     * <p>Nothing is hidden: the location bar shows where you landed and
+     * {@code ..} still walks back up through every level that was skipped.</p>
+     */
+    public static Path collapseChain(Path dir, int maxDescent) {
+        Path at = dir;
+        for (int step = 0; step < maxDescent; step++) {
+            Path only = soleSubdirectory(at);
+            if (only == null) return at;
+            at = only;
+        }
+        return at;
+    }
+
+    /**
+     * The one subdirectory of {@code dir} when that is all it holds (junk and
+     * zero-byte files do not count against it), otherwise {@code null}.
+     */
+    private static Path soleSubdirectory(Path dir) {
+        Path only = null;
+        try (java.nio.file.DirectoryStream<Path> children = Files.newDirectoryStream(dir)) {
+            for (Path p : children) {
+                // The junk rule applies to directory entries too. In
+                // particular, __MACOSX beside the one real folder must not
+                // turn a collapsible chain into a branch.
+                if (isJunk(p)) continue;
+                BasicFileAttributes attrs;
+                try {
+                    attrs = Files.readAttributes(p, BasicFileAttributes.class);
+                } catch (IOException unreadableChild) {
+                    return null;            // something real we cannot judge
+                }
+                if (attrs.isDirectory()) {
+                    if (only != null) return null;      // two subfolders: not a chain
+                    only = p;
+                } else if (!isJunk(p) && attrs.size() > 0) {
+                    return null;            // real content here: this level counts
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+        return only;
+    }
+
+    /**
+     * One listing, two answers: the collage children and the folder's verdict.
+     *
+     * <p>Children are read through a {@link DirectoryStream} with a single
+     * {@code readAttributes} each — the same one stat per child the old
+     * {@code Files.isDirectory} filter already paid — so learning the folder is
+     * empty, or holds nothing but droppings, costs no additional I/O.</p>
+     *
+     * <p>The early stop survives: once the collage is full the remaining files
+     * are never tested (no ID3 walk, no header sniff). That only ever happens
+     * when previews were found, which already settles the verdict as
+     * {@link FolderVerdict#NORMAL}; a folder that yields none has had every
+     * file tested anyway, so {@link FolderVerdict#NO_VISUAL} is exact.</p>
+     */
+    private static FolderPreview scanFolderPreview(Path dir, int limit, boolean sniff) {
+        var files = new ArrayList<Path>();
+        int subdirs = 0, junkOrEmpty = 0;
+        try (java.nio.file.DirectoryStream<Path> children = Files.newDirectoryStream(dir)) {
+            for (Path p : children) {
+                // Judge junk by entry name before asking what kind of entry it
+                // is. Several configured junk names are directories in
+                // practice; they still count toward JUNK_ONLY and must never
+                // become previewable children.
+                if (isJunk(p)) {
+                    files.add(p);
+                    junkOrEmpty++;
+                    continue;
+                }
+                BasicFileAttributes attrs;
+                try {
+                    attrs = Files.readAttributes(p, BasicFileAttributes.class);
+                } catch (IOException unreadableChild) {
+                    files.add(p);           // it exists; we just cannot size it
+                    continue;
+                }
+                if (attrs.isDirectory()) {
+                    subdirs++;
+                } else {
+                    files.add(p);
+                    if (attrs.size() == 0) junkOrEmpty++;
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            return FolderPreview.UNREADABLE;
+        }
+        files.sort(Comparator.comparing(p -> p.getFileName().toString(),
+                String.CASE_INSENSITIVE_ORDER));
+
+        var previews = new ArrayList<Path>(Math.max(0, limit));
+        if (limit > 0) {
+            for (Path file : files) {
+                if (previews.size() >= limit) break;
+                if (isVisualPreview(file, sniff)) previews.add(file);
+            }
+        }
+        return FolderPreview.of(previews,
+                folderVerdict(subdirs, files.size(), junkOrEmpty, !previews.isEmpty(), limit),
+                junkOrEmpty);
+    }
+
+    /**
+     * The flat verdict, mirroring {@code scripts/empty-tree-survey.py} exactly
+     * so the field measurements keep predicting what the app does.
+     *
+     * <p>{@code limit <= 0} means the caller asked for no collage (previews
+     * off), so no file was tested for visual content and
+     * {@link FolderVerdict#NO_VISUAL} cannot be distinguished from
+     * {@link FolderVerdict#NORMAL}. That costs nothing: NO_VISUAL is not
+     * marked on a tile — only the dead-end verdicts are, and those are decided
+     * without looking inside a single file.</p>
+     */
+    private static FolderVerdict folderVerdict(int subdirs, int files, int junkOrEmpty,
+                                               boolean anyVisual, int limit) {
+        if (subdirs == 0 && files == 0) return FolderVerdict.EMPTY;
+        if (subdirs == 0 && files == junkOrEmpty) return FolderVerdict.JUNK_ONLY;
+        if (limit > 0 && files > 0 && !anyVisual) return FolderVerdict.NO_VISUAL;
+        return FolderVerdict.NORMAL;
     }
 
     /**
      * Whether a child qualifies for a folder-preview cell: a visual kind by
-     * extension, or — sniffing on — by header magic when the name classifies
-     * as nothing. Promotion-only, mirroring {@link #classifyByContent}: a
-     * present extension verdict is never re-judged, and the junk gate keeps
-     * known OS droppings ({@code .DS_Store} et al.) from paying the read.
+     * extension, covered ID3 audio, or — sniffing on — either of those kinds
+     * by header magic when the name classifies as nothing. Promotion-only,
+     * mirroring {@link #classifyByContent}: a present extension verdict is
+     * never re-judged, and the junk gate keeps known OS droppings
+     * ({@code .DS_Store} et al.) from paying the read.
      */
     private static boolean isVisualPreview(Path file, boolean sniff) {
         Optional<MediaKind> byExtension = ExtensionClassifier.classify(file);
-        if (byExtension.isPresent()) return isVisualKind(byExtension.get());
-        return sniff && !isJunk(file)
-                && ContentSniffer.sniff(file).map(MediaService::isVisualKind).orElse(false);
+        if (byExtension.isPresent()) return isVisualPreviewKind(file, byExtension.get());
+        if (!sniff || isJunk(file)) return false;
+        return ContentSniffer.sniff(file)
+                .map(kind -> isVisualPreviewKind(file, kind))
+                .orElse(false);
+    }
+
+    private static boolean isVisualPreviewKind(Path file, MediaKind kind) {
+        return isVisualKind(kind)
+                || (kind == MediaKind.AUDIO && Id3CoverArt.hasEmbeddedPicture(file));
     }
 
     /** Whether a kind yields a still frame for a folder-preview cell (image or video). */
@@ -596,8 +889,25 @@ public final class MediaService implements AutoCloseable {
         }
         var dirs = new ArrayList<DirEntry>();
         var files = new ArrayList<DirEntry>();
+        int hiddenJunk = 0, hiddenEmptyFiles = 0, hiddenEmptyFolders = 0;
         for (Path p : children) {
-            if (Files.isDirectory(p)) {
+            // Junk is an entry-name rule. Test it before isDirectory so
+            // __MACOSX, .Spotlight-V100 and their peers obey the same toggle
+            // and verdict rules as .DS_Store.
+            if (listingIgnoreJunk && isJunk(p)) {
+                hiddenJunk++;
+                continue;
+            } else if (Files.isDirectory(p)) {
+                // The one filter that costs I/O — one listing per subfolder,
+                // and only when the user turned it on. UNREADABLE is not a
+                // dead end here: it is a folder we could not judge.
+                if (listingHideEmptyFolders) {
+                    FolderVerdict verdict = scanFolderPreview(p, 0, false).verdict();
+                    if (verdict == FolderVerdict.EMPTY || verdict == FolderVerdict.JUNK_ONLY) {
+                        hiddenEmptyFolders++;
+                        continue;
+                    }
+                }
                 dirs.add(new DirEntry(p, DirEntry.Type.DIRECTORY, null, 0, 0));
             } else if (Sidecars.isRotationSidecar(p)
                     || Sidecars.isMatchedAaeSidecar(p, fileStems)) {
@@ -608,6 +918,10 @@ public final class MediaService implements AutoCloseable {
             } else {
                 long size = sizeOf(p);
                 long mtime = mtimeOf(p);
+                if (listingHideEmptyFiles && size == 0) {
+                    hiddenEmptyFiles++;
+                    continue;
+                }
                 DirEntry entry;
                 if (isJunk(p)) {
                     entry = new DirEntry(p, DirEntry.Type.OTHER, null, size, mtime);
@@ -633,6 +947,7 @@ public final class MediaService implements AutoCloseable {
         if (parent != null) entries.add(new DirEntry(parent, DirEntry.Type.PARENT, null, 0, 0));
         entries.addAll(dirs);
         entries.addAll(files);
+        lastHidden = new ListingHidden(dir, hiddenJunk, hiddenEmptyFiles, hiddenEmptyFolders);
         return entries;
     }
 

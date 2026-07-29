@@ -143,6 +143,16 @@
     -fx-text-fill: #bbbbbb;
 }
 
+/* Modena paints disclosure arrows through the looked-up
+   -fx-text-background-color. Showing a popup can temporarily detach that
+   lookup in JavaFX's CSS engine and log a String-to-Paint conversion warning,
+   even though the tree keeps working. Use the theme's concrete arrow colour
+   directly so popup-driven restyles remain quiet. */
+.tree-cell > .tree-disclosure-node > .arrow,
+.tree-table-row-cell > .tree-disclosure-node > .arrow {
+    -fx-background-color: #bbbbbb;
+}
+
 .tree-cell:filled:selected:focused {
     -fx-background-color: #3a3a3a;
     -fx-text-fill: white;

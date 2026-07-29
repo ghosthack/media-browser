@@ -15,6 +15,7 @@ import io.github.ghosthack.mediabrowser.media.MediaItem;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
+import io.github.ghosthack.mediabrowser.media.FolderPreview;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.Thumbnail;
@@ -45,6 +46,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.MenuBar;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.RadioMenuItem;
 import javafx.scene.control.ScrollBar;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SeparatorMenuItem;
@@ -54,6 +56,7 @@ import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.ToolBar;
 import javafx.scene.control.TextInputControl;
+import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.Tooltip;
 import javafx.scene.image.Image;
 import javafx.scene.image.PixelFormat;
@@ -62,6 +65,7 @@ import javafx.scene.image.WritableImage;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.ContextMenuEvent;
+import javafx.scene.input.InputEvent;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
@@ -139,13 +143,23 @@ import java.util.function.Supplier;
  * the selection onto a media tile shows it in the shared viewer without taking
  * focus, so arrow-browsing the grid drives a live preview.</p>
  *
+ * <p>After the configurable idle delay (five minutes by default), an app-local
+ * screensaver covers the Mosaic canvas with vertical grayscale Matrix rain and
+ * slowly crossfades ASCII-art transformations of cached active-folder images
+ * behind it. Activation does not require window focus. The toolbar's
+ * Screensaver toggle starts it immediately; returning focus or providing any
+ * input dismisses it. While active it temporarily removes Mosaic's menu,
+ * toolbar, location/status bars, scrollbar and side panels, restoring their
+ * prior live visibility when it exits.</p>
+ *
  * <p>While the grid is still decoding renditions (opening a large or slow
  * directory, or scrolling into freshly visible tiles), a loading indicator is
  * shown over the canvas — the same one the viewer uses, honouring the shared
  * {@link io.github.ghosthack.mediabrowser.LoadingIndicator} setting and its delay gate:
  * {@code Default} centres a "Loading…" pill, {@code Game Console} runs the
- * bottom-left spinning-CD overlay (see {@link GameConsoleLoadingOverlay}), and
- * {@code None} shows nothing. It spans the whole open: armed the moment a scan
+ * bottom-left spinning-CD overlay (see {@link GameConsoleLoadingOverlay}),
+ * {@code ASCII Matrix} runs grayscale horizontal glyph rain, and {@code None}
+ * shows nothing. It spans the whole open: armed the moment a scan
  * is kicked off (so opening a slow, content-sniffed folder gives instant
  * feedback rather than a frozen-looking gap while the listing is built off the
  * FX thread), held through the thumbnail backlog, and dissolved once everything
@@ -214,6 +228,15 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * overlays anchor by alignment without manual layout math.
      */
     private final StackPane canvasHolder = new StackPane(canvas);
+    /** Full-canvas vertical Matrix rain shown manually or after Mosaic sits idle. */
+    private final MatrixScreensaverOverlay screensaverOverlay =
+            new MatrixScreensaverOverlay();
+    /** Arms automatic screensaver activation from the configured idle delay. */
+    private final PauseTransition screensaverIdleDelay = new PauseTransition();
+    /** Toolbar control: selected exactly while the screensaver is on screen. */
+    private final ToggleButton screensaverToggle = new ToggleButton("Screensaver");
+    /** Swallows the rest of the input gesture that woke the screensaver. */
+    private long suppressScreensaverInputUntilNanos;
     private final ScrollBar vbar = new ScrollBar();
     /**
      * The loading indicator shown over the grid while thumbnails / folder
@@ -221,9 +244,13 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * {@link AppSettings#viewerLoadingIndicator} choice and delay gate): the
      * {@code Default} style reveals {@link #loadingLabel} (a centred "Loading…"
      * pill), the {@code Game Console} style starts {@link #loadingOverlay} (the
-     * bottom-left spinning-CD overlay), and {@code None} shows nothing.
+     * bottom-left spinning-CD overlay), {@code ASCII Matrix} starts
+     * {@link #asciiMatrixLoadingOverlay}, and {@code None} shows nothing.
      */
     private final GameConsoleLoadingOverlay loadingOverlay = new GameConsoleLoadingOverlay();
+    /** The grayscale horizontal ASCII-glyph loading overlay. */
+    private final AsciiMatrixLoadingOverlay asciiMatrixLoadingOverlay =
+            new AsciiMatrixLoadingOverlay();
     /** The {@code Default} loading indicator: a centred "Loading…" pill over the grid. */
     private final Label loadingLabel = new Label("Loading\u2026");
     /**
@@ -298,6 +325,12 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     private final BooleanProperty locationBarVisible = new SimpleBooleanProperty(false);
     /** Action-log panel visibility (the mosaic bar's Show ▸ Action Log binds here); hidden by default. */
     private final BooleanProperty actionLogVisible = new SimpleBooleanProperty(false);
+    /**
+     * Runtime-only chrome suppression while the screensaver owns Mosaic. The
+     * user's individual menu, panel and bar visibility choices stay untouched.
+     */
+    private final BooleanProperty screensaverPresentation =
+            new SimpleBooleanProperty(false);
     /** Crop-to-fill (square) vs. fit-on-black tiles; the toolbar toggle / menu bind here. */
     private final BooleanProperty fillTiles = new SimpleBooleanProperty(false);
     /**
@@ -324,6 +357,12 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * image (a pre-resampled asset chosen for the tile size). The Mosaic menu
      * binds here; the plain glyph by default and persisted on change.
      */
+    /** Dead-end marking on folder tiles; the Mosaic menu binds here. */
+    private final BooleanProperty emptyReticule = new SimpleBooleanProperty(true);
+    /** The optional subtree check behind the reticule's EMPTY mark. */
+    private final BooleanProperty barrenCheck = new SimpleBooleanProperty(false);
+    /** Listings one barren check may spend before answering UNKNOWN. */
+    private int barrenBudget = MediaService.DEFAULT_BARREN_BUDGET;
     private final ObjectProperty<MosaicFolderGlyph> folderGlyph =
             new SimpleObjectProperty<>(MosaicFolderGlyph.GLYPH);
     /**
@@ -390,6 +429,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     private ThumbnailMode thumbnailMode = ThumbnailMode.FIT;
     /** Window-top container; the shared menu bar is inserted above the toolbar. */
     private VBox topBox;
+    /** Window-bottom container for the action log and status bar. */
+    private VBox bottomBox;
     /** This view's root, hosted by the shell while the mosaic is active. */
     private final javafx.scene.layout.BorderPane root;
     private final ToolBar toolBar;
@@ -504,7 +545,15 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     /** Items known to have no visual (e.g. audio without cover art). */
     private final java.util.Set<Path> empties = new java.util.HashSet<>();
     /** Per-folder preview child paths (up to N²), filled lazily on first sight. */
-    private final Map<Path, List<Path>> folderPreviews = new java.util.HashMap<>();
+    private final Map<Path, FolderPreview> folderPreviews = new java.util.HashMap<>();
+    /**
+     * Subtree verdicts for the optional barren check, and the requests in
+     * flight. Separate from {@link #folderPreviews} because they are a
+     * different cost class: the preview scan is one listing the tile already
+     * owed, this one is a budgeted walk the user opted into.
+     */
+    private final Map<Path, MediaService.Barren> barrenVerdicts = new java.util.HashMap<>();
+    private final java.util.Set<Path> barrenPending = new java.util.HashSet<>();
     /** Folders whose preview scan is in flight — avoids duplicate scans. */
     private final java.util.Set<Path> folderPending = new java.util.HashSet<>();
 
@@ -560,7 +609,9 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     private final Typeahead typeahead = new Typeahead();
 
     public MosaicWindow(AppShell shell, MediaService service, ViewerWindow viewer,
-                        AppSettings settings, RotationStore rotationStore, AaeStore aaeStore) {
+                        AppSettings settings, RotationStore rotationStore, AaeStore aaeStore,
+                        ObjectProperty<MainWindow.SortKey> sortKey,
+                        BooleanProperty sortDescending) {
         this.shell = shell;
         this.service = service;
         this.diagnosticsPanel = new DiagnosticsPanel(service::thumbnailStats);
@@ -628,6 +679,24 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             requestDraw();
         });
         // Folder-glyph style (vector / inverse / photo); persisted on change, repaints.
+        this.emptyReticule.set(settings.mosaicEmptyReticule());
+        this.emptyReticule.addListener((o, was, v) -> {
+            settings.setMosaicEmptyReticule(v);
+            // The verdict is a by-product of the collage scan, but with the
+            // collage off nothing was scanned at all — so turning marking on
+            // has to drop the cache and ask.
+            folderPreviews.clear();
+            folderPending.clear();
+            requestDraw();
+        });
+        this.barrenCheck.set(settings.mosaicBarrenCheck());
+        this.barrenBudget = settings.mosaicBarrenBudget();
+        this.barrenCheck.addListener((o, was, v) -> {
+            settings.setMosaicBarrenCheck(v);
+            barrenVerdicts.clear();
+            barrenPending.clear();
+            requestDraw();
+        });
         this.folderGlyph.set(settings.mosaicFolderGlyph());
         this.folderGlyph.addListener((o, was, v) -> {
             settings.setMosaicFolderGlyph(v);
@@ -671,10 +740,30 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         filterOtherItem.selectedProperty().bindBidirectional(filterOther);
         filterButton.getItems().addAll(filterImagesItem, filterVideosItem,
                 filterAudioItem, filterOtherItem);
+        var sortButton = new MenuButton("Sort");
+        sortButton.setTooltip(new Tooltip("Sort and order items"));
+        var sortKeyGroup = new ToggleGroup();
+        var sortDirectionGroup = new ToggleGroup();
+        sortButton.getItems().addAll(
+                sortKeyItem("By Name", MainWindow.SortKey.NAME, sortKey, sortKeyGroup),
+                sortKeyItem("By Extension", MainWindow.SortKey.EXTENSION,
+                        sortKey, sortKeyGroup),
+                sortKeyItem("By Size", MainWindow.SortKey.SIZE, sortKey, sortKeyGroup),
+                sortKeyItem("By Date", MainWindow.SortKey.DATE, sortKey, sortKeyGroup),
+                new SeparatorMenuItem(),
+                sortDirectionItem("Ascending", false, sortDescending, sortDirectionGroup),
+                sortDirectionItem("Descending", true, sortDescending, sortDirectionGroup));
         var tileLabel = new Label("Tile");
         tileLabel.setPadding(new Insets(0, 0, 0, 10)); // ~1.25-char left margin
+        screensaverToggle.setTooltip(new Tooltip(
+                "Start the Matrix screensaver now (any input returns to the mosaic)"));
+        screensaverToggle.setOnAction(e -> {
+            if (screensaverToggle.isSelected()) startScreensaver();
+            else stopScreensaver();
+        });
         this.toolBar = new ToolBar(tileLabel, sizeSlider, new Separator(),
-                fillToggle, seamlessToggle, new Separator(), filterButton);
+                fillToggle, seamlessToggle, new Separator(), filterButton, sortButton,
+                new Separator(), screensaverToggle);
         toolBar.visibleProperty().bind(toolbarVisible);
         toolBar.managedProperty().bind(toolbarVisible);
 
@@ -686,7 +775,11 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         HBox.setHgrow(locationField, Priority.ALWAYS);
         var goButton = new Button("Go");
         goButton.setOnAction(e -> navigateFromLocation());
-        locationBar = new HBox(6, new Label("Location:"), locationField, goButton);
+        var drivesButton = new DriveMenuButton(root -> {
+            navigator.accept(root);
+            canvas.requestFocus();
+        });
+        locationBar = new HBox(6, new Label("Location:"), drivesButton, locationField, goButton);
         locationBar.setPadding(new Insets(4, 8, 4, 8));
         locationBar.getStyleClass().add("mosaic-location-bar");
         locationBar.setStyle("-fx-alignment: center-left;");
@@ -716,9 +809,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         canvas.widthProperty().addListener((o, a, b) -> relayout());
         canvas.heightProperty().addListener((o, a, b) -> relayout());
         canvasHolder.setStyle("-fx-background-color: black;");
-        // The fixed-size Game Console overlay would otherwise drive the holder's
-        // minimum size up to 300×112; let it shrink to nothing so a narrow window
-        // still shrinks the grid (the overlay just clips at the edge).
+        // The fixed-size animated overlays would otherwise drive the holder's
+        // minimum size up to 300×112; let it shrink to nothing in narrow windows.
         canvasHolder.setMinSize(0, 0);
 
         // Loading indicators over the grid (mirroring the viewer): a centred
@@ -733,7 +825,11 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         StackPane.setAlignment(loadingLabel, Pos.CENTER);
         StackPane.setAlignment(loadingOverlay, Pos.BOTTOM_LEFT);
         StackPane.setMargin(loadingOverlay, new Insets(0, 0, 6, 6));
-        canvasHolder.getChildren().addAll(loadingLabel, loadingOverlay);
+        StackPane.setAlignment(asciiMatrixLoadingOverlay, Pos.BOTTOM_LEFT);
+        StackPane.setMargin(asciiMatrixLoadingOverlay, new Insets(0, 0, 6, 6));
+        canvasHolder.getChildren().addAll(
+                loadingLabel, loadingOverlay, asciiMatrixLoadingOverlay,
+                screensaverOverlay);
         // Once the delay gate fires, the backlog is still loading, so reveal
         // whichever indicator the viewer's setting selects.
         loadingIndicatorDelay.setOnFinished(e -> showLoadingIndicator());
@@ -781,6 +877,9 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
 
         var content = new HBox(canvasHolder, vbar);
         HBox.setHgrow(canvasHolder, Priority.ALWAYS);
+        // Hidden scrollbars leave no reserved strip while the screensaver owns
+        // the grid, and while an ordinary folder does not need scrolling.
+        vbar.managedProperty().bind(vbar.visibleProperty());
         // Grid and panel stack share a draggable split (see SidePanelSplit)
         // rather than BorderPane center/right, so the panel width is the user's,
         // survives a restart, and doesn't shift when a panel is toggled.
@@ -829,9 +928,14 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
 
         // The shared menu bar is inserted at index 0 by installMenuBar(...).
         topBox = new VBox(toolBar, locationBar);
+        topBox.visibleProperty().bind(screensaverPresentation.not());
+        topBox.managedProperty().bind(screensaverPresentation.not());
+        bottomBox = new VBox(actionLogPanel, statusBar);
+        bottomBox.visibleProperty().bind(screensaverPresentation.not());
+        bottomBox.managedProperty().bind(screensaverPresentation.not());
         this.root = new javafx.scene.layout.BorderPane(contentSplit);
         root.setTop(topBox);
-        root.setBottom(new VBox(actionLogPanel, statusBar));
+        root.setBottom(bottomBox);
         root.setStyle("-fx-background-color: black;");
         // Anchor for mosaic.css's looked-up colour defaults (the themeable
         // toolbar/slider tints) — .root only matches when this view is the
@@ -843,6 +947,12 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         // they leave with the root when another view takes the window.
         var css = MosaicWindow.class.getResource("mosaic.css");
         if (css != null) root.getStylesheets().add(css.toExternalForm());
+        // Every input delivered to Mosaic resets its app-local idle clock. If
+        // the screensaver is already visible, the first gesture wakes it and is
+        // swallowed so that click/key does not also change the grid selection.
+        // Window focus is deliberately not part of the activation gate: the
+        // timer continues while the user works in another application.
+        root.addEventFilter(InputEvent.ANY, this::onScreensaverActivity);
         // A capturing-phase filter (not a bubbling handler) so grid navigation
         // keys are honoured before a focused toolbar control (the size Slider,
         // the Fill toggle) can swallow them — otherwise, once
@@ -896,6 +1006,29 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             if (now instanceof TextInputControl || now instanceof MenuButton) return;
             canvas.requestFocus();
         });
+        stage().focusedProperty().addListener((obs, was, focused) -> {
+            if (!focused || !active) return;
+            // Merely returning to the application dismisses the screensaver;
+            // activation itself never requires focus.
+            if (screensaverOverlay.isRunning()) stopScreensaver();
+            else resetScreensaverIdleTimer();
+        });
+        stage().iconifiedProperty().addListener((obs, was, iconified) -> {
+            if (iconified) {
+                screensaverIdleDelay.stop();
+                if (screensaverOverlay.isRunning()) stopScreensaver();
+            } else if (active) {
+                resetScreensaverIdleTimer();
+            }
+        });
+        stage().showingProperty().addListener((obs, was, showing) -> {
+            if (showing && active) resetScreensaverIdleTimer();
+            else screensaverIdleDelay.stop();
+        });
+        screensaverIdleDelay.setOnFinished(e -> {
+            if (canStartAutomaticScreensaver()) startScreensaver();
+            else resetScreensaverIdleTimer();
+        });
 
         // The Move dialog (Cmd+M / Mosaic ▸ Move…): the same window-agnostic
         // controller the main window uses, driven by a host that exposes this
@@ -911,6 +1044,37 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             @Override public void showStatus(String message) { statusLabel.setText(message); }
             @Override public void releaseBeforeMove(List<Path> moving) { viewer.releaseBeforeMove(moving); }
         });
+    }
+
+    /**
+     * Builds one sort-key radio item backed by the browser's shared listing
+     * state, keeping this toolbar dropdown and every Order menu copy in sync.
+     */
+    private static RadioMenuItem sortKeyItem(
+            String text,
+            MainWindow.SortKey value,
+            ObjectProperty<MainWindow.SortKey> sortKey,
+            ToggleGroup group) {
+        var item = new RadioMenuItem(text);
+        item.setToggleGroup(group);
+        item.setSelected(sortKey.get() == value);
+        item.setOnAction(e -> sortKey.set(value));
+        sortKey.addListener((o, was, now) -> item.setSelected(now == value));
+        return item;
+    }
+
+    /** Builds the matching ascending/descending radio item. */
+    private static RadioMenuItem sortDirectionItem(
+            String text,
+            boolean value,
+            BooleanProperty sortDescending,
+            ToggleGroup group) {
+        var item = new RadioMenuItem(text);
+        item.setToggleGroup(group);
+        item.setSelected(sortDescending.get() == value);
+        item.setOnAction(e -> sortDescending.set(value));
+        sortDescending.addListener((o, was, now) -> item.setSelected(now == value));
+        return item;
     }
 
     // --- ShellView ------------------------------------------------------------
@@ -947,6 +1111,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         }
         updateAnimationTimer();
         updateTelemetryTimer();
+        resetScreensaverIdleTimer();
         canvas.requestFocus();
     }
 
@@ -959,6 +1124,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     @Override
     public void deactivate() {
         active = false;
+        screensaverIdleDelay.stop();
+        if (screensaverOverlay.isRunning()) stopScreensaver();
         detachSource();
         hideLoadingIndicator();
         scanPending = false;
@@ -993,7 +1160,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         // Gated on the mosaic being the active view so the three views' bars
         // don't race for the system menu bar on the single stage.
         WindowChrome.bindMenuAutoHide(bar, stage().getScene(), stage(),
-                menuBarVisible, shell.isActive(AppShell.AppView.MOSAIC), keys,
+                menuBarVisible.and(screensaverPresentation.not()),
+                shell.isActive(AppShell.AppView.MOSAIC), keys,
                 !settings.inWindowMenu());
     }
 
@@ -1109,6 +1277,23 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     }
 
     /**
+     * Whether folder tiles that lead nowhere carry the dither reticule. On by
+     * default: marking is what makes hiding unnecessary.
+     */
+    public BooleanProperty emptyReticuleProperty() {
+        return emptyReticule;
+    }
+
+    /**
+     * Whether folder tiles are additionally checked for a wholly media-free
+     * subtree. Off by default — measured at roughly 1 in 35 media-bearing
+     * folders, and unlike every other verdict here it costs real I/O.
+     */
+    public BooleanProperty barrenCheckProperty() {
+        return barrenCheck;
+    }
+
+    /**
      * Auto-open toggle (Mosaic ▸ Auto-open / toolbar bind here). Its startup
      * value comes from the {@code mosaicAutoOpen} setting (the default, edited in
      * Settings); flipping it live is transient and does not change that default.
@@ -1171,7 +1356,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      */
     private void updateAnimationTimer() {
         boolean run = selectionAnimation.get() != MosaicSelectionAnimation.NONE
-                && active;
+                && active
+                && !screensaverOverlay.isRunning();
         if (run) {
             if (animationTimer == null) {
                 animationStartNanos = 0;
@@ -1329,9 +1515,11 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      */
     private void updateRightPanels() {
         var panels = new ArrayList<Node>(3);
-        if (infoPanelVisible.get()) panels.add(infoPanel);
-        if (metadataPanelVisible.get()) panels.add(metadataPanel);
-        if (diagnosticsPanelVisible.get()) panels.add(diagnosticsPanel);
+        if (!screensaverPresentation.get()) {
+            if (infoPanelVisible.get()) panels.add(infoPanel);
+            if (metadataPanelVisible.get()) panels.add(metadataPanel);
+            if (diagnosticsPanelVisible.get()) panels.add(diagnosticsPanel);
+        }
         if (!rightPanels.getItems().equals(panels)) {
             rightPanels.getItems().setAll(panels);
             if (panels.size() == 2) rightPanels.setDividerPositions(0.4);
@@ -1562,6 +1750,99 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         setFolderPreviewGrid(settings.mosaicFolderPreviewGrid());
     }
 
+    /**
+     * Applies Settings ▸ Mosaic screensaver changes immediately. Disabling
+     * automatic activation leaves the toolbar's manual trigger available.
+     */
+    public void applyScreensaverSettings() {
+        resetScreensaverIdleTimer();
+    }
+
+    /** Records Mosaic activity, or consumes the gesture that wakes the saver. */
+    private void onScreensaverActivity(InputEvent event) {
+        if (!active) return;
+        long now = System.nanoTime();
+        if (now < suppressScreensaverInputUntilNanos) {
+            event.consume();
+            return;
+        }
+        if (screensaverOverlay.isRunning()) {
+            suppressScreensaverInputUntilNanos = now + 250_000_000L;
+            stopScreensaver();
+            event.consume();
+            return;
+        }
+        resetScreensaverIdleTimer();
+    }
+
+    /** Re-arms automatic activation without requiring the Mosaic window to focus. */
+    private void resetScreensaverIdleTimer() {
+        screensaverIdleDelay.stop();
+        if (!active || screensaverOverlay.isRunning()
+                || !settings.mosaicScreensaverEnabled()
+                || !stage().isShowing() || stage().isIconified()) return;
+        screensaverIdleDelay.setDuration(
+                Duration.minutes(settings.mosaicScreensaverDelayMinutes()));
+        screensaverIdleDelay.playFromStart();
+    }
+
+    private boolean canStartAutomaticScreensaver() {
+        return active
+                && settings.mosaicScreensaverEnabled()
+                && stage().isShowing()
+                && !stage().isIconified()
+                && !scanPending
+                && !loadingActive;
+    }
+
+    /** Starts immediately from a snapshot of already-cached current-folder images. */
+    private void startScreensaver() {
+        if (!active || !stage().isShowing() || stage().isIconified()) {
+            screensaverToggle.setSelected(false);
+            return;
+        }
+        screensaverIdleDelay.stop();
+        // Swallow the tail of the toolbar click (notably MOUSE_CLICKED, which
+        // follows the release that fires the button action) so manual start
+        // cannot immediately wake itself again.
+        suppressScreensaverInputUntilNanos = System.nanoTime() + 250_000_000L;
+        setScreensaverPresentation(true);
+        screensaverOverlay.start(cachedScreensaverImages());
+        screensaverToggle.setSelected(true);
+        updateAnimationTimer();
+    }
+
+    private void stopScreensaver() {
+        screensaverOverlay.stop();
+        setScreensaverPresentation(false);
+        screensaverToggle.setSelected(false);
+        updateAnimationTimer();
+        resetScreensaverIdleTimer();
+    }
+
+    /**
+     * Enters/leaves temporary chrome-free presentation without mutating any
+     * persisted or live Show-menu choices. Relayout makes the grid/saver fill
+     * the reclaimed menu, panel, status and scrollbar space.
+     */
+    private void setScreensaverPresentation(boolean presenting) {
+        if (screensaverPresentation.get() == presenting) return;
+        screensaverPresentation.set(presenting);
+        updateRightPanels();
+        relayout();
+    }
+
+    private List<Image> cachedScreensaverImages() {
+        var result = new ArrayList<Image>();
+        var seen = java.util.Collections.newSetFromMap(
+                new java.util.IdentityHashMap<Image, Boolean>());
+        for (DirEntry item : items) {
+            Image image = images.get(item.path());
+            if (image != null && seen.add(image)) result.add(image);
+        }
+        return result;
+    }
+
     /** Opens or navigates the selected tile (Mosaic ▸ Open Selected). */
     public void openSelectedItem() {
         activateSelected();
@@ -1739,6 +2020,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             empties.clear();
             folderPreviews.clear();
             folderPending.clear();
+            barrenVerdicts.clear();
+            barrenPending.clear();
             // Draw-loop per-path/per-text caches are directory-scoped; drop them
             // so they don't carry stale adjustments/crops/captions across folders.
             adjustmentsCache.clear();
@@ -1814,6 +2097,72 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         return -1;
     }
 
+    /**
+     * What to say instead of a black void, and which nothing it is.
+     *
+     * <p>Only drawn once the scan has finished: while anything is still in
+     * flight the loading indicator owns the screen, so a slow network folder
+     * never flashes "Empty folder" and then fills in behind it.</p>
+     *
+     * <p>When a filter caused the emptiness, the filter is named. That is the
+     * case that bites hardest — the folder is genuinely full — and naming it
+     * turns a dead end into a one-key fix.</p>
+     */
+    private void drawEmptyState(GraphicsContext g, double viewW, double viewH) {
+        if (scanPending || !folderPending.isEmpty()) return;   // still looking
+        String message = emptyStateText();
+        if (message == null) return;
+        g.setFill(Color.web("#8a8a8a"));
+        g.setFont(font(Math.max(11, Math.min(18, viewW / 40))));
+        g.setTextAlign(TextAlignment.CENTER);
+        g.setTextBaseline(VPos.CENTER);
+        g.fillText(message, viewW / 2.0, viewH / 2.0);
+    }
+
+    /** The empty-state line, or {@code null} when the grid is not empty. */
+    private String emptyStateText() {
+        int listed = 0;
+        for (DirEntry e : source == null ? List.<DirEntry>of() : source) {
+            if (e.type() != DirEntry.Type.PARENT) listed++;
+        }
+        if (listed > 0) {
+            // The listing had rows; the media-type filters removed them all.
+            return listed + (listed == 1 ? " item hidden by " : " items hidden by ")
+                    + disabledFilterNames();
+        }
+        FolderPreview here = mosaicDir == null ? null : folderPreviews.get(mosaicDir);
+        var hidden = mosaicDir == null ? null : service.hiddenIn(mosaicDir);
+        if (here != null) {
+            switch (here.verdict()) {
+                case UNREADABLE -> {
+                    return "Can't read this folder — permission denied";
+                }
+                case JUNK_ONLY -> {
+                    // Never a bare "Empty" that a Finder window would
+                    // contradict: the droppings are counted on screen.
+                    int junk = here.junkFiles();
+                    return "Empty folder (" + junk
+                            + (junk == 1 ? " system file)" : " system files)");
+                }
+                default -> { }
+            }
+        }
+        if (hidden != null && hidden.anyOptIn()) {
+            return "Empty folder (" + hiddenSuffixBody(hidden) + " hidden)";
+        }
+        return "Empty folder";
+    }
+
+    /** The names of the media-type filters currently off, for the empty state. */
+    private String disabledFilterNames() {
+        var off = new ArrayList<String>(4);
+        if (!filterImages.get()) off.add("Images");
+        if (!filterVideos.get()) off.add("Videos");
+        if (!filterAudio.get()) off.add("Audio");
+        if (!filterOther.get()) off.add("Others");
+        return off.isEmpty() ? "a filter" : String.join(", ", off);
+    }
+
     /** Status-line tally mirroring the main window's count. */
     private String countText() {
         long dirs = 0, media = 0, other = 0;
@@ -1825,7 +2174,28 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                 case PARENT -> { }
             }
         }
-        return dirs + " folders · " + (media + other) + " files · " + media + " viewable";
+        String text = dirs + " folders · " + (media + other) + " files · "
+                + media + " viewable";
+        // A hidden item is never a silent omission when the user turned the
+        // filter on: the count is the receipt. Junk is not reported here — a
+        // dropped .DS_Store changes nothing about the folder, and a suffix on
+        // every folder on the disk is noise.
+        var hidden = mosaicDir == null ? null : service.hiddenIn(mosaicDir);
+        if (hidden != null && hidden.anyOptIn()) {
+            text += " · " + hiddenSuffixBody(hidden) + " hidden";
+        }
+        return text;
+    }
+
+    /** "3 empty, 1 empty folder" — the opt-in filters' tallies, in order. */
+    private static String hiddenSuffixBody(MediaService.ListingHidden hidden) {
+        var parts = new ArrayList<String>(2);
+        if (hidden.emptyFiles() > 0) parts.add(hidden.emptyFiles() + " empty");
+        if (hidden.emptyFolders() > 0) {
+            parts.add(hidden.emptyFolders()
+                    + (hidden.emptyFolders() == 1 ? " empty folder" : " empty folders"));
+        }
+        return String.join(", ", parts);
     }
 
     // --- layout & drawing ----------------------------------------------------
@@ -1853,8 +2223,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         vbar.setVisibleAmount(maxScroll <= 0 ? 1 : viewH / contentHeight * maxScroll);
         vbar.setUnitIncrement(outer + margin);
         vbar.setBlockIncrement(viewH);
-        vbar.setVisible(maxScroll > 0);
-        vbar.setManaged(maxScroll > 0);
+        vbar.setVisible(maxScroll > 0 && !screensaverPresentation.get());
         scrollY = clamp(scrollY, 0, maxScroll);
         if (vbar.getValue() != scrollY) vbar.setValue(scrollY);
         requestDraw();
@@ -1889,7 +2258,10 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             double viewW = canvas.getWidth(), viewH = canvas.getHeight();
             g.setFill(Color.BLACK);
             g.fillRect(0, 0, viewW, viewH);
-            if (items.isEmpty() || columns <= 0) return;
+            if (items.isEmpty() || columns <= 0) {
+                drawEmptyState(g, viewW, viewH);
+                return;
+            }
 
             int outer = tileSize + 2 * borderWidth;
             int strideX = outer + margin;
@@ -1908,6 +2280,12 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                     drawTile(g, items.get(i), x, y, outer, selection.contains(i), i == selected);
                     tilesDrawn++;
                 }
+            }
+            // The ".." tile is navigation, not folder content. Keep it
+            // clickable while still explaining why the folder itself has no
+            // rows, matching the browser's overlaid empty state.
+            if (!MainWindow.hasNonParentEntry(items)) {
+                drawEmptyState(g, viewW, viewH);
             }
         } finally {
             MosaicTelemetry.recordDraw(MosaicTelemetry.elapsedSince(startedAt), tilesDrawn);
@@ -1957,14 +2335,16 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     /**
      * Shows whichever loading indicator the viewer's setting selects over the
      * grid: {@link LoadingIndicator#DEFAULT} a centred "Loading…" pill, {@link
-     * LoadingIndicator#GAME_CONSOLE} the bottom-left spinning-CD overlay. Reached
-     * via {@link #scheduleLoadingIndicator} once the delay gate elapses.
+     * LoadingIndicator#GAME_CONSOLE} the bottom-left spinning-CD overlay, or
+     * {@link LoadingIndicator#ASCII_MATRIX} the grayscale horizontal glyph rain.
+     * Reached via {@link #scheduleLoadingIndicator} once the delay gate elapses.
      */
     private void showLoadingIndicator() {
         loadingShown = true;
         switch (settings.viewerLoadingIndicator()) {
             case DEFAULT -> loadingLabel.setVisible(true);
             case GAME_CONSOLE -> loadingOverlay.start();
+            case ASCII_MATRIX -> asciiMatrixLoadingOverlay.start();
             case NONE -> { }
         }
     }
@@ -1979,6 +2359,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         loadingIndicatorDelay.stop();
         loadingLabel.setVisible(false);
         loadingOverlay.stop();
+        asciiMatrixLoadingOverlay.stop();
     }
 
     /**
@@ -2088,8 +2469,9 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * back to a plain folder glyph.
      */
     private void drawFolderContent(GraphicsContext g, DirEntry item, double cx, double cy) {
-        List<Path> children = thumbnailsVisible.get() && folderPreviewGrid > 0
-                ? folderPreviewFor(item.path()) : null;
+        FolderPreview preview = folderPreviewFor(item.path());
+        List<Path> children = preview == null || !thumbnailsVisible.get() || folderPreviewGrid <= 0
+                ? null : preview.previews();
         boolean drew = false;
         if (children != null && !children.isEmpty()) {
             int n = folderPreviewGrid;
@@ -2104,7 +2486,49 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             }
         }
         if (!drew) drawFolderGlyph(g, cx, cy);
+        drawReticule(g, preview, item.path(), cx, cy);
         if (dirLabelsVisible.get()) drawCaption(g, item.displayName(), cx, cy);
+    }
+
+    /**
+     * The dead-end reticule: an 8-bit-shadow dither over a folder tile that
+     * leads nowhere. Marking rather than hiding is the point — a hidden folder
+     * fails you the moment you are hunting it by name, while a dithered one
+     * recedes, stays clickable and stays findable.
+     *
+     * <p>Density is the verdict and the scale is ordinal — more dither, less
+     * there — so it teaches itself in one session. Drawn over the glyph but
+     * before the caption and the selection ring, both of which stay at full
+     * strength: a marked tile must still read as selected.</p>
+     */
+    private void drawReticule(GraphicsContext g, FolderPreview preview, Path dir,
+                              double cx, double cy) {
+        if (!emptyReticule.get()) return;
+        Reticule mark = reticuleFor(preview, dir);
+        if (mark == null) return;
+        // Smoothing would blur the pattern to flat grey, which is exactly the
+        // mush that kills the read. The ImagePattern cell is proportional to
+        // this fillRect's tile bounds, so its visual scale follows tileSize.
+        boolean wasSmooth = g.isImageSmoothing();
+        g.setImageSmoothing(false);
+        g.setFill(mark.pattern());
+        g.fillRect(cx, cy, tileSize, tileSize);
+        g.setImageSmoothing(wasSmooth);
+    }
+
+    /** Which dither a folder earns, or {@code null} for a folder with content. */
+    private Reticule reticuleFor(FolderPreview preview, Path dir) {
+        if (preview != null) {
+            switch (preview.verdict()) {
+                case UNREADABLE -> { return Reticule.HATCH; }
+                case EMPTY -> { return Reticule.HALF; }
+                case JUNK_ONLY -> { return Reticule.SPARSE; }
+                default -> { }
+            }
+        }
+        // Nothing flat to report. The subtree check, when the user turned it
+        // on, can still find the folder leads nowhere; UNKNOWN marks nothing.
+        return barrenFor(dir) == MediaService.Barren.YES ? Reticule.HALF : null;
     }
 
     /**
@@ -2621,16 +3045,19 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * collage, scanning on first sight. Returns {@code null} while the scan is
      * in flight.
      */
-    private List<Path> folderPreviewFor(Path dir) {
-        if (!thumbnailsVisible.get()) return null;
-        List<Path> cached = folderPreviews.get(dir);
+    private FolderPreview folderPreviewFor(Path dir) {
+        boolean wantCollage = thumbnailsVisible.get() && folderPreviewGrid > 0;
+        // With both the collage and the reticule off there is nothing to learn,
+        // so the listing is never made — the scan stays as lazy as it was.
+        if (!wantCollage && !emptyReticule.get()) return null;
+        FolderPreview cached = folderPreviews.get(dir);
         if (cached != null) return cached;
         if (folderPending.contains(dir)) return null;
         folderPending.add(dir);
         MosaicTelemetry.recordFolderRequested(folderPending.size());
         int gen = generation;
         long requestedAt = MosaicTelemetry.now();
-        service.folderPreview(dir, folderPreviewGrid * folderPreviewGrid)
+        service.folderPreview(dir, wantCollage ? folderPreviewGrid * folderPreviewGrid : 0)
                 .whenComplete((paths, error) -> {
                     long completedAt = MosaicTelemetry.now();
                     MosaicTelemetry.recordFolderTotal(elapsedBetween(requestedAt, completedAt));
@@ -2649,12 +3076,38 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         return startNanos == 0L || endNanos == 0L ? 0L : Math.max(0L, endNanos - startNanos);
     }
 
-    private void onFolderPreview(int gen, Path dir, List<Path> paths, Throwable error) {
+    private void onFolderPreview(int gen, Path dir, FolderPreview preview, Throwable error) {
         if (gen != generation) return; // directory changed since the scan
         folderPending.remove(dir);
-        folderPreviews.put(dir, error != null || paths == null ? List.of() : paths);
+        // A failed scan is UNREADABLE, not empty: we did not see nothing, we
+        // saw nothing at all. The reticule marks it differently for that reason.
+        folderPreviews.put(dir,
+                error != null || preview == null ? FolderPreview.UNREADABLE : preview);
         refreshLoadingState();
         requestDraw();
+    }
+
+    /**
+     * The cached subtree verdict for a folder, requesting it on first sight
+     * when the barren check is on. Budgeted in the service; a folder whose
+     * subtree outruns the budget answers UNKNOWN and is simply never marked.
+     */
+    private MediaService.Barren barrenFor(Path dir) {
+        if (!barrenCheck.get()) return MediaService.Barren.UNKNOWN;
+        MediaService.Barren cached = barrenVerdicts.get(dir);
+        if (cached != null) return cached;
+        if (!barrenPending.add(dir)) return MediaService.Barren.UNKNOWN;
+        int gen = generation;
+        service.barren(dir, barrenBudget).whenComplete((verdict, error) ->
+                Platform.runLater(() -> {
+                    if (gen != generation) return;
+                    barrenPending.remove(dir);
+                    barrenVerdicts.put(dir,
+                            error != null || verdict == null
+                                    ? MediaService.Barren.UNKNOWN : verdict);
+                    requestDraw();
+                }));
+        return MediaService.Barren.UNKNOWN;
     }
 
     private void onThumbnail(int gen, Path path, Thumbnail thumb, Throwable error) {
@@ -3179,6 +3632,38 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * (mirrored back into this grid), viewable media opens in the viewer, other
      * files do nothing.
      */
+
+    /**
+     * Descent cap for {@link MediaService#collapseChain}, the same bound
+     * {@code ArchivePaths.MAX_DESCENT} uses for the identical shape inside an
+     * archive. Nothing sane nests this deep with one child per level, and the
+     * cap means a pathological tree costs eight listings, not a walk.
+     */
+    private static final int MAX_CHAIN_DESCENT = 8;
+
+    /**
+     * Enters a folder, landing past any run of levels that hold exactly one
+     * subfolder and nothing else — the click-click-click descent.
+     *
+     * <p>Only ever on the way <em>in</em>. Going up must not collapse, or
+     * {@code ..} out of a chain would fall straight back down it and the user
+     * could never leave. The descent runs off the FX thread (it is up to
+     * {@link #MAX_CHAIN_DESCENT} listings) and falls back to the folder itself
+     * if anything goes wrong, so a slow or unreadable tree still navigates.</p>
+     *
+     * <p>Nothing is hidden: the location bar shows where you landed, and
+     * {@code ..} walks back up through every level that was skipped.</p>
+     */
+    private void enterFolder(Path dir) {
+        if (!settings.listingCollapseFolderChains()) {
+            navigator.accept(dir);
+            return;
+        }
+        service.fileOp(() -> MediaService.collapseChain(dir, MAX_CHAIN_DESCENT))
+                .whenComplete((target, error) -> Platform.runLater(() ->
+                        navigator.accept(error != null || target == null ? dir : target)));
+    }
+
     private void activateSelected() {
         if (selected < 0 || selected >= items.size()) return;
         DirEntry entry = items.get(selected);
@@ -3187,7 +3672,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             // the folder we came from as the post-rebuild selection, matching
             // Backspace (otherwise the parent listing resets to its first tile).
             case PARENT -> navigateToParent();
-            case DIRECTORY -> navigator.accept(entry.path());
+            case DIRECTORY -> enterFolder(entry.path());
             case ARCHIVE -> openArchive(entry.path());
             // Pass this mosaic as the viewer host so Escape/Enter come back
             // here and arrow-browsing in the viewer mirrors back into the tile.

@@ -1,5 +1,7 @@
 package io.github.ghosthack.mediabrowser;
 
+import io.github.ghosthack.mediabrowser.media.MediaService;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -46,12 +48,23 @@ public final class AppSettings {
     /** Legacy boolean; read only to migrate older files to the enum above. */
     private static final String MOSAIC_PULSE_SELECTION_KEY = "mosaic.pulseSelection";
     private static final String MOSAIC_PULSE_PERIOD_KEY = "mosaic.pulsePeriodMs";
+    private static final String MOSAIC_SCREENSAVER_ENABLED_KEY = "mosaic.screensaver.enabled";
+    private static final String MOSAIC_SCREENSAVER_DELAY_KEY = "mosaic.screensaver.delayMinutes";
     private static final String MOSAIC_TILE_SIZE_KEY = "mosaic.tileSize";
     private static final String MOSAIC_MARGIN_KEY = "mosaic.margin";
     private static final String MOSAIC_BORDER_WIDTH_KEY = "mosaic.borderWidth";
     private static final String MOSAIC_BORDER_COLOR_KEY = "mosaic.borderColor";
     private static final String MOSAIC_FOLDER_PREVIEW_GRID_KEY = "mosaic.folderPreview.grid";
     private static final String MOSAIC_FOLDER_PREVIEW_SNIFF_KEY = "mosaic.folderPreview.sniff";
+    // docs/empty-states.md. The three listing.* keys govern the browser list
+    // and the mosaic grid alike, which is why they are not mosaic-scoped.
+    private static final String LISTING_IGNORE_JUNK_KEY = "listing.ignoreJunkFiles";
+    private static final String LISTING_HIDE_EMPTY_FILES_KEY = "listing.hideEmptyFiles";
+    private static final String LISTING_HIDE_EMPTY_FOLDERS_KEY = "listing.hideEmptyFolders";
+    private static final String LISTING_COLLAPSE_CHAINS_KEY = "listing.collapseFolderChains";
+    private static final String MOSAIC_EMPTY_RETICULE_KEY = "mosaic.emptyReticule";
+    private static final String MOSAIC_BARREN_CHECK_KEY = "mosaic.barrenCheck";
+    private static final String MOSAIC_BARREN_BUDGET_KEY = "mosaic.barrenCheck.budget";
     private static final String MOSAIC_FOLDER_GLYPH_KEY = "mosaic.folderGlyph";
     /** Legacy boolean; read only to migrate older files to the enum above. */
     private static final String MOSAIC_FOLDER_IMAGE_KEY = "mosaic.folderImage";
@@ -138,7 +151,7 @@ public final class AppSettings {
     private static final MosaicFolderGlyph DEFAULT_MOSAIC_FOLDER_GLYPH =
             MosaicFolderGlyph.GLYPH;
     private static final LoadingIndicator DEFAULT_VIEWER_LOADING_INDICATOR =
-            LoadingIndicator.GAME_CONSOLE;
+            LoadingIndicator.ASCII_MATRIX;
     /**
      * Delay, in milliseconds, before the viewer shows its loading indicator: a
      * grace period that gates the indicator so a fast/cached decode landing
@@ -152,6 +165,11 @@ public final class AppSettings {
     private static final int DEFAULT_MOSAIC_PULSE_PERIOD_MS = 1600;
     private static final int MIN_MOSAIC_PULSE_PERIOD_MS = 200;
     private static final int MAX_MOSAIC_PULSE_PERIOD_MS = 10000;
+    /** Automatic Mosaic screensaver defaults: enabled after five idle minutes. */
+    private static final boolean DEFAULT_MOSAIC_SCREENSAVER_ENABLED = true;
+    private static final int DEFAULT_MOSAIC_SCREENSAVER_DELAY_MINUTES = 5;
+    private static final int MIN_MOSAIC_SCREENSAVER_DELAY_MINUTES = 1;
+    private static final int MAX_MOSAIC_SCREENSAVER_DELAY_MINUTES = 120;
 
     /** Defaults and bounds for the move-history list. */
     private static final int DEFAULT_MOVE_HISTORY_LIMIT = 10;
@@ -199,12 +217,21 @@ public final class AppSettings {
     private boolean mosaicAutoOpen;
     private MosaicSelectionAnimation mosaicSelectionAnimation;
     private int mosaicPulsePeriodMs;
+    private boolean mosaicScreensaverEnabled = DEFAULT_MOSAIC_SCREENSAVER_ENABLED;
+    private int mosaicScreensaverDelayMinutes = DEFAULT_MOSAIC_SCREENSAVER_DELAY_MINUTES;
     private int mosaicTileSize;
     private int mosaicMargin;
     private int mosaicBorderWidth;
     private String mosaicBorderColor;
     private int mosaicFolderPreviewGrid;
     private boolean mosaicFolderPreviewSniff;
+    private boolean listingIgnoreJunkFiles;
+    private boolean listingHideEmptyFiles;
+    private boolean listingHideEmptyFolders;
+    private boolean listingCollapseFolderChains;
+    private boolean mosaicEmptyReticule;
+    private boolean mosaicBarrenCheck;
+    private int mosaicBarrenBudget;
     private MosaicFolderGlyph mosaicFolderGlyph;
     private boolean mosaicDirLabelsVisible;
     private boolean mosaicFileLabelsVisible;
@@ -304,6 +331,14 @@ public final class AppSettings {
         settings.mosaicPulsePeriodMs = parseBoundedInt(
                 props.getProperty(MOSAIC_PULSE_PERIOD_KEY), DEFAULT_MOSAIC_PULSE_PERIOD_MS,
                 MIN_MOSAIC_PULSE_PERIOD_MS, MAX_MOSAIC_PULSE_PERIOD_MS);
+        settings.mosaicScreensaverEnabled = Boolean.parseBoolean(
+                props.getProperty(MOSAIC_SCREENSAVER_ENABLED_KEY,
+                        Boolean.toString(DEFAULT_MOSAIC_SCREENSAVER_ENABLED)));
+        settings.mosaicScreensaverDelayMinutes = parseBoundedInt(
+                props.getProperty(MOSAIC_SCREENSAVER_DELAY_KEY),
+                DEFAULT_MOSAIC_SCREENSAVER_DELAY_MINUTES,
+                MIN_MOSAIC_SCREENSAVER_DELAY_MINUTES,
+                MAX_MOSAIC_SCREENSAVER_DELAY_MINUTES);
         settings.mosaicTileSize = parseBoundedInt(
                 props.getProperty(MOSAIC_TILE_SIZE_KEY), DEFAULT_MOSAIC_TILE_SIZE, 64, 512);
         settings.mosaicMargin = parseBoundedInt(
@@ -317,6 +352,21 @@ public final class AppSettings {
                 DEFAULT_MOSAIC_FOLDER_PREVIEW_GRID, 0, 4);
         settings.mosaicFolderPreviewSniff = Boolean.parseBoolean(
                 props.getProperty(MOSAIC_FOLDER_PREVIEW_SNIFF_KEY, "false"));
+        settings.listingIgnoreJunkFiles = Boolean.parseBoolean(
+                props.getProperty(LISTING_IGNORE_JUNK_KEY, "true"));
+        settings.listingHideEmptyFiles = Boolean.parseBoolean(
+                props.getProperty(LISTING_HIDE_EMPTY_FILES_KEY, "false"));
+        settings.listingHideEmptyFolders = Boolean.parseBoolean(
+                props.getProperty(LISTING_HIDE_EMPTY_FOLDERS_KEY, "false"));
+        settings.listingCollapseFolderChains = Boolean.parseBoolean(
+                props.getProperty(LISTING_COLLAPSE_CHAINS_KEY, "true"));
+        settings.mosaicEmptyReticule = Boolean.parseBoolean(
+                props.getProperty(MOSAIC_EMPTY_RETICULE_KEY, "true"));
+        settings.mosaicBarrenCheck = Boolean.parseBoolean(
+                props.getProperty(MOSAIC_BARREN_CHECK_KEY, "false"));
+        settings.mosaicBarrenBudget = parseBoundedInt(
+                props.getProperty(MOSAIC_BARREN_BUDGET_KEY),
+                MediaService.DEFAULT_BARREN_BUDGET, 1, 100_000);
         // Prefer the new enum key; fall back to migrating the legacy boolean
         // (true → IMAGE) so existing users keep their photographic folders.
         MosaicFolderGlyph legacyGlyph = Boolean.parseBoolean(
@@ -506,6 +556,10 @@ public final class AppSettings {
         props.setProperty(MOSAIC_AUTO_OPEN_KEY, Boolean.toString(mosaicAutoOpen));
         props.setProperty(MOSAIC_SELECTION_ANIMATION_KEY, mosaicSelectionAnimation.name());
         props.setProperty(MOSAIC_PULSE_PERIOD_KEY, Integer.toString(mosaicPulsePeriodMs));
+        props.setProperty(MOSAIC_SCREENSAVER_ENABLED_KEY,
+                Boolean.toString(mosaicScreensaverEnabled));
+        props.setProperty(MOSAIC_SCREENSAVER_DELAY_KEY,
+                Integer.toString(mosaicScreensaverDelayMinutes));
         props.setProperty(MOSAIC_TILE_SIZE_KEY, Integer.toString(mosaicTileSize));
         props.setProperty(MOSAIC_MARGIN_KEY, Integer.toString(mosaicMargin));
         props.setProperty(MOSAIC_BORDER_WIDTH_KEY, Integer.toString(mosaicBorderWidth));
@@ -514,6 +568,15 @@ public final class AppSettings {
                 Integer.toString(mosaicFolderPreviewGrid));
         props.setProperty(MOSAIC_FOLDER_PREVIEW_SNIFF_KEY,
                 Boolean.toString(mosaicFolderPreviewSniff));
+        props.setProperty(LISTING_IGNORE_JUNK_KEY, Boolean.toString(listingIgnoreJunkFiles));
+        props.setProperty(LISTING_HIDE_EMPTY_FILES_KEY, Boolean.toString(listingHideEmptyFiles));
+        props.setProperty(LISTING_HIDE_EMPTY_FOLDERS_KEY,
+                Boolean.toString(listingHideEmptyFolders));
+        props.setProperty(LISTING_COLLAPSE_CHAINS_KEY,
+                Boolean.toString(listingCollapseFolderChains));
+        props.setProperty(MOSAIC_EMPTY_RETICULE_KEY, Boolean.toString(mosaicEmptyReticule));
+        props.setProperty(MOSAIC_BARREN_CHECK_KEY, Boolean.toString(mosaicBarrenCheck));
+        props.setProperty(MOSAIC_BARREN_BUDGET_KEY, Integer.toString(mosaicBarrenBudget));
         props.setProperty(MOSAIC_FOLDER_GLYPH_KEY, mosaicFolderGlyph.name());
         props.setProperty(MOSAIC_DIR_LABELS_KEY, Boolean.toString(mosaicDirLabelsVisible));
         props.setProperty(MOSAIC_FILE_LABELS_KEY, Boolean.toString(mosaicFileLabelsVisible));
@@ -833,6 +896,28 @@ public final class AppSettings {
                 Math.min(MAX_MOSAIC_PULSE_PERIOD_MS, periodMs));
     }
 
+    /** Whether Mosaic starts its screensaver automatically after an idle delay. */
+    public boolean mosaicScreensaverEnabled() {
+        return mosaicScreensaverEnabled;
+    }
+
+    public void setMosaicScreensaverEnabled(boolean enabled) {
+        this.mosaicScreensaverEnabled = enabled;
+    }
+
+    /**
+     * Mosaic inactivity delay in minutes (default 5), clamped to
+     * {@code [1, 120]}. Manual toolbar activation does not use this delay.
+     */
+    public int mosaicScreensaverDelayMinutes() {
+        return mosaicScreensaverDelayMinutes;
+    }
+
+    public void setMosaicScreensaverDelayMinutes(int minutes) {
+        this.mosaicScreensaverDelayMinutes = Math.max(MIN_MOSAIC_SCREENSAVER_DELAY_MINUTES,
+                Math.min(MAX_MOSAIC_SCREENSAVER_DELAY_MINUTES, minutes));
+    }
+
     /** Mosaic cell content size in pixels (default 100). */
     public int mosaicTileSize() {
         return mosaicTileSize;
@@ -894,6 +979,93 @@ public final class AppSettings {
 
     public void setMosaicFolderPreviewSniff(boolean sniff) {
         this.mosaicFolderPreviewSniff = sniff;
+    }
+
+    /**
+     * Whether junk files are dropped from listings. On by default — see
+     * {@code MediaService.setListingIgnoreJunk} for why a visible change to
+     * existing listings is nonetheless the right default. Identifiers say
+     * "junk" because the media layer already does; the menu says "system
+     * files", because a menu item should not call a user's disk junk.
+     */
+    public boolean listingIgnoreJunkFiles() {
+        return listingIgnoreJunkFiles;
+    }
+
+    public void setListingIgnoreJunkFiles(boolean ignore) {
+        this.listingIgnoreJunkFiles = ignore;
+    }
+
+    /** Whether zero-byte files are dropped from listings. Off by default. */
+    public boolean listingHideEmptyFiles() {
+        return listingHideEmptyFiles;
+    }
+
+    public void setListingHideEmptyFiles(boolean hide) {
+        this.listingHideEmptyFiles = hide;
+    }
+
+    /**
+     * Whether empty and junk-only subfolders are dropped from listings. Off by
+     * default: it is the only listing filter that costs I/O.
+     */
+    public boolean listingHideEmptyFolders() {
+        return listingHideEmptyFolders;
+    }
+
+    public void setListingHideEmptyFolders(boolean hide) {
+        this.listingHideEmptyFolders = hide;
+    }
+
+    /**
+     * Whether entering a folder descends past a run of folders holding exactly
+     * one subfolder. On by default: it needs no extra I/O beyond the levels it
+     * skips, which the user was about to click through anyway.
+     */
+    public boolean listingCollapseFolderChains() {
+        return listingCollapseFolderChains;
+    }
+
+    public void setListingCollapseFolderChains(boolean collapse) {
+        this.listingCollapseFolderChains = collapse;
+    }
+
+    /**
+     * Whether dead-end folder tiles carry the dither reticule. On by default —
+     * marking is what makes hiding unnecessary, and unlike hiding it never
+     * removes a folder the user is looking for by name.
+     */
+    public boolean mosaicEmptyReticule() {
+        return mosaicEmptyReticule;
+    }
+
+    public void setMosaicEmptyReticule(boolean reticule) {
+        this.mosaicEmptyReticule = reticule;
+    }
+
+    /**
+     * Whether folder tiles are additionally checked for a wholly media-free
+     * subtree. Off by default: measured at roughly 1 in 35 media-bearing
+     * folders, which earns a setting rather than a default.
+     */
+    public boolean mosaicBarrenCheck() {
+        return mosaicBarrenCheck;
+    }
+
+    public void setMosaicBarrenCheck(boolean check) {
+        this.mosaicBarrenCheck = check;
+    }
+
+    /**
+     * Directory listings one barren check may spend before answering UNKNOWN.
+     * Defaults to {@code MediaService.DEFAULT_BARREN_BUDGET}.
+     */
+    public int mosaicBarrenBudget() {
+        return mosaicBarrenBudget;
+    }
+
+    public void setMosaicBarrenBudget(int budget) {
+        this.mosaicBarrenBudget = Math.max(1, budget);
     }
 
     /**
@@ -1118,7 +1290,7 @@ public final class AppSettings {
 
     /**
      * Which loading indicator the viewer shows while the next media decodes
-     * (default {@link LoadingIndicator#GAME_CONSOLE}). Seeded into the viewer at
+     * (default {@link LoadingIndicator#ASCII_MATRIX}). Seeded into the viewer at
      * startup, persisted on every change, and editable from the Settings dialog.
      */
     public LoadingIndicator viewerLoadingIndicator() {

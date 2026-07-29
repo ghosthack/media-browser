@@ -9,14 +9,17 @@ package io.github.ghosthack.mediabrowser;
  *   <li>{@link #DEFAULT} — the plain "Loading…" placeholder text (a basic
  *       label).</li>
  *   <li>{@link #GAME_CONSOLE} — a 2000s CD-console "Now loading …" overlay in
- *       the viewport's bottom-left, drawn over the current visual (the default
+ *       the viewport's bottom-left, drawn over the current visual.</li>
+ *   <li>{@link #ASCII_MATRIX} — a grayscale ASCII-glyph overlay whose streams
+ *       travel horizontally through the same bottom-left corner (the default
  *       for a fresh install).</li>
  * </ul>
  */
 public enum LoadingIndicator {
     NONE("None"),
     DEFAULT("Basic label"),
-    GAME_CONSOLE("Game Console");
+    GAME_CONSOLE("Game Console"),
+    ASCII_MATRIX("ASCII Matrix");
 
     private final String label;
 

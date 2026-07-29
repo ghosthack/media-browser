@@ -96,11 +96,13 @@ import java.util.function.Consumer;
  * loading-indicator picker / info-panel / status-bar / toolbar / full-screen toggles), a
  * viewport showing the decoded visual, an optional info panel (fed by the
  * probe metadata that {@code loadVisual} extracts as a byproduct) and a
- * status bar. The loading indicator is a three-way choice (see {@link
- * LoadingIndicator}): {@code None} (the default) keeps the current visual on
+ * status bar. The loading indicator is a style choice (see {@link
+ * LoadingIndicator}): {@code None} keeps the current visual on
  * screen while the next one decodes; {@code Default} blanks the viewport to a
  * "Loading…" placeholder; {@code Game Console} shows a spinning-CD overlay in
- * the bottom-left over the current visual (see {@link GameConsoleLoadingOverlay}).
+ * the bottom-left over the current visual (see {@link GameConsoleLoadingOverlay});
+ * and {@code ASCII Matrix} sends grayscale glyph streams horizontally through
+ * that corner (see {@link AsciiMatrixLoadingOverlay}).
  * Video frames are rendered through the LWJGL offscreen pipeline
  * (see {@link FallbackVideoSink}).
  *
@@ -291,6 +293,8 @@ public final class ViewerWindow implements AppShell.ShellView {
             new SimpleObjectProperty<>(LoadingIndicator.DEFAULT);
     /** The "Game Console" loading overlay, shown bottom-left in the viewport while loading. */
     private final GameConsoleLoadingOverlay gameConsoleOverlay = new GameConsoleLoadingOverlay();
+    /** The grayscale horizontal ASCII-glyph overlay, sharing the same bottom-left anchor. */
+    private final AsciiMatrixLoadingOverlay asciiMatrixOverlay = new AsciiMatrixLoadingOverlay();
     /**
      * Gates the loading indicator behind {@link AppSettings#viewerLoadingIndicatorDelayMs}:
      * armed when a load starts, it shows the indicator only if the decode is
@@ -556,17 +560,16 @@ public final class ViewerWindow implements AppShell.ShellView {
         shell.fullScreenProperty().addListener(
                 (obs, was, is) -> fullScreenToggle.setSelected(is));
 
-        // The loading indicator is a three-way choice (None / Default / Game
-        // Console), so the toolbar carries a menu-button picker rather than a
-        // toggle; its radios mirror the Viewer ▸ Loading Indicator submenu via
-        // the shared loadingIndicator property.
+        // The toolbar carries a menu-button picker whose radios mirror the
+        // Viewer ▸ Loading Indicator submenu via the shared property.
         var loadingGroup = new ToggleGroup();
         var loadingMenuButton = new MenuButton("Loading", null,
                 loadingRadio("None", LoadingIndicator.NONE, loadingGroup),
                 loadingRadio("Basic label", LoadingIndicator.DEFAULT, loadingGroup),
-                loadingRadio("Game Console", LoadingIndicator.GAME_CONSOLE, loadingGroup));
+                loadingRadio("Game Console", LoadingIndicator.GAME_CONSOLE, loadingGroup),
+                loadingRadio("ASCII Matrix", LoadingIndicator.ASCII_MATRIX, loadingGroup));
         loadingMenuButton.setTooltip(new Tooltip("Loading indicator shown while the "
-                + "next media loads (None / Default placeholder / Game Console overlay)"));
+                + "next media loads"));
 
         this.toolBar = new ToolBar(toolbarPin, new Separator(),
                 prevButton, nextButton, new Separator(),
@@ -595,12 +598,14 @@ public final class ViewerWindow implements AppShell.ShellView {
         vScroll.setVisible(false);
         StackPane.setAlignment(hScroll, Pos.BOTTOM_LEFT);
         StackPane.setAlignment(vScroll, Pos.TOP_RIGHT);
-        // The Game Console loading overlay sits in the bottom-left corner over
-        // the visual (mouse-transparent, hidden until a load starts). It is added
-        // below the pan scrollbars so a 1:1 overflow's bars stay clickable on top.
+        // Animated loading overlays share the bottom-left corner over the visual.
+        // They sit below the pan scrollbars so a 1:1 overflow's bars stay clickable.
         StackPane.setAlignment(gameConsoleOverlay, Pos.BOTTOM_LEFT);
         StackPane.setMargin(gameConsoleOverlay, new Insets(0, 0, 6, 6));
-        viewport = new StackPane(imageView, placeholder, gameConsoleOverlay, hScroll, vScroll);
+        StackPane.setAlignment(asciiMatrixOverlay, Pos.BOTTOM_LEFT);
+        StackPane.setMargin(asciiMatrixOverlay, new Insets(0, 0, 6, 6));
+        viewport = new StackPane(imageView, placeholder, gameConsoleOverlay,
+                asciiMatrixOverlay, hScroll, vScroll);
         viewport.setStyle("-fx-background-color: black;");
         // The viewport is the viewer's keyboard focus target. The scene key
         // filter drives navigation (siblings, Home/End, Escape…), but a focused
@@ -1468,12 +1473,12 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /**
      * Applies and persists a loading-indicator change. Switching off (or to any
-     * non-overlay style) tears the Game Console overlay down at once instead of
-     * leaving it spinning; the choice is then saved so it survives a restart (the
-     * Settings dialog edits the same value).
+     * non-matching style dissolves any other animated overlay; the choice is then
+     * saved so it survives a restart (the Settings dialog edits the same value).
      */
     private void applyLoadingIndicator(LoadingIndicator mode) {
         if (mode != LoadingIndicator.GAME_CONSOLE) gameConsoleOverlay.stop();
+        if (mode != LoadingIndicator.ASCII_MATRIX) asciiMatrixOverlay.stop();
         settings.setViewerLoadingIndicator(mode);
         try {
             settings.save();
@@ -1508,8 +1513,10 @@ public final class ViewerWindow implements AppShell.ShellView {
      * decodes. {@link LoadingIndicator#DEFAULT} blanks the viewport to the
      * "Loading…" placeholder (the historical behaviour); {@link
      * LoadingIndicator#GAME_CONSOLE} starts the bottom-left CD overlay over the
-     * current visual; {@link LoadingIndicator#NONE} leaves the visual untouched.
-     * Reached via {@link #scheduleLoadingIndicator} once the delay gate elapses.
+     * current visual; {@link LoadingIndicator#ASCII_MATRIX} starts the grayscale
+     * horizontal glyph rain; {@link LoadingIndicator#NONE} leaves the visual
+     * untouched. Reached via {@link #scheduleLoadingIndicator} once the delay
+     * gate elapses.
      */
     private void showLoadingIndicator() {
         switch (loadingIndicator.get()) {
@@ -1519,6 +1526,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                 infoPanel.showMessage("Loading…");
             }
             case GAME_CONSOLE -> gameConsoleOverlay.start();
+            case ASCII_MATRIX -> asciiMatrixOverlay.start();
             case NONE -> { }
         }
     }
@@ -1533,6 +1541,7 @@ public final class ViewerWindow implements AppShell.ShellView {
     private void hideLoadingIndicator() {
         loadingIndicatorDelay.stop();
         gameConsoleOverlay.stop();
+        asciiMatrixOverlay.stop();
     }
 
     private void loadCurrent() {

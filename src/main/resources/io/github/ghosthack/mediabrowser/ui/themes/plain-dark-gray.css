@@ -164,6 +164,14 @@
     -fx-text-fill: #bbbbbb;
 }
 
+/* Avoid Modena's popup-sensitive -fx-text-background-color lookup for
+   disclosure arrows; a failed transient lookup otherwise logs a harmless
+   String-to-Paint ClassCastException from modena.bss. */
+.tree-cell > .tree-disclosure-node > .arrow,
+.tree-table-row-cell > .tree-disclosure-node > .arrow {
+    -fx-background-color: #bbbbbb;
+}
+
 .tree-cell:filled:selected:focused {
     -fx-background-color: #6d6d6d;
     -fx-text-fill: white;
