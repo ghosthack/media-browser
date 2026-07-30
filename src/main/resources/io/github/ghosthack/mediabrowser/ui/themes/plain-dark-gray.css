@@ -321,25 +321,6 @@
     -fx-background-color: #444;
 }
 
-/* Mosaic toolbar. mosaic.css (a Parent stylesheet on the mosaic root, so it
-   outranks this scene-level overlay) paints its toolbar black to match the
-   black grid; on this theme's gray chrome that reads as a mismatched stripe.
-   Redefining its looked-up colours here on .tool-bar wins the lookup — colour
-   resolution starts at the styled node before walking up to the .mosaic-root
-   defaults. Values follow the theme ladder: bar = base #333333 (the border
-   stays the .tool-bar #4d4d4d above), track one step up at #4d4d4d, thumb
-   matching the scrollbar thumb #8a8a8a / #a5a5a5. Harmless no-ops on the
-   browser/viewer toolbars, where nothing references these colours. The
-   mosaic's location bar shares the background colour, so it is retinted
-   alongside the toolbar. */
-.tool-bar,
-.mosaic-location-bar {
-    -mosaic-toolbar-background: #333333;
-    -mosaic-slider-track: #4d4d4d;
-    -mosaic-slider-thumb: #8a8a8a;
-    -mosaic-slider-thumb-active: #a5a5a5;
-}
-
 .status-label {
     -fx-text-fill: #ccc;
 }

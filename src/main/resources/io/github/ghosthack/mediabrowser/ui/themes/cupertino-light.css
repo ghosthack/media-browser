@@ -4901,7 +4901,8 @@ Text {
 }
 .tool-bar > .container > .button,
 .tool-bar > .container > .menu-button,
-.tool-bar > .container > .split-menu-button {
+.tool-bar > .container > .split-menu-button,
+.mosaic-location-bar > .menu-button {
   -color-button-bg: -color-bg-subtle;
   -color-button-bg-hover: -color-base-2;
   -color-button-border-hover: -color-accent-muted;
@@ -4911,7 +4912,8 @@ Text {
 }
 .tool-bar > .container > .button:hover,
 .tool-bar > .container > .menu-button:hover,
-.tool-bar > .container > .split-menu-button:hover {
+.tool-bar > .container > .split-menu-button:hover,
+.mosaic-location-bar > .menu-button:hover {
   -fx-background-insets: 0, 1px;
 }
 .tool-bar > .container > .button.button-icon,

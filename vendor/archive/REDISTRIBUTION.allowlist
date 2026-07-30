@@ -1,0 +1,13 @@
+seven/LICENSE
+seven/NOTICE.md
+seven/PROVENANCE.toml
+seven/vendor/commons-compress/LICENSE.txt
+seven/vendor/commons-compress/NOTICE.txt
+seven/vendor/commons-compress/SOURCES.sha256
+seven/vendor/xz-java/COPYING
+seven/vendor/xz-java/LICENSES/0BSD.txt
+seven/vendor/xz-java/SOURCES.sha256
+unrar/LICENSE
+unrar/NOTICE.md
+unrar/PROVENANCE.toml
+unrar/vendor/junrar/LICENSE

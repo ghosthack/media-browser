@@ -185,7 +185,7 @@ public final class MoveController implements MoveDialogIntents {
      * Whether the move must be refused because its sources live inside an
      * archive, reporting why when it does.
      *
-     * <p>A disc image or zip is immutable, so there is nothing to move
+     * <p>A mounted archive is immutable, so there is nothing to move
      * <em>from</em> — and the move machinery works in path strings, which for an
      * archive entry name only its position inside the container. Refusing here,
      * before the dialog opens, is the honest answer; the alternative would be a

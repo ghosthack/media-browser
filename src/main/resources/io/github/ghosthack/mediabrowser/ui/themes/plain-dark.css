@@ -52,13 +52,17 @@
     -fx-border-color: #3a3a3a;
 }
 
-.button, .toggle-button {
+/* Include MenuButton in the same treatment as Plain Dark Gray. Mosaic's
+   Filter, Sort, Labels, and Location Drives controls are MenuButtons rather
+   than Buttons, so leaving this type out gives them Modena's differing
+   toolbar sizing and surface. */
+.button, .toggle-button, .menu-button {
     -fx-background-color: #000000;
     -fx-text-fill: #bbbbbb;
     -fx-border-color: #2a2a2a;
 }
 
-.button:hover, .toggle-button:hover {
+.button:hover, .toggle-button:hover, .menu-button:hover {
     -fx-background-color: #3a3a3a;
     -fx-text-fill: white;
 }
@@ -69,6 +73,17 @@
 
 .toggle-button:selected:hover {
     -fx-background-color: #3a3a3a;
+    -fx-text-fill: white;
+}
+
+/* Open popup state, matching .toggle-button:selected. */
+.menu-button:showing {
+    -fx-background-color: #1a1a1a;
+}
+
+/* MenuButton renders its text through an inner label, so retint it directly
+   in the hover/open states just as Plain Dark Gray does. */
+.menu-button:hover .label, .menu-button:showing .label {
     -fx-text-fill: white;
 }
 

@@ -1,6 +1,7 @@
 package io.github.ghosthack.mediabrowser.media;
 
 import java.nio.file.Path;
+import java.util.Locale;
 
 /**
  * One entry of a directory listing: the parent link ({@code ..}), a
@@ -16,11 +17,22 @@ import java.nio.file.Path;
  * @param lastModifiedMillis the file's last-modified time in millis since epoch;
  *                          {@code 0} when unknown or inapplicable
  */
-public record DirEntry(Path path, Type type, MediaKind mediaKind, long size, long lastModifiedMillis) {
+public record DirEntry(Path path, Type type, MediaKind mediaKind, long size,
+                       long lastModifiedMillis, FileTraits traits) {
+
+    /** Compatibility constructor for synthetic entries and callers without traits. */
+    public DirEntry(Path path, Type type, MediaKind mediaKind,
+                    long size, long lastModifiedMillis) {
+        this(path, type, mediaKind, size, lastModifiedMillis, FileTraits.NONE);
+    }
+
+    public DirEntry {
+        traits = traits == null ? FileTraits.NONE : traits;
+    }
 
     public enum Type {
         PARENT, DIRECTORY,
-        /** A ZIP or ISO that can be entered as though it were a folder. */
+        /** A supported archive or disc container entered as though it were a folder. */
         ARCHIVE,
         MEDIA, OTHER
     }
@@ -47,14 +59,18 @@ public record DirEntry(Path path, Type type, MediaKind mediaKind, long size, lon
 
     /**
      * The lower-cased file extension (without the dot), or an empty string for
-     * the parent link, directories and extension-less names. A leading dot
-     * (e.g. {@code .bashrc}) counts as the base name, not an extension.
+     * the parent link, directories and extension-less names. For a dotfile
+     * without another dot (e.g. {@code .zshrc}), the name after the leading
+     * dot is used so generated file tiles can display a meaningful label.
      */
     public String extension() {
         if (type == Type.PARENT || type == Type.DIRECTORY) return "";
         String name = displayName();
         int dot = name.lastIndexOf('.');
-        return dot > 0 ? name.substring(dot + 1).toLowerCase() : "";
+        if (dot > 0) return name.substring(dot + 1).toLowerCase(Locale.ROOT);
+        return dot == 0 && name.length() > 1
+                ? name.substring(1).toLowerCase(Locale.ROOT)
+                : "";
     }
 
     public MediaItem toMediaItem() {

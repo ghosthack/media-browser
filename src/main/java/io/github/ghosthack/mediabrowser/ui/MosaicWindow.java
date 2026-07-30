@@ -20,6 +20,11 @@ import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.Thumbnail;
 import io.github.ghosthack.mediabrowser.media.ThumbnailMode;
+import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileClassifier;
+import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileModifier;
+import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTilePaintContext;
+import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileSet;
+import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileSets;
 
 import javafx.animation.Animation;
 import javafx.animation.AnimationTimer;
@@ -39,7 +44,6 @@ import javafx.scene.Node;
 import javafx.scene.SnapshotParameters;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
-import javafx.scene.control.Button;
 import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
@@ -133,10 +137,10 @@ import java.util.function.Supplier;
  * (built by {@link MainWindow} and installed here through {@link #installMenuBar})
  * is shared with the main window and carries a Mosaic menu mirroring these
  * actions (Open, Seamless, tile sizing). The toolbar is shown by
- * default; Mosaic ▸ Show Toolbar ({@code Shortcut+T}) toggles it. An optional
- * location bar below it (Mosaic ▸ Show Location Bar, hidden by default; Go ▸
+ * default; Mosaic ▸ Show Toolbar ({@code Shortcut+T}) toggles it. The
+ * location bar below it (Mosaic ▸ Show Location Bar, also shown by default; Go ▸
  * Go to Location reveals and focuses it) mirrors the current directory into an
- * editable field whose Enter/Go navigates the shared location, like the main
+ * editable field whose Enter key navigates the shared location, like the main
  * window's address bar.</p>
  *
  * <p>The Mosaic menu also carries an Auto-open toggle: while it is on, moving
@@ -166,7 +170,8 @@ import java.util.function.Supplier;
  * is loaded — all behind the delay gate, so a fast/cached folder never flashes
  * one.</p>
  */
-public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
+public final class MosaicWindow
+        implements AppShell.ShellView, ViewerHost, MosaicTilePaintContext.Host {
 
     /** Floor on retained FX images; the live cap grows to cover the viewport. */
     private static final int MIN_CACHED_IMAGES = 400;
@@ -245,12 +250,21 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * {@code Default} style reveals {@link #loadingLabel} (a centred "Loading…"
      * pill), the {@code Game Console} style starts {@link #loadingOverlay} (the
      * bottom-left spinning-CD overlay), {@code ASCII Matrix} starts
-     * {@link #asciiMatrixLoadingOverlay}, and {@code None} shows nothing.
+     * {@link #asciiMatrixLoadingOverlay}, {@code ASCII Matrix (Black Label)}
+     * starts {@link #asciiMatrixBlackLabelLoadingOverlay}, {@code Now Loading}
+     * starts the final-copy-only {@link #nowLoadingOverlay}, and {@code None}
+     * shows nothing.
      */
     private final GameConsoleLoadingOverlay loadingOverlay = new GameConsoleLoadingOverlay();
     /** The grayscale horizontal ASCII-glyph loading overlay. */
     private final AsciiMatrixLoadingOverlay asciiMatrixLoadingOverlay =
             new AsciiMatrixLoadingOverlay();
+    /** Plate-free ASCII streams with an opaque black background only behind their label. */
+    private final AsciiMatrixLoadingOverlay asciiMatrixBlackLabelLoadingOverlay =
+            new AsciiMatrixLoadingOverlay(AsciiMatrixLoadingOverlay.Style.BLACK_LABEL);
+    /** Black Label's final NOW LOADING strip without the horizontal glyph rain. */
+    private final AsciiMatrixLoadingOverlay nowLoadingOverlay =
+            new AsciiMatrixLoadingOverlay(AsciiMatrixLoadingOverlay.Style.NOW_LOADING);
     /** The {@code Default} loading indicator: a centred "Loading…" pill over the grid. */
     private final Label loadingLabel = new Label("Loading\u2026");
     /**
@@ -267,14 +281,17 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * frozen-looking gap until the first thumbnail request appears.
      */
     private boolean scanPending;
+    /** Listing failure for the current directory; its {@code ..} tile remains usable. */
+    private Path failedDirectory;
+    private String scanFailureMessage;
     /** Whether any thumbnail / folder-preview request is currently in flight. */
     private boolean loadingActive;
     /** True while a loading indicator is on screen, so scheduling/hiding stays idempotent. */
     private boolean loadingShown;
     /**
-     * Location bar (its own strip under the toolbar, hidden by default):
+     * Location bar (its own strip under the toolbar, shown by default):
      * mirrors the mosaic's current directory into an editable field whose
-     * Enter/Go navigates the shared location, exactly like the main window's
+     * Enter key navigates the shared location, exactly like the main window's
      * address bar. Toggled via Mosaic ▸ Show Location Bar / Settings ▸ Mosaic.
      */
     private final TextField locationField = new TextField();
@@ -309,8 +326,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
 
     /** On-screen tile size control (nudged by the Mosaic menu). */
     private Slider sizeSlider;
-    /** Toolbar visibility, hidden by default; the Mosaic ▸ Show Toolbar item binds here. */
-    private final BooleanProperty toolbarVisible = new SimpleBooleanProperty(false);
+    /** Toolbar visibility, shown by default; the Mosaic ▸ Show Toolbar item binds here. */
+    private final BooleanProperty toolbarVisible = new SimpleBooleanProperty(true);
     /** Status-bar visibility (the mosaic bar's Show ▸ Status Bar binds here); hidden by default. */
     private final BooleanProperty statusBarVisible = new SimpleBooleanProperty(false);
     /** Info-panel visibility (the mosaic bar's Show ▸ Info Panel binds here); hidden by default. */
@@ -321,8 +338,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     private final BooleanProperty diagnosticsPanelVisible = new SimpleBooleanProperty(false);
     /** Menu-bar visibility (the mosaic bar's Show ▸ Menu Bar binds here); shown by default. */
     private final BooleanProperty menuBarVisible = new SimpleBooleanProperty(true);
-    /** Location-bar visibility (Mosaic ▸ Show Location Bar binds here); hidden by default. */
-    private final BooleanProperty locationBarVisible = new SimpleBooleanProperty(false);
+    /** Location-bar visibility (Mosaic ▸ Show Location Bar binds here); shown by default. */
+    private final BooleanProperty locationBarVisible = new SimpleBooleanProperty(true);
     /** Action-log panel visibility (the mosaic bar's Show ▸ Action Log binds here); hidden by default. */
     private final BooleanProperty actionLogVisible = new SimpleBooleanProperty(false);
     /**
@@ -332,7 +349,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     private final BooleanProperty screensaverPresentation =
             new SimpleBooleanProperty(false);
     /** Crop-to-fill (square) vs. fit-on-black tiles; the toolbar toggle / menu bind here. */
-    private final BooleanProperty fillTiles = new SimpleBooleanProperty(false);
+    private final BooleanProperty fillTiles = new SimpleBooleanProperty(true);
     /**
      * Seamless rendering (the toolbar toggle / Mosaic menu / Settings ▸ Mosaic
      * bind here): while on, tiles are drawn with zero margin and zero border;
@@ -343,14 +360,17 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     /** Media thumbnail and folder-collage visibility; the Mosaic menu binds here. */
     private final BooleanProperty thumbnailsVisible = new SimpleBooleanProperty(true);
     /**
-     * Per-type tile name-caption visibility (the Mosaic menu's Tile Labels
-     * submenu binds here). Folders (and {@code ..}) and non-media files are
-     * captioned by default; media tiles are not (their rendition already
+     * Per-type tile name-caption visibility (the Mosaic menu and toolbar
+     * Labels submenus bind here). Folders (and {@code ..}) and non-media files
+     * are captioned by default; media tiles are not (their rendition already
      * identifies them). Each persists when toggled.
      */
     private final BooleanProperty dirLabelsVisible = new SimpleBooleanProperty(true);
     private final BooleanProperty fileLabelsVisible = new SimpleBooleanProperty(true);
     private final BooleanProperty mediaLabelsVisible = new SimpleBooleanProperty(false);
+    /** Generated-art renderer for non-thumbnail tiles; Current preserves the legacy look. */
+    private final ObjectProperty<MosaicTileSet> tileSet =
+            new SimpleObjectProperty<>(MosaicTileSets.CURRENT);
     /**
      * Folder-glyph style for a folder tile with no preview collage: the muted
      * vector folder shape, its black-on-gray inverse, or a photographic folder
@@ -575,6 +595,16 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     private final Map<Font, Map<String, Double>> captionWidths = new java.util.HashMap<>();
     /** Cached fonts keyed by point size, reused across tiles and frames. */
     private final Map<Double, Font> fontCache = new java.util.HashMap<>();
+    /** Monospaced counterpart used by procedural tile-set stamps. */
+    private final Map<Double, Font> monoFontCache = new java.util.HashMap<>();
+    /** Static name/metadata classification, bounded to the current listing. */
+    private final Map<Path, MosaicTileClassifier.Base> tileVisuals =
+            new java.util.HashMap<>();
+    /** One mutable paint context reused for every visible tile. */
+    private final MosaicTilePaintContext tilePaintContext;
+    /** Third-party painters that failed once; identity-based to avoid plugin equals/hashCode. */
+    private final Set<MosaicTileSet> failedTileSets =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     /**
      * Per-path draw-time user-adjustment cache (rotation + mirror + colour), so
      * the hot draw loop avoids the store's synchronized lock and
@@ -619,6 +649,9 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         this.settings = settings;
         this.rotationStore = rotationStore;
         this.aaeStore = aaeStore;
+        this.tilePaintContext = new MosaicTilePaintContext(this);
+        this.tileSet.set(MosaicTileSets.resolve(settings.mosaicTileSetId()));
+        this.tileSet.addListener((o, was, value) -> requestDraw());
         this.maxEdge = settings.thumbnailMaxEdge();
         this.tileSize = settings.mosaicTileSize();
         this.seamless.set(settings.mosaicSeamless());
@@ -753,6 +786,17 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                 new SeparatorMenuItem(),
                 sortDirectionItem("Ascending", false, sortDescending, sortDirectionGroup),
                 sortDirectionItem("Descending", true, sortDescending, sortDirectionGroup));
+        var labelsButton = new MenuButton("Labels");
+        labelsButton.setTooltip(new Tooltip(
+                "Toggle folder, file, and media tile labels"));
+        var labelFoldersItem = new CheckMenuItem("Folders");
+        labelFoldersItem.selectedProperty().bindBidirectional(dirLabelsVisible);
+        var labelFilesItem = new CheckMenuItem("Files");
+        labelFilesItem.selectedProperty().bindBidirectional(fileLabelsVisible);
+        var labelMediaItem = new CheckMenuItem("Media");
+        labelMediaItem.selectedProperty().bindBidirectional(mediaLabelsVisible);
+        labelsButton.getItems().addAll(
+                labelFoldersItem, labelFilesItem, labelMediaItem);
         var tileLabel = new Label("Tile");
         tileLabel.setPadding(new Insets(0, 0, 0, 10)); // ~1.25-char left margin
         screensaverToggle.setTooltip(new Tooltip(
@@ -763,25 +807,29 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         });
         this.toolBar = new ToolBar(tileLabel, sizeSlider, new Separator(),
                 fillToggle, seamlessToggle, new Separator(), filterButton, sortButton,
-                new Separator(), screensaverToggle);
+                labelsButton, new Separator(), screensaverToggle);
         toolBar.visibleProperty().bind(toolbarVisible);
         toolBar.managedProperty().bind(toolbarVisible);
 
-        // --- location bar (its own strip under the toolbar, hidden by default;
+        // --- location bar (its own strip under the toolbar, shown by default;
         // Mosaic ▸ Show Location Bar toggles it) — mirrors the main window's
-        // address bar: Enter/Go navigates the shared location, so the change
+        // address bar: Enter navigates the shared location, so the change
         // flows back through the host and rebuilds the grid.
         locationField.setOnAction(e -> navigateFromLocation());
         HBox.setHgrow(locationField, Priority.ALWAYS);
-        var goButton = new Button("Go");
-        goButton.setOnAction(e -> navigateFromLocation());
         var drivesButton = new DriveMenuButton(root -> {
             navigator.accept(root);
             canvas.requestFocus();
         });
-        locationBar = new HBox(6, new Label("Location:"), drivesButton, locationField, goButton);
-        locationBar.setPadding(new Insets(4, 8, 4, 8));
-        locationBar.getStyleClass().add("mosaic-location-bar");
+        var locationLabel = new Label("Location");
+        // Match the toolbar's "Tile" label: the shared .tool-bar class supplies
+        // the strip inset and both labels add the same internal left padding.
+        locationLabel.setPadding(new Insets(0, 0, 0, 10));
+        locationBar = new HBox(6, locationLabel, drivesButton, locationField);
+        // This is an HBox rather than a ToolBar because the editable path must
+        // consume all remaining width. Opt it into the same theme class as the
+        // real toolbar so both strips use the Viewer toolbar's active palette.
+        locationBar.getStyleClass().addAll("tool-bar", "mosaic-location-bar");
         locationBar.setStyle("-fx-alignment: center-left;");
         locationBar.visibleProperty().bind(locationBarVisible);
         locationBar.managedProperty().bind(locationBarVisible);
@@ -827,8 +875,14 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         StackPane.setMargin(loadingOverlay, new Insets(0, 0, 6, 6));
         StackPane.setAlignment(asciiMatrixLoadingOverlay, Pos.BOTTOM_LEFT);
         StackPane.setMargin(asciiMatrixLoadingOverlay, new Insets(0, 0, 6, 6));
+        StackPane.setAlignment(asciiMatrixBlackLabelLoadingOverlay, Pos.BOTTOM_LEFT);
+        StackPane.setMargin(
+                asciiMatrixBlackLabelLoadingOverlay, new Insets(0, 0, 6, 0));
+        StackPane.setAlignment(nowLoadingOverlay, Pos.BOTTOM_LEFT);
+        StackPane.setMargin(nowLoadingOverlay, new Insets(0, 0, 6, 0));
         canvasHolder.getChildren().addAll(
                 loadingLabel, loadingOverlay, asciiMatrixLoadingOverlay,
+                asciiMatrixBlackLabelLoadingOverlay, nowLoadingOverlay,
                 screensaverOverlay);
         // Once the delay gate fires, the backlog is still loading, so reveal
         // whichever indicator the viewer's setting selects.
@@ -937,14 +991,13 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         root.setTop(topBox);
         root.setBottom(bottomBox);
         root.setStyle("-fx-background-color: black;");
-        // Anchor for mosaic.css's looked-up colour defaults (the themeable
-        // toolbar/slider tints) — .root only matches when this view is the
-        // scene root, which single-window mode doesn't guarantee.
+        // Stable scope hook for Mosaic-only rules. Keep palette rules in the
+        // selected theme so Mosaic controls cannot override Cupertino, Default
+        // JavaFX, or any other active theme merely because mosaic.css is local.
         root.getStyleClass().add("mosaic-root");
 
-        // On the root (not the shared scene): Parent stylesheets sit above the
-        // scene's theme overlay, preserving the old css-over-theme ordering, and
-        // they leave with the root when another view takes the window.
+        // On the root (not the shared scene), so Mosaic-only behavior leaves
+        // with the view when another view takes the window.
         var css = MosaicWindow.class.getResource("mosaic.css");
         if (css != null) root.getStylesheets().add(css.toExternalForm());
         // Every input delivered to Mosaic resets its app-local idle clock. If
@@ -1165,7 +1218,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                 !settings.inWindowMenu());
     }
 
-    /** Toolbar visibility (Mosaic ▸ Show Toolbar binds here); hidden by default. */
+    /** Toolbar visibility (Mosaic ▸ Show Toolbar binds here); shown by default. */
     public BooleanProperty toolbarVisibleProperty() {
         return toolbarVisible;
     }
@@ -1194,7 +1247,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         return menuBarVisible;
     }
 
-    /** Location-bar visibility (Mosaic ▸ Show Location Bar binds here); hidden by default. */
+    /** Location-bar visibility (Mosaic ▸ Show Location Bar binds here); shown by default. */
     public BooleanProperty locationBarVisibleProperty() {
         return locationBarVisible;
     }
@@ -1219,7 +1272,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         locationField.selectAll();
     }
 
-    /** Crop-to-fill toggle (Mosaic ▸ Fill Tiles / toolbar bind here); fit by default. */
+    /** Crop-to-fill toggle (Mosaic ▸ Fill Tiles / toolbar bind here); fill by default. */
     public BooleanProperty fillTilesProperty() {
         return fillTiles;
     }
@@ -1244,27 +1297,33 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     }
 
     /**
-     * Folder (and {@code ..}) tile name-caption visibility (Mosaic menu's Tile
-     * Labels submenu binds here); shown by default. Persists when toggled.
+     * Folder (and {@code ..}) tile name-caption visibility (Mosaic menu and
+     * toolbar Labels submenus bind here); shown by default. Persists when
+     * toggled.
      */
     public BooleanProperty dirLabelsVisibleProperty() {
         return dirLabelsVisible;
     }
 
     /**
-     * Non-media file tile name-caption visibility (Mosaic menu's Tile Labels
-     * submenu binds here); shown by default. Persists when toggled.
+     * Non-media file tile name-caption visibility (Mosaic menu and toolbar
+     * Labels submenus bind here); shown by default. Persists when toggled.
      */
     public BooleanProperty fileLabelsVisibleProperty() {
         return fileLabelsVisible;
     }
 
     /**
-     * Media tile name-caption visibility (Mosaic menu's Tile Labels submenu
-     * binds here); hidden by default. Persists when toggled.
+     * Media tile name-caption visibility (Mosaic menu and toolbar Labels
+     * submenus bind here); hidden by default. Persists when toggled.
      */
     public BooleanProperty mediaLabelsVisibleProperty() {
         return mediaLabelsVisible;
+    }
+
+    /** Live mosaic tile-set choice; persistence is owned by the Settings dialog. */
+    public ObjectProperty<MosaicTileSet> tileSetProperty() {
+        return tileSet;
     }
 
     /**
@@ -1554,6 +1613,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                 case PARENT -> "Parent folder";
                 case DIRECTORY -> "Folder";
                 case ARCHIVE -> "iso".equals(lead.extension())
+                        || "cue".equals(lead.extension())
                         ? "Reading disc image…" : "Reading archive…";
                 default -> "Not viewable media";
             });
@@ -1597,24 +1657,33 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
     }
 
     /**
-     * Fills the info panel's File section for the lead tile — name, size and
-     * timestamps from an async filesystem stat, independent of the probe — or
-     * clears it for the parent link and folders. Guarded on {@code gen} like
-     * the probe itself; mirrors {@code MainWindow.updateFileFacts}.
+     * Fills the info panel's File section for the lead tile: files show name,
+     * size and timestamps; folders show name, timestamps, and an Items row only
+     * when an existing listing or preview already supplied the direct-child
+     * count. Guarded on {@code gen} like the probe itself; mirrors
+     * {@code MainWindow.updateFileFacts}.
      */
     private void updateFileFacts(DirEntry lead, int gen) {
-        if (lead.type() == DirEntry.Type.PARENT || lead.type() == DirEntry.Type.DIRECTORY) {
+        if (lead.type() == DirEntry.Type.PARENT) {
             infoPanel.clearFileFacts();
             return;
+        }
+        boolean folder = lead.type() == DirEntry.Type.DIRECTORY;
+        if (folder) {
+            infoPanel.showFileFacts(InfoPanel.folderFactRows(
+                    lead.displayName(), service.knownFolderItemCount(lead.path())));
         }
         service.fileFacts(lead.path()).whenComplete((facts, error) ->
                 Platform.runLater(() -> {
                     if (gen != probeSequence) return;
                     if (error != null) {
-                        infoPanel.clearFileFacts();
+                        if (!folder) infoPanel.clearFileFacts();
                     } else {
-                        infoPanel.showFileFacts(
-                                InfoPanel.fileFactRows(lead.displayName(), facts));
+                        infoPanel.showFileFacts(folder
+                                ? InfoPanel.folderFactRows(
+                                        lead.displayName(), facts,
+                                        service.knownFolderItemCount(lead.path()))
+                                : InfoPanel.fileFactRows(lead.displayName(), facts));
                     }
                 }));
     }
@@ -1739,6 +1808,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         this.dirLabelsVisible.set(settings.mosaicDirLabelsVisible());
         this.fileLabelsVisible.set(settings.mosaicFileLabelsVisible());
         this.mediaLabelsVisible.set(settings.mosaicMediaLabelsVisible());
+        this.tileSet.set(MosaicTileSets.resolve(settings.mosaicTileSetId()));
         this.folderGlyph.set(settings.mosaicFolderGlyph());
         this.selectionAnimation.set(settings.mosaicSelectionAnimation());
         setAnimationPeriodMs(settings.mosaicPulsePeriodMs());
@@ -2003,6 +2073,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                     case OTHER -> filterOther.get();
                 })
                 .toList();
+        tileVisuals.clear();
         mosaicDir = dir;
         boolean reveal = false;
         // A pending focus path — set after navigating up via ../Backspace, or by
@@ -2129,6 +2200,9 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             // The listing had rows; the media-type filters removed them all.
             return listed + (listed == 1 ? " item hidden by " : " items hidden by ")
                     + disabledFilterNames();
+        }
+        if (Objects.equals(mosaicDir, failedDirectory) && scanFailureMessage != null) {
+            return "Can't read this folder — " + scanFailureMessage;
         }
         FolderPreview here = mosaicDir == null ? null : folderPreviews.get(mosaicDir);
         var hidden = mosaicDir == null ? null : service.hiddenIn(mosaicDir);
@@ -2336,8 +2410,11 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * Shows whichever loading indicator the viewer's setting selects over the
      * grid: {@link LoadingIndicator#DEFAULT} a centred "Loading…" pill, {@link
      * LoadingIndicator#GAME_CONSOLE} the bottom-left spinning-CD overlay, or
-     * {@link LoadingIndicator#ASCII_MATRIX} the grayscale horizontal glyph rain.
-     * Reached via {@link #scheduleLoadingIndicator} once the delay gate elapses.
+     * {@link LoadingIndicator#ASCII_MATRIX} the grayscale horizontal glyph rain,
+     * with {@link LoadingIndicator#ASCII_MATRIX_BLACK_LABEL} providing its
+     * black-label alternate and {@link LoadingIndicator#NOW_LOADING} retaining
+     * only the final animated copy strip. Reached via
+     * {@link #scheduleLoadingIndicator} once the delay gate elapses.
      */
     private void showLoadingIndicator() {
         loadingShown = true;
@@ -2345,6 +2422,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
             case DEFAULT -> loadingLabel.setVisible(true);
             case GAME_CONSOLE -> loadingOverlay.start();
             case ASCII_MATRIX -> asciiMatrixLoadingOverlay.start();
+            case ASCII_MATRIX_BLACK_LABEL -> asciiMatrixBlackLabelLoadingOverlay.start();
+            case NOW_LOADING -> nowLoadingOverlay.start();
             case NONE -> { }
         }
     }
@@ -2360,6 +2439,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         loadingLabel.setVisible(false);
         loadingOverlay.stop();
         asciiMatrixLoadingOverlay.stop();
+        asciiMatrixBlackLabelLoadingOverlay.stop();
+        nowLoadingOverlay.stop();
     }
 
     /**
@@ -2372,6 +2453,8 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      * {@link #rebuild} once the listing arrives.
      */
     public void onDirectoryScanStarted(Path target) {
+        failedDirectory = null;
+        scanFailureMessage = null;
         if (!active) return;
         scanPending = true;
         if (target != null) {
@@ -2380,6 +2463,16 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                     ? target.getFileName().toString() : target.toString()) + " — Mosaic");
         }
         refreshLoadingState();
+    }
+
+    /**
+     * Records a failed listing so the grid can explain the unreadable folder
+     * while the host supplies a navigation-only {@code ..} tile.
+     */
+    public void onDirectoryScanFailed(Path target, String message) {
+        failedDirectory = target;
+        scanFailureMessage = message;
+        if (active) relayout();
     }
 
     /**
@@ -2417,13 +2510,16 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         g.setFill(Color.BLACK);
         g.fillRect(cx, cy, tileSize, tileSize);
 
-        switch (item.type()) {
-            case MEDIA -> drawMediaContent(g, item, cx, cy);
-            case DIRECTORY -> drawFolderContent(g, item, cx, cy);
-            case ARCHIVE -> drawArchiveContent(g, item, cx, cy);
-            case PARENT -> drawParentContent(g, cx, cy);
-            case OTHER -> drawOtherContent(g, item, cx, cy);
-        }
+        FolderPreview preview = item.type() == DirEntry.Type.DIRECTORY
+                ? folderPreviewFor(item.path()) : null;
+        int dynamicModifiers = dynamicModifiers(item, preview);
+        MosaicTileClassifier.Base base = tileVisuals.computeIfAbsent(
+                item.path(), ignored -> MosaicTileClassifier.classify(item));
+        tilePaintContext.reset(g, item, base,
+                preview == null ? null : preview.verdict(),
+                cx, cy, tileSize, dynamicModifiers);
+        MosaicTileSet painter = tileSet.get();
+        paintTileSet(painter == null ? MosaicTileSets.CURRENT : painter);
 
         // The brightness pulse (PULSE style) tints the lead/cursor tile, painted
         // over the content but under the selection marker so the marker stays
@@ -2444,6 +2540,128 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                     ? marchPhase : 0;
             drawSelectionBorder(g, x, y, outer, phase);
         }
+    }
+
+    /**
+     * Isolates service-loaded painters from the host canvas. A broken provider
+     * falls back to Current after its first failure instead of breaking Mosaic's
+     * entire draw loop; built-ins avoid the extra save/restore in the hot path.
+     */
+    private void paintTileSet(MosaicTileSet painter) {
+        if (failedTileSets.contains(painter)) {
+            MosaicTileSets.CURRENT.paint(tilePaintContext);
+            return;
+        }
+        if (painter == MosaicTileSets.CURRENT
+                || painter == MosaicTileSets.XEDGE
+                || painter == MosaicTileSets.XEDGE_COLOR
+                || painter == MosaicTileSets.XEDGE_SHARP
+                || painter == MosaicTileSets.XEDGE_LITE
+                || painter == MosaicTileSets.XEDGE_ADDITIVE
+                || painter == MosaicTileSets.DARKROOM
+                || painter == MosaicTileSets.FACTORY
+                || painter == MosaicTileSets.BLACKLINE) {
+            painter.paint(tilePaintContext);
+            return;
+        }
+        GraphicsContext graphics = tilePaintContext.graphics();
+        boolean failed = false;
+        graphics.save();
+        try {
+            painter.paint(tilePaintContext);
+        } catch (RuntimeException | LinkageError error) {
+            failed = true;
+            failedTileSets.add(painter);
+            System.err.println("Mosaic tile set failed; using Current: " + error);
+        } finally {
+            graphics.restore();
+        }
+        if (failed) MosaicTileSets.CURRENT.paint(tilePaintContext);
+    }
+
+    private int dynamicModifiers(DirEntry item, FolderPreview preview) {
+        int modifiers = 0;
+        if (preview != null) {
+            modifiers |= switch (preview.verdict()) {
+                case EMPTY -> MosaicTileModifier.EMPTY.mask();
+                case JUNK_ONLY -> MosaicTileModifier.JUNK_ONLY.mask();
+                case UNREADABLE -> MosaicTileModifier.UNREADABLE.mask();
+                default -> 0;
+            };
+        } else if (item.type() == DirEntry.Type.DIRECTORY
+                && folderPending.contains(item.path())) {
+            modifiers |= MosaicTileModifier.THUMBNAIL_PENDING.mask();
+        }
+        if (item.type() == DirEntry.Type.MEDIA) {
+            if (pending.contains(item.path())) {
+                modifiers |= MosaicTileModifier.THUMBNAIL_PENDING.mask();
+            } else if (empties.contains(item.path())) {
+                modifiers |= MosaicTileModifier.THUMBNAIL_FAILED.mask();
+            }
+        }
+        return modifiers;
+    }
+
+    /** Exact legacy renderer, exposed to the built-in Current tile-set adapter. */
+    @Override
+    public void paintCurrent(MosaicTilePaintContext context) {
+        DirEntry item = context.entry();
+        switch (item.type()) {
+            case MEDIA -> drawMediaContent(context.graphics(), item, context.x(), context.y());
+            case DIRECTORY -> drawFolderContent(context.graphics(), item, context.x(), context.y());
+            case ARCHIVE -> drawArchiveContent(context.graphics(), item, context.x(), context.y());
+            case PARENT -> drawParentContent(context.graphics(), context.x(), context.y());
+            case OTHER -> drawOtherContent(context.graphics(), item, context.x(), context.y());
+        }
+    }
+
+    @Override
+    public boolean drawMediaThumbnail(MosaicTilePaintContext context) {
+        if (!thumbnailsVisible.get()) return false;
+        Image image = imageFor(context.entry().path());
+        if (image == null) return false;
+        drawScaled(context.graphics(), context.entry().path(), image,
+                context.x(), context.y(), context.size(), context.size());
+        return true;
+    }
+
+    @Override
+    public boolean drawFolderCollage(MosaicTilePaintContext context) {
+        return drawFolderCollage(
+                context.graphics(), context.entry(), context.x(), context.y());
+    }
+
+    @Override
+    public void drawCaption(MosaicTilePaintContext context) {
+        DirEntry entry = context.entry();
+        boolean visible = switch (entry.type()) {
+            case PARENT, DIRECTORY, ARCHIVE -> dirLabelsVisible.get();
+            case MEDIA -> mediaLabelsVisible.get();
+            case OTHER -> fileLabelsVisible.get();
+        };
+        if (visible) {
+            drawCaption(context.graphics(),
+                    entry.type() == DirEntry.Type.PARENT ? ".." : entry.displayName(),
+                    context.x(), context.y());
+        }
+    }
+
+    @Override
+    public void drawReticule(MosaicTilePaintContext context) {
+        if (context.entry().type() != DirEntry.Type.DIRECTORY) return;
+        drawReticule(context.graphics(), folderPreviewFor(context.entry().path()),
+                context.entry().path(), context.x(), context.y());
+    }
+
+    @Override
+    public Font tileFont(double size, boolean monospaced) {
+        if (!monospaced) return font(size);
+        return monoFontCache.computeIfAbsent(size, value -> Font.font("Monospaced", value));
+    }
+
+    @Override
+    public double textWidth(String text, Font font) {
+        return measureCaptionWidth(text, font);
     }
 
     /** A media tile: its fitted rendition, or a kind-aware placeholder glyph. */
@@ -2470,6 +2688,16 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
      */
     private void drawFolderContent(GraphicsContext g, DirEntry item, double cx, double cy) {
         FolderPreview preview = folderPreviewFor(item.path());
+        boolean drew = drawFolderCollage(g, item, cx, cy);
+        if (!drew) drawFolderGlyph(g, cx, cy);
+        drawReticule(g, preview, item.path(), cx, cy);
+        if (dirLabelsVisible.get()) drawCaption(g, item.displayName(), cx, cy);
+    }
+
+    /** Draws only the child-image collage, returning whether any image landed. */
+    private boolean drawFolderCollage(
+            GraphicsContext g, DirEntry item, double cx, double cy) {
+        FolderPreview preview = folderPreviewFor(item.path());
         List<Path> children = preview == null || !thumbnailsVisible.get() || folderPreviewGrid <= 0
                 ? null : preview.previews();
         boolean drew = false;
@@ -2485,9 +2713,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
                 drew = true;
             }
         }
-        if (!drew) drawFolderGlyph(g, cx, cy);
-        drawReticule(g, preview, item.path(), cx, cy);
-        if (dirLabelsVisible.get()) drawCaption(g, item.displayName(), cx, cy);
+        return drew;
     }
 
     /**
@@ -2533,7 +2759,7 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
 
     /**
      * An archive tile: the folder glyph — an archive <em>is</em> browsed as a
-     * folder — stamped with its format ({@code ZIP}, {@code ISO}, {@code CBZ})
+     * folder — stamped with its extension ({@code ZIP}, {@code RAR}, {@code CUE})
      * so it reads as a container at a glance rather than as an ordinary
      * directory. No preview collage: enumerating a 650 MB image to thumbnail
      * four of its files is far too much work for a tile the user has not asked
@@ -2572,8 +2798,14 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
 
     /** The {@code ..} parent tile: an up-arrow glyph captioned "..". */
     private void drawParentContent(GraphicsContext g, double cx, double cy) {
-        drawGlyph(g, "\u2191", cx, cy, tileSize);
+        drawGlyphAtFontSize(
+                g, "\u2191", cx, cy, parentGlyphFontSize(tileSize));
         if (dirLabelsVisible.get()) drawCaption(g, "..", cx, cy);
+    }
+
+    /** Current and Xedge scale their parent arrow continuously with the tile. */
+    static double parentGlyphFontSize(double tileSize) {
+        return tileSize / 3.0;
     }
 
     /** A non-media file tile: its (faint) uppercase extension, or a dash. */
@@ -2867,8 +3099,15 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
 
     /** A faint centred glyph sized to {@code span} (capped), for empty/loading tiles. */
     private void drawGlyph(GraphicsContext g, String glyph, double cx, double cy, double span) {
+        drawGlyphAtFontSize(g, glyph, cx, cy, Math.min(40, span / 3.0));
+    }
+
+    /** Draws a centred glyph at an explicit font size. */
+    private void drawGlyphAtFontSize(
+            GraphicsContext g, String glyph,
+            double cx, double cy, double fontSize) {
         g.setFill(GLYPH_FILL);
-        g.setFont(font(Math.min(40, span / 3.0)));
+        g.setFont(font(fontSize));
         g.setTextAlign(TextAlignment.CENTER);
         g.setTextBaseline(VPos.CENTER);
         g.fillText(glyph, cx + tileSize / 2.0, cy + tileSize / 2.0);
@@ -3083,6 +3322,17 @@ public final class MosaicWindow implements AppShell.ShellView, ViewerHost {
         // saw nothing at all. The reticule marks it differently for that reason.
         folderPreviews.put(dir,
                 error != null || preview == null ? FolderPreview.UNREADABLE : preview);
+        // If this folder is still the focused tile, surface the count learned
+        // by the preview's existing directory walk. This is a cache read only;
+        // selecting a folder never starts a listing just to count its children.
+        if (infoPanelVisible.get() && selection.size() == 1
+                && selected >= 0 && selected < items.size()) {
+            DirEntry lead = items.get(selected);
+            if (lead.type() == DirEntry.Type.DIRECTORY && lead.path().equals(dir)) {
+                service.knownFolderItemCount(dir)
+                        .ifPresent(infoPanel::showKnownFolderItemCount);
+            }
+        }
         refreshLoadingState();
         requestDraw();
     }

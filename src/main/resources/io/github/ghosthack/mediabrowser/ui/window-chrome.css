@@ -31,9 +31,9 @@
 }
 
 /*
- * Property/value tables are self-explanatory inside the named Info and
- * Metadata panels. Remove the otherwise-repeated "Property" / "Value" strip
- * without affecting tables elsewhere in the application.
+ * Property/value tables are self-explanatory inside the named Info,
+ * Diagnostics, and Metadata panels. Remove the otherwise-repeated
+ * "Property" / "Value" strip without affecting tables elsewhere in the app.
  */
 .headerless-table .column-header-background {
     -fx-min-height: 0;

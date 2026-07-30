@@ -46,8 +46,9 @@ public final class DiagnosticsPanel extends VBox {
         var header = new HBox(title, spacer, update);
         header.setAlignment(Pos.CENTER_LEFT);
         header.setStyle("-fx-padding: 0 4 0 0;");
+        header.getStyleClass().addAll("tool-bar", "side-panel-header");
 
-        InfoPanel.addPropertyValueColumns(table);
+        InfoPanel.configurePropertyValueTable(table);
         VBox.setVgrow(table, Priority.ALWAYS);
 
         getChildren().addAll(header, table);

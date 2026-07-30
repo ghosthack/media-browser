@@ -17,13 +17,14 @@ import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.VideoPlayer;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 import io.github.ghosthack.mediabrowser.media.move.FileOps;
+import io.github.ghosthack.mediabrowser.ui.icon.AppIcon;
+import io.github.ghosthack.mediabrowser.ui.icon.IconBinding;
 
 import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
-import javafx.beans.binding.Bindings;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.ReadOnlyBooleanProperty;
@@ -42,6 +43,7 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.ContextMenu;
+import javafx.scene.control.Control;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.Menu;
@@ -49,7 +51,6 @@ import javafx.scene.control.MenuBar;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.RadioButton;
-import javafx.scene.control.RadioMenuItem;
 import javafx.scene.control.ScrollBar;
 import javafx.scene.control.Slider;
 import javafx.scene.control.SplitPane;
@@ -149,6 +150,9 @@ import java.util.function.Consumer;
  * viewer is hidden.</p>
  */
 public final class ViewerWindow implements AppShell.ShellView {
+
+    /** Shared baseline for icon, text, menu, and separator controls in the toolbar. */
+    private static final double TOOLBAR_CONTROL_HEIGHT = 30;
 
     /** How the viewport scales the decoded visual. */
     public enum ScaleMode {
@@ -255,11 +259,13 @@ public final class ViewerWindow implements AppShell.ShellView {
     private boolean slideshowReverse;
     /**
      * Flipbook: buffered image-sequence playback — the directory's same-size
-     * images are fully preloaded into memory, then looped like a video at
-     * {@link #flipbookFps}. The toggle is runtime-only — only the frame rate
-     * persists (Viewer ▸ Flipbook Settings…), seeded into the field below.
+     * images are fully preloaded into memory, then played like a video at
+     * {@link #flipbookFps}. Playback itself is runtime-only; the frame rate and
+     * loop mode persist (Viewer ▸ Flipbook Settings…).
      */
     private final ToggleButton flipbookToggle = new ToggleButton("Flipbook");
+    /** Whether the flipbook wraps from its last frame to its first; persisted, on by default. */
+    private final ToggleButton flipbookLoopToggle = new ToggleButton("Loop");
     /** Drives the flipbook frame ticks while playing; {@code null} otherwise. */
     private Timeline flipbookTimeline;
     /** Flipbook frame rate in frames per second (1..60); seeded from settings. */
@@ -295,6 +301,12 @@ public final class ViewerWindow implements AppShell.ShellView {
     private final GameConsoleLoadingOverlay gameConsoleOverlay = new GameConsoleLoadingOverlay();
     /** The grayscale horizontal ASCII-glyph overlay, sharing the same bottom-left anchor. */
     private final AsciiMatrixLoadingOverlay asciiMatrixOverlay = new AsciiMatrixLoadingOverlay();
+    /** Plate-free ASCII streams with an opaque black background only behind their label. */
+    private final AsciiMatrixLoadingOverlay asciiMatrixBlackLabelOverlay =
+            new AsciiMatrixLoadingOverlay(AsciiMatrixLoadingOverlay.Style.BLACK_LABEL);
+    /** Black Label's final NOW LOADING strip without the horizontal glyph rain. */
+    private final AsciiMatrixLoadingOverlay nowLoadingOverlay =
+            new AsciiMatrixLoadingOverlay(AsciiMatrixLoadingOverlay.Style.NOW_LOADING);
     /**
      * Gates the loading indicator behind {@link AppSettings#viewerLoadingIndicatorDelayMs}:
      * armed when a load starts, it shows the indicator only if the decode is
@@ -411,16 +423,29 @@ public final class ViewerWindow implements AppShell.ShellView {
         this.rotationStore = rotationStore;
         this.aaeStore = aaeStore;
 
+        IconBinding.install(prevButton, AppIcon.PREVIOUS, "◀", "",
+                "Previous media");
+        IconBinding.install(nextButton, AppIcon.NEXT, "▶", "",
+                "Next media");
         prevButton.setTooltip(new Tooltip("Previous media in this directory (Left)"));
         nextButton.setTooltip(new Tooltip("Next media in this directory (Right)"));
         prevButton.setOnAction(e -> navigate(-1));
         nextButton.setOnAction(e -> navigate(1));
 
-        playButton.textProperty().bind(Bindings.when(playButton.selectedProperty())
-                .then("❚❚ Pause").otherwise("▶ Play"));
+        var playIcon = IconBinding.install(playButton, AppIcon.PLAY, "▶ Play", "Play",
+                "Play or pause video");
+        playButton.selectedProperty().addListener((obs, was, selected) ->
+                playIcon.update(selected ? AppIcon.PAUSE : AppIcon.PLAY,
+                        selected ? "❚❚ Pause" : "▶ Play",
+                        selected ? "Pause" : "Play"));
         playButton.setTooltip(new Tooltip("Play/pause video (Space)"));
         playButton.setDisable(true);
         playButton.setOnAction(e -> onPlayToggled());
+
+        IconBinding.install(toolbarPin, AppIcon.PIN, "📌", "", "Pin toolbar");
+        IconBinding.install(infoPin, AppIcon.PIN, "📌", "", "Pin info panel");
+        IconBinding.install(metadataPin, AppIcon.PIN, "📌", "", "Pin metadata panel");
+        IconBinding.install(statusPin, AppIcon.PIN, "📌", "", "Pin status bar");
 
         // Continuous replay: on by default, so a finished video loops from the
         // top instead of stopping. Honored by the playback end-of-stream hook.
@@ -449,14 +474,26 @@ public final class ViewerWindow implements AppShell.ShellView {
 
         // Flipbook: buffered image-sequence playback. The toggle kicks off a
         // full in-memory preload of the directory's same-size images, then
-        // loops them like a video at the configured frame rate (1..60 fps,
-        // seeded from settings and edited live via the Flipbook dialog).
+        // plays them like a video at the configured frame rate (1..60 fps).
+        // Frame rate and loop mode are seeded from settings and edited live.
         flipbookFps = settings.viewerFlipbookFps();
         flipbookToggle.setTooltip(new Tooltip());
+        flipbookLoopToggle.setSelected(settings.viewerFlipbookLoop());
+        flipbookLoopToggle.setTooltip(new Tooltip());
         updateFlipbookTooltip();
         flipbookToggle.selectedProperty().addListener((obs, was, on) -> {
             if (on) startFlipbook();
             else stopFlipbook();
+        });
+        flipbookLoopToggle.selectedProperty().addListener((obs, was, on) -> {
+            settings.setViewerFlipbookLoop(on);
+            updateFlipbookTooltip();
+            rebuildFlipbookTimeline();
+            try {
+                settings.save();
+            } catch (java.io.IOException ignored) {
+                // The live mode still applies for this session.
+            }
         });
 
         // The crop-to-fill toggle is a two-way mirror of the CROP_TO_FILL scale
@@ -515,7 +552,8 @@ public final class ViewerWindow implements AppShell.ShellView {
             if (metadataToggle.isSelected() && metadataPanel.isAutoLoad()) fireMetadataRead();
         });
         diagnosticsToggle.setTooltip(new Tooltip(
-                "Show/hide the thumbnail-pipeline diagnostics panel"));
+                "Show/hide the thumbnail-pipeline diagnostics panel ("
+                        + shortcutChord(KeyCode.G) + ")"));
 
         // Right-edge panels live in a vertical SplitPane; membership follows each
         // toggle (a hidden panel leaves no empty divider, all-hidden collapses).
@@ -560,22 +598,18 @@ public final class ViewerWindow implements AppShell.ShellView {
         shell.fullScreenProperty().addListener(
                 (obs, was, is) -> fullScreenToggle.setSelected(is));
 
-        // The toolbar carries a menu-button picker whose radios mirror the
-        // Viewer ▸ Loading Indicator submenu via the shared property.
-        var loadingGroup = new ToggleGroup();
-        var loadingMenuButton = new MenuButton("Loading", null,
-                loadingRadio("None", LoadingIndicator.NONE, loadingGroup),
-                loadingRadio("Basic label", LoadingIndicator.DEFAULT, loadingGroup),
-                loadingRadio("Game Console", LoadingIndicator.GAME_CONSOLE, loadingGroup),
-                loadingRadio("ASCII Matrix", LoadingIndicator.ASCII_MATRIX, loadingGroup));
-        loadingMenuButton.setTooltip(new Tooltip("Loading indicator shown while the "
-                + "next media loads"));
-
         this.toolBar = new ToolBar(toolbarPin, new Separator(),
                 prevButton, nextButton, new Separator(),
-                playButton, repeatToggle, autoplayToggle, slideshowToggle, flipbookToggle, new Separator(), cropToggle, new Separator(),
-                loadingMenuButton, infoToggle, metadataToggle, diagnosticsToggle,
+                playButton, repeatToggle, autoplayToggle, slideshowToggle,
+                flipbookToggle, flipbookLoopToggle, new Separator(), cropToggle, new Separator(),
+                infoToggle, metadataToggle, diagnosticsToggle,
                 statusToggle, toolbarToggle, pinsToggle, fullScreenToggle);
+        for (Node item : toolBar.getItems()) {
+            if (item instanceof Control control) {
+                control.setMinHeight(TOOLBAR_CONTROL_HEIGHT);
+                control.setPrefHeight(TOOLBAR_CONTROL_HEIGHT);
+            }
+        }
         toolBar.visibleProperty().bind(toolbarToggle.selectedProperty());
         toolBar.managedProperty().bind(toolbarToggle.selectedProperty());
 
@@ -604,8 +638,13 @@ public final class ViewerWindow implements AppShell.ShellView {
         StackPane.setMargin(gameConsoleOverlay, new Insets(0, 0, 6, 6));
         StackPane.setAlignment(asciiMatrixOverlay, Pos.BOTTOM_LEFT);
         StackPane.setMargin(asciiMatrixOverlay, new Insets(0, 0, 6, 6));
+        StackPane.setAlignment(asciiMatrixBlackLabelOverlay, Pos.BOTTOM_LEFT);
+        StackPane.setMargin(asciiMatrixBlackLabelOverlay, new Insets(0, 0, 6, 0));
+        StackPane.setAlignment(nowLoadingOverlay, Pos.BOTTOM_LEFT);
+        StackPane.setMargin(nowLoadingOverlay, new Insets(0, 0, 6, 0));
         viewport = new StackPane(imageView, placeholder, gameConsoleOverlay,
-                asciiMatrixOverlay, hScroll, vScroll);
+                asciiMatrixOverlay, asciiMatrixBlackLabelOverlay, nowLoadingOverlay,
+                hScroll, vScroll);
         viewport.setStyle("-fx-background-color: black;");
         // The viewport is the viewer's keyboard focus target. The scene key
         // filter drives navigation (siblings, Home/End, Escape…), but a focused
@@ -769,7 +808,8 @@ public final class ViewerWindow implements AppShell.ShellView {
                 // The chrome toggles are gated behind modifier1 (Cmd/Ctrl),
                 // matching the letter shortcuts in the mosaic and main windows
                 // (Copy Path, Move, Select All): modifier1+T toolbar, +S status
-                // bar, +I info panel, +D metadata panel, +P per-panel pins.
+                // bar, +I info panel, +D metadata panel, +G diagnostics,
+                // +P per-panel pins.
                 case T -> {
                     if (e.isShortcutDown()) {
                         toolbarToggle.setSelected(!toolbarToggle.isSelected());
@@ -794,6 +834,12 @@ public final class ViewerWindow implements AppShell.ShellView {
                 case D -> {
                     if (e.isShortcutDown()) {
                         metadataToggle.setSelected(!metadataToggle.isSelected());
+                        e.consume();
+                    }
+                }
+                case G -> {
+                    if (e.isShortcutDown()) {
+                        diagnosticsToggle.setSelected(!diagnosticsToggle.isSelected());
                         e.consume();
                     }
                 }
@@ -1037,24 +1083,9 @@ public final class ViewerWindow implements AppShell.ShellView {
         return pinsToggle.selectedProperty();
     }
 
-    /** Loading-indicator style (Viewer ▸ Loading Indicator submenu binds here); NONE by default. */
+    /** Loading-indicator style; configured through Settings and Viewer ▸ Loading Indicator. */
     public ObjectProperty<LoadingIndicator> loadingIndicatorProperty() {
         return loadingIndicator;
-    }
-
-    /**
-     * A {@link RadioMenuItem} for the toolbar's loading-indicator picker, bound to
-     * {@link #loadingIndicator} (the menu-bar submenu builds its own equivalents
-     * against the same property, so both stay in sync). Mirrors MainWindow's
-     * {@code objRadio} helper.
-     */
-    private RadioMenuItem loadingRadio(String text, LoadingIndicator value, ToggleGroup group) {
-        var item = new RadioMenuItem(text);
-        item.setToggleGroup(group);
-        item.setSelected(loadingIndicator.get() == value);
-        item.setOnAction(e -> loadingIndicator.set(value));
-        loadingIndicator.addListener((o, a, b) -> item.setSelected(b == value));
-        return item;
     }
 
     /** Full-screen state (Viewer ▸ Full Screen binds here). */
@@ -1085,6 +1116,11 @@ public final class ViewerWindow implements AppShell.ShellView {
     /** Flipbook (buffered image-sequence playback) on/off (Viewer ▸ Flipbook binds here); off by default. */
     public BooleanProperty flipbookProperty() {
         return flipbookToggle.selectedProperty();
+    }
+
+    /** Flipbook wrap mode (Viewer ▸ Flipbook Loop binds here); on by default. */
+    public BooleanProperty flipbookLoopProperty() {
+        return flipbookLoopToggle.selectedProperty();
     }
 
     /** True when the navigation ring has a single item (Previous / Next n/a). */
@@ -1479,6 +1515,10 @@ public final class ViewerWindow implements AppShell.ShellView {
     private void applyLoadingIndicator(LoadingIndicator mode) {
         if (mode != LoadingIndicator.GAME_CONSOLE) gameConsoleOverlay.stop();
         if (mode != LoadingIndicator.ASCII_MATRIX) asciiMatrixOverlay.stop();
+        if (mode != LoadingIndicator.ASCII_MATRIX_BLACK_LABEL) {
+            asciiMatrixBlackLabelOverlay.stop();
+        }
+        if (mode != LoadingIndicator.NOW_LOADING) nowLoadingOverlay.stop();
         settings.setViewerLoadingIndicator(mode);
         try {
             settings.save();
@@ -1514,9 +1554,11 @@ public final class ViewerWindow implements AppShell.ShellView {
      * "Loading…" placeholder (the historical behaviour); {@link
      * LoadingIndicator#GAME_CONSOLE} starts the bottom-left CD overlay over the
      * current visual; {@link LoadingIndicator#ASCII_MATRIX} starts the grayscale
-     * horizontal glyph rain; {@link LoadingIndicator#NONE} leaves the visual
-     * untouched. Reached via {@link #scheduleLoadingIndicator} once the delay
-     * gate elapses.
+     * horizontal glyph rain; {@link LoadingIndicator#ASCII_MATRIX_BLACK_LABEL}
+     * uses the same streams with black-backed copy, while {@link
+     * LoadingIndicator#NOW_LOADING} keeps only that final copy strip; {@link
+     * LoadingIndicator#NONE} leaves the visual untouched. Reached via
+     * {@link #scheduleLoadingIndicator} once the delay gate elapses.
      */
     private void showLoadingIndicator() {
         switch (loadingIndicator.get()) {
@@ -1527,6 +1569,8 @@ public final class ViewerWindow implements AppShell.ShellView {
             }
             case GAME_CONSOLE -> gameConsoleOverlay.start();
             case ASCII_MATRIX -> asciiMatrixOverlay.start();
+            case ASCII_MATRIX_BLACK_LABEL -> asciiMatrixBlackLabelOverlay.start();
+            case NOW_LOADING -> nowLoadingOverlay.start();
             case NONE -> { }
         }
     }
@@ -1542,6 +1586,8 @@ public final class ViewerWindow implements AppShell.ShellView {
         loadingIndicatorDelay.stop();
         gameConsoleOverlay.stop();
         asciiMatrixOverlay.stop();
+        asciiMatrixBlackLabelOverlay.stop();
+        nowLoadingOverlay.stop();
     }
 
     private void loadCurrent() {
@@ -1796,6 +1842,9 @@ public final class ViewerWindow implements AppShell.ShellView {
         var metadataItem = new CheckMenuItem("Metadata");
         if (keys != null) metadataItem.setAccelerator(keys.mod1(KeyCode.D));
         metadataItem.selectedProperty().bindBidirectional(metadataToggle.selectedProperty());
+        var diagnosticsItem = new CheckMenuItem("Diagnostics");
+        if (keys != null) diagnosticsItem.setAccelerator(keys.mod1(KeyCode.G));
+        diagnosticsItem.selectedProperty().bindBidirectional(diagnosticsToggle.selectedProperty());
         var statusItem = new CheckMenuItem("Status Bar");
         if (keys != null) statusItem.setAccelerator(keys.mod1(KeyCode.S));
         statusItem.selectedProperty().bindBidirectional(statusToggle.selectedProperty());
@@ -1803,7 +1852,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         if (keys != null) pinsItem.setAccelerator(keys.mod1(KeyCode.P));
         pinsItem.selectedProperty().bindBidirectional(pinsToggle.selectedProperty());
         var toggles = new Menu("Toggle\u2026", null,
-                toolbarItem, infoItem, metadataItem, statusItem, pinsItem);
+                toolbarItem, infoItem, metadataItem, diagnosticsItem, statusItem, pinsItem);
 
         viewMenu = new ContextMenu(copyPath, move, albumMenu.menu(),
                 new SeparatorMenuItem(),
@@ -2142,9 +2191,10 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /**
      * (Re)builds and starts the flipbook frame {@link Timeline} at the current
-     * rate, but only while playback is live. Called when playback starts and
-     * whenever the dialog edits the fps, so a live change re-paces on the next
-     * frame without rebuffering.
+     * rate, but only while playback is live. Looping playback wraps forever;
+     * one-shot playback advances only through the remaining frames and stops
+     * on the last. Called when playback starts or a live setting changes, so
+     * rate and loop edits never require rebuffering.
      */
     private void rebuildFlipbookTimeline() {
         if (flipbookTimeline != null) {
@@ -2152,29 +2202,45 @@ public final class ViewerWindow implements AppShell.ShellView {
             flipbookTimeline = null;
         }
         if (flipbookPixels == null || !flipbookToggle.isSelected()) return;
+        int frameCount = flipbookSession.frames().size();
+        boolean loop = flipbookLoopToggle.isSelected();
+        int remaining = frameCount - 1 - flipbookFrameIndex;
+        if (!loop && remaining <= 0) return;
         flipbookTimeline = new Timeline(new KeyFrame(Duration.millis(1000.0 / flipbookFps),
                 e -> {
-                    flipbookFrameIndex = (flipbookFrameIndex + 1) % flipbookSession.frames().size();
+                    int next = nextFlipbookFrame(flipbookFrameIndex, frameCount, loop);
+                    if (next < 0) return;
+                    flipbookFrameIndex = next;
                     showFlipbookFrame(flipbookFrameIndex);
                 }));
-        flipbookTimeline.setCycleCount(Animation.INDEFINITE);
+        flipbookTimeline.setCycleCount(loop ? Animation.INDEFINITE : remaining);
         flipbookTimeline.play();
+    }
+
+    /** Next frame index, or {@code -1} when one-shot playback reached its end. */
+    static int nextFlipbookFrame(int current, int frameCount, boolean loop) {
+        if (frameCount <= 0) return -1;
+        if (current + 1 < frameCount) return current + 1;
+        return loop ? 0 : -1;
     }
 
     /** Refreshes the toolbar toggle's tooltip to reflect the current config. */
     private void updateFlipbookTooltip() {
         flipbookToggle.getTooltip().setText("Play this directory's same-size images "
-                + "as a looping " + flipbookFps + " fps video, buffered fully in memory "
+                + (flipbookLoopToggle.isSelected() ? "as a looping " : "once as a ")
+                + flipbookFps + " fps video, buffered fully in memory "
                 + "(configure via Viewer ▸ Flipbook Settings…)");
+        flipbookLoopToggle.getTooltip().setText("Wrap the flipbook from its last frame "
+                + "back to its first (on by default)");
     }
 
     /**
      * Viewer ▸ Flipbook Settings…: opens a small form to configure buffered
-     * image-sequence playback — a 1..60 fps slider (re-pacing a live flipbook
-     * on the fly), the computed buffer requirement for the current directory
-     * (frames × width × height × 4 bytes, sized asynchronously against the
-     * first image's probe and compared to the JVM's free memory) and a "play
-     * now" toggle mirroring the toolbar/menu toggle. The frame rate persists.
+     * image-sequence playback — a 1..60 fps slider, a persisted loop toggle,
+     * the computed buffer requirement for the current directory (frames ×
+     * width × height × 4 bytes, sized asynchronously against the first image's
+     * probe and compared to the JVM's free memory), and a "play now" toggle.
+     * Settings apply live without rebuffering.
      */
     public void showFlipbookDialog() {
         var fpsSlider = new Slider(1, 60, flipbookFps);
@@ -2232,22 +2298,25 @@ public final class ViewerWindow implements AppShell.ShellView {
 
         var runNow = new CheckBox("Play flipbook now");
         runNow.selectedProperty().bindBidirectional(flipbookToggle.selectedProperty());
+        var loop = new CheckBox("Loop playback");
+        loop.selectedProperty().bindBidirectional(flipbookLoopToggle.selectedProperty());
 
         var grid = new GridPane();
         grid.setHgap(10);
         grid.setVgap(10);
         grid.setPadding(new Insets(12));
         grid.addRow(0, new Label("Frame rate:"), new HBox(10, fpsSlider, fpsValue));
-        grid.addRow(1, new Label("Buffer:"), bufferInfo);
-        grid.add(runNow, 1, 2);
+        grid.add(loop, 1, 1);
+        grid.addRow(2, new Label("Buffer:"), bufferInfo);
+        grid.add(runNow, 1, 3);
         var hint = new Label("Plays the current directory's same-size images as a "
-                + "looping video. Every frame is decoded once into a memory buffer "
-                + "before playback starts, so the loop never touches the decoders. "
-                + "Changes apply live and the frame rate is remembered.");
+                + "video. Every frame is decoded once into a memory buffer before "
+                + "playback starts, so replay never touches the decoders. Changes "
+                + "apply live; frame rate and loop mode are remembered.");
         hint.setStyle("-fx-text-fill: gray;");
         hint.setWrapText(true);
         hint.setMaxWidth(360);
-        grid.add(hint, 0, 3, 2, 1);
+        grid.add(hint, 0, 4, 2, 1);
 
         var dialog = new Dialog<ButtonType>();
         dialog.setTitle("Flipbook");

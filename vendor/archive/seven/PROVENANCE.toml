@@ -1,0 +1,129 @@
+schema = 1
+project = "robust-seven"
+
+[[components]]
+name = "Apache Commons Compress"
+kind = "vendored-source"
+coordinates = "org.apache.commons:commons-compress:1.28.0"
+repository = "https://github.com/apache/commons-compress.git"
+tag = "rel/commons-compress-1.28.0"
+commit = "852d9c23b94127feafc1649d9c7f13d4df338845"
+commit_date = "2025-07-26T20:43:38Z"
+imported_date = "2026-07-30"
+license = "Apache-2.0"
+license_file = "vendor/commons-compress/LICENSE.txt"
+upstream_paths = [
+  "28 reader-path Java files from src/main/java/org/apache/commons/compress",
+]
+local_paths = [
+  "src/main/java/io/github/ghosthack/seven/internal/commons/compress",
+]
+source_set_digest_algorithm = "sha256(concatenated 'sha256  path\\n' records sorted by upstream path)"
+source_set_digest = "4591f6c017dbece444fb5e9ae582043f7a05563f174a56152d4b8caa956934d3"
+source_manifest = "vendor/commons-compress/SOURCES.sha256"
+
+[components.import]
+method = "copy, reader-surface reduction, and package relocation"
+package_from = "org.apache.commons.compress"
+package_to = "io.github.ghosthack.seven.internal.commons.compress"
+preserved_supporting_files = [
+  "vendor/commons-compress/LICENSE.txt",
+  "vendor/commons-compress/NOTICE.txt",
+  "vendor/commons-compress/README.md",
+]
+local_changes = [
+  "retained 28 upstream SevenZFile reader-path sources and its BZip2, Deflate64, exception, and utility closure",
+  "reduced SevenZFile to one strict indexed constructor, direct folder-derived method metadata, and indexed member streams",
+  "removed legacy constructors and options, sequential prewalking, broken-header recovery, unnamed-entry substitution, and compatibility statistics",
+  "removed SevenZOutputFile, ArchiveEntry, in-memory channel, AES writer options, and all coder encode/option paths",
+  "removed generic compressor statistics after the facade adopted its packed-stream byte counter directly",
+  "opens members by stable index and retains no duplicate entry list per decoder session",
+  "inlined the retained ByteUtils, ExactMath, and IOUtils operations into their sole consumers",
+  "replaced local bounded/checksum helper builders with direct constructors",
+  "added three narrow JDK-native internal helpers for bounded streams, checksums, and NTFS time conversion",
+  "replaced incidental Commons IO and Commons Lang behavior with JDK-native implementations",
+  "relocated all retained packages below the non-exported io.github.ghosthack.seven.internal namespace",
+  "compiled and tested as part of the JDK 26 JPMS module",
+]
+
+[components.upstream_files]
+"vendor/commons-compress/LICENSE.txt" = "sha256:51b88fd3e9e24edcdce1dd145a4fca2dcd12911407f00b06dfa6ff600f9733c1"
+"vendor/commons-compress/NOTICE.txt" = "sha256:0d98967f0ab328af8d9d536aa9a5c684b5dd665657245f6ee6b5915affe811c0"
+"vendor/commons-compress/README.md" = "sha256:3e62e09283c6b826960dfa46bebd2e4604ea0917568311e5c89d4baabcb6469b"
+
+[[components]]
+name = "XZ for Java"
+kind = "vendored-source"
+coordinates = "org.tukaani:xz:1.12"
+repository = "https://github.com/tukaani-project/xz-java.git"
+tag = "v1.12"
+commit = "107a519fac1e6789101ad9c234afe3dc407be7f5"
+commit_date = "2026-03-01T14:35:22+02:00"
+imported_date = "2026-07-30"
+license = "0BSD"
+license_file = "vendor/xz-java/LICENSES/0BSD.txt"
+upstream_paths = [
+  "26 decoder-path Java files from src/org/tukaani/xz",
+]
+local_paths = [
+  "src/main/java/io/github/ghosthack/seven/internal/xz",
+]
+source_set_digest_algorithm = "sha256(concatenated 'sha256  path\\n' records sorted by upstream path)"
+source_set_digest = "4211ecdca6cc3310f792d43b5d8b7e10753e7140335c8fc91eb0419a47866376"
+source_manifest = "vendor/xz-java/SOURCES.sha256"
+
+[components.import]
+method = "copy, decoder-surface reduction, and package relocation"
+package_from = "org.tukaani.xz"
+package_to = "io.github.ghosthack.seven.internal.xz"
+preserved_supporting_files = [
+  "vendor/xz-java/COPYING",
+  "vendor/xz-java/LICENSES/0BSD.txt",
+  "vendor/xz-java/README.md",
+  "vendor/xz-java/AUTHORS.md",
+  "vendor/xz-java/NEWS.md",
+  "vendor/xz-java/THANKS.md",
+]
+local_changes = [
+  "retained 26 raw LZMA, LZMA2, Delta, and BCJ decoder-path sources from the 109-file upstream tree",
+  "removed .xz container readers and writers, seekable readers, output streams, encoders, option builders, integrity checks, and index machinery not used by 7z",
+  "removed standalone .lzma parsing, preset dictionaries, memory-limit compatibility exceptions, and mutable process-global array-cache configuration",
+  "uses a fixed non-retaining allocation policy so decoder-session memory remains budget-predictable",
+  "made SimpleInputStream directly constructible by the relocated 7z coder registry after removing XZ option wrappers",
+  "relocated all packages below the non-exported io.github.ghosthack.seven.internal namespace",
+  "compiled and tested as part of the JDK 26 JPMS module",
+]
+
+[components.upstream_files]
+"vendor/xz-java/COPYING" = "sha256:1e77ef26cee5216d6531e49cbf2f6111a0270dc7b322fc65477063c5aff88766"
+"vendor/xz-java/LICENSES/0BSD.txt" = "sha256:0b01625d853911cd0e2e088dcfb743261034a091bb379246cb25a14cc4c74bf1"
+"vendor/xz-java/README.md" = "sha256:55bd4518be91a3a466b4bf02e1f282f969ec8489f848f55d874b511e1a6e9cd5"
+"vendor/xz-java/AUTHORS.md" = "sha256:bda4a998dada456aec8bb1bcf8eba5d987f7aa38e290abaa381c6a862c64a3c2"
+"vendor/xz-java/NEWS.md" = "sha256:ac85eaa9d3cb586dfc38f70ac1fe9f3dc998f61f412969189052b497e1fbdc12"
+"vendor/xz-java/THANKS.md" = "sha256:9c01a62f7c4ce977d595567d5e0b847d90fff6d95d3a2cdd912fabf607376b45"
+
+[policy]
+native_code = false
+runtime_dependencies = false
+subprocess_decoder = false
+archive_writing_public_api = false
+broken_archive_recovery = false
+
+[development]
+non_vendored_source_origin = "generated with AI under human direction, review, and acceptance"
+human_role = [
+  "specified the project scope, public API, safety properties, and implementation constraints",
+  "selected and integrated the generated implementation",
+  "reviewed provenance, licensing, behavior, and packaging",
+  "validated the implementation with the documented build and test suite",
+]
+licensing_intent = "Apache-2.0 to the extent applicable rights exist"
+
+[[test_fixtures]]
+name = "bla.deflate64.7z"
+component = "Apache Commons Compress"
+upstream_path = "src/test/resources/bla.deflate64.7z"
+local_path = "src/test/resources/fixtures/commons-compress/bla.deflate64.7z.b64"
+storage = "Base64 of the unchanged upstream bytes"
+sha256_decoded = "1b8b0e7cef719c9957abd980fff29579024fb4ef51ffed1e6feb29813d460566"
+license = "Apache-2.0"

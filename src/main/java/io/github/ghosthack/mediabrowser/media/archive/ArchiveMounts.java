@@ -1,6 +1,7 @@
 package io.github.ghosthack.mediabrowser.media.archive;
 
 import io.github.ghosthack.mediabrowser.media.archive.iso.IsoFileSystemProvider;
+import io.github.ghosthack.mediabrowser.media.archive.stream.StreamFileSystemProvider;
 
 import java.io.IOException;
 import java.net.URI;
@@ -16,7 +17,7 @@ import java.util.Optional;
 import java.util.WeakHashMap;
 
 /**
- * The open archives: one {@link FileSystem} per image or zip, opened on first
+ * The open archives: one {@link FileSystem} per container, opened on first
  * use and shared from then on, so descending into a folder does not re-parse
  * the container and every path handed around stays valid.
  *
@@ -147,14 +148,19 @@ public final class ArchiveMounts {
         try {
             return switch (format) {
                 case ISO -> IsoFileSystemProvider.instance().newFileSystem(key, Map.of());
+                case CUE -> IsoFileSystemProvider.instance().newCueFileSystem(key);
                 case ZIP -> openZip(key);
+                case RAR, SEVEN_Z ->
+                        StreamFileSystemProvider.instance().newFileSystem(key, format);
             };
         } catch (FileSystemAlreadyExistsException e) {
             // Lost a race with another thread opening the same container; both
             // providers key globally, so ask for the one that won.
-            FileSystem existing = format == ArchiveFormat.ISO
+            FileSystem existing = format == ArchiveFormat.ISO || format == ArchiveFormat.CUE
                     ? IsoFileSystemProvider.instance().mounted(key)
-                    : FileSystems.getFileSystem(URI.create("jar:" + key.toUri()));
+                    : format == ArchiveFormat.ZIP
+                            ? FileSystems.getFileSystem(URI.create("jar:" + key.toUri()))
+                            : StreamFileSystemProvider.instance().mounted(key);
             if (existing == null) throw new IOException("cannot open " + key, e);
             return existing;
         }

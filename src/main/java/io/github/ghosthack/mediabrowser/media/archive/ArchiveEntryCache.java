@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>Every backend — bundled FFmpeg, LibRaw, Apple ImageIO, Windows WIC —
  * ultimately opens a file <em>by OS path</em> ({@code file.toString()} handed
- * to native code). An entry inside an ISO or zip has no OS path, so the one
+ * to native code). An entry inside any mounted container has no OS path, so the one
  * honest way to decode it is to write the bytes somewhere real first. Doing it
  * here, at a single choke point, is what keeps all six backends free of archive
  * awareness and keeps behaviour identical inside and outside a container.</p>

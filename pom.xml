@@ -35,6 +35,8 @@
     <!-- jcodec (pure Java: H.264/MPEG/ProRes) for the TWELVEMONKEYS_JCODEC
          backend's video path. No native; jcodec-javase adds AWTUtil. -->
     <jcodec.version>0.2.5</jcodec.version>
+    <!-- Runtime logging facade used by the source-vendored robust-unrar core. -->
+    <slf4j.version>2.0.17</slf4j.version>
     <!-- Default LWJGL + JavaCPP native classifiers; overridden per-OS by the
          profiles below (activated by os.family/os.arch). We deliberately use a
          single-platform JavaCPP classifier (mirroring the LWJGL natives) rather
@@ -70,6 +72,17 @@
   </properties>
 
   <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>${slf4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-nop</artifactId>
+      <version>${slf4j.version}</version>
+      <scope>runtime</scope>
+    </dependency>
     <dependency>
       <groupId>org.openjfx</groupId>
       <artifactId>javafx-controls</artifactId>
@@ -378,7 +391,44 @@
   </profiles>
 
   <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+    </resources>
     <plugins>
+      <!-- The OSS source export and the application JAR share one explicit
+           redistribution manifest. This keeps upstream development notes and
+           roadmaps out while retaining the required license/notice records
+           and the provenance manifests for source-vendored archive readers. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>3.2.0</version>
+        <executions>
+          <execution>
+            <id>stage-archive-redistribution-metadata</id>
+            <phase>process-resources</phase>
+            <goals><goal>run</goal></goals>
+            <configuration>
+              <target>
+                <delete
+                    dir="${project.build.outputDirectory}/META-INF/licenses/archive"
+                    quiet="true"/>
+                <mkdir
+                    dir="${project.build.outputDirectory}/META-INF/licenses/archive"/>
+                <copy
+                    todir="${project.build.outputDirectory}/META-INF/licenses/archive"
+                    failonerror="true">
+                  <fileset
+                      dir="${project.basedir}/vendor/archive"
+                      includesfile="${project.basedir}/vendor/archive/REDISTRIBUTION.allowlist"/>
+                </copy>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>

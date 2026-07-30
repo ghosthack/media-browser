@@ -17,7 +17,9 @@ import java.util.WeakHashMap;
  * Process-wide owner of the current {@link Theme}. Scenes (and the occasional
  * dialog pane) register here; the manager keeps their stylesheet list carrying
  * exactly the current theme's overlay, and re-applies live to every registered
- * target when the theme changes.
+ * target when the theme changes. Reapplication is idempotent and replaces the
+ * old theme in one list mutation: controls must never see an intermediate pulse
+ * with only Modena styling while a dialog closes or a live preview changes.
  *
  * <p>The theme stylesheet is inserted at the front of each target's stylesheet
  * list so window-specific sheets (e.g. {@code mosaic.css}, {@code scrollbar.css})
@@ -76,9 +78,27 @@ public final class ThemeManager {
     }
 
     private void applyTo(ObservableList<String> sheets) {
-        sheets.removeAll(allThemeUrls);
         String url = current.stylesheetUrl();
-        if (url != null) sheets.add(0, url);
+        applyThemeStylesheet(sheets, url, allThemeUrls);
+    }
+
+    /**
+     * Normalizes one target's theme overlay without exposing a transient list
+     * in which the previous theme has been removed but its replacement has not
+     * yet been added. {@code setAll} also gives same-theme reapplications no
+     * observable mutation, avoiding an unnecessary CSS/layout pulse when a
+     * settings dialog closes without changing the theme.
+     */
+    static void applyThemeStylesheet(
+            ObservableList<String> sheets,
+            String currentUrl,
+            List<String> allThemeUrls) {
+        var desired = new ArrayList<String>(sheets.size() + (currentUrl == null ? 0 : 1));
+        if (currentUrl != null) desired.add(currentUrl);
+        for (String sheet : sheets) {
+            if (!allThemeUrls.contains(sheet)) desired.add(sheet);
+        }
+        if (!sheets.equals(desired)) sheets.setAll(desired);
     }
 
     /**

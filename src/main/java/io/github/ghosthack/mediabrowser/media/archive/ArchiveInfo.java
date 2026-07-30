@@ -1,7 +1,10 @@
 package io.github.ghosthack.mediabrowser.media.archive;
 
+import io.github.ghosthack.cue.CueArchive;
 import io.github.ghosthack.mediabrowser.media.archive.iso.IsoImage;
 import io.github.ghosthack.mediabrowser.media.archive.iso.IsoVolumeInfo;
+import io.github.ghosthack.seven.SevenArchive;
+import io.github.ghosthack.unrar.RarArchive;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -18,13 +21,14 @@ import java.util.Map;
 
 /**
  * What a container says about itself: its format, and whatever identifying
- * detail it carries — an ISO's publisher and mastering date, a ZIP's entry
- * count and comment.
+ * detail it carries — an ISO's publisher and mastering date, a ZIP's comment,
+ * or a compressed archive's entry and content counts.
  *
  * <p>Read <em>without mounting</em>, on purpose. This is produced when an
  * archive is merely selected, and arrowing down a folder of fifty discs must
  * not open fifty filesystems: an ISO costs a handful of 2 KB descriptor reads,
- * a ZIP one read of its tail. Neither touches the directory proper.</p>
+ * a ZIP one read of its tail; RAR/7z parse bounded indexes and close them
+ * immediately. Nothing is published into the mount table.</p>
  *
  * @param format  the container format
  * @param summary a one-line headline for the format, naming the scheme in force
@@ -50,6 +54,9 @@ public record ArchiveInfo(ArchiveFormat format, String summary, List<Field> fiel
         return switch (format) {
             case ISO -> readIso(archive);
             case ZIP -> readZip(archive);
+            case RAR -> readRar(archive);
+            case SEVEN_Z -> readSeven(archive);
+            case CUE -> readCue(archive);
         };
     }
 
@@ -70,6 +77,62 @@ public record ArchiveInfo(ArchiveFormat format, String summary, List<Field> fiel
             }
             return new ArchiveInfo(ArchiveFormat.ISO, volume.namingScheme(), fields);
         }
+    }
+
+    private static ArchiveInfo readCue(Path archive) throws IOException {
+        var fields = new ArrayList<Field>();
+        try (CueArchive cue = CueArchive.open(archive);
+                IsoImage image = IsoImage.openCue(archive)) {
+            IsoVolumeInfo volume = image.volumeInfo();
+            for (Map.Entry<String, String> field : volume.fields().entrySet()) {
+                fields.add(new Field(field.getKey(), field.getValue()));
+            }
+            fields.add(new Field("Tracks", String.valueOf(cue.tracks().size())));
+            fields.add(new Field("BIN companions", String.valueOf(cue.files().size())));
+            if (volume.contentBytes() > 0) {
+                fields.add(new Field("Content size", humanBytes(volume.contentBytes())));
+            }
+            if (volume.bootable()) fields.add(new Field("Boot record", "El Torito (bootable)"));
+            return new ArchiveInfo(ArchiveFormat.CUE,
+                    "CUE/BIN — " + volume.namingScheme(), fields);
+        }
+    }
+
+    private static ArchiveInfo readRar(Path archive) throws IOException {
+        try (RarArchive rar = RarArchive.open(archive)) {
+            var fields = new ArrayList<Field>();
+            fields.add(new Field("Entries", String.valueOf(rar.entries().size())));
+            long content = saturatingSum(rar.entries().stream()
+                    .filter(entry -> entry.isRegularFile() && entry.uncompressedSizeKnown())
+                    .mapToLong(entry -> entry.uncompressedSize()).toArray());
+            if (content > 0) fields.add(new Field("Content size", humanBytes(content)));
+            if (rar.passwordProtected()) fields.add(new Field("Encryption", "Password protected"));
+            return new ArchiveInfo(ArchiveFormat.RAR,
+                    rar.format() == io.github.ghosthack.unrar.RarFormat.RAR5 ? "RAR 5–7" : "RAR 1.5–4",
+                    fields);
+        }
+    }
+
+    private static ArchiveInfo readSeven(Path archive) throws IOException {
+        try (SevenArchive seven = SevenArchive.open(archive)) {
+            var fields = new ArrayList<Field>();
+            fields.add(new Field("Entries", String.valueOf(seven.entries().size())));
+            long content = saturatingSum(seven.entries().stream()
+                    .filter(entry -> entry.isRegularFile())
+                    .mapToLong(entry -> entry.uncompressedSize()).toArray());
+            if (content > 0) fields.add(new Field("Content size", humanBytes(content)));
+            if (seven.passwordProtected()) fields.add(new Field("Encryption", "AES-256"));
+            return new ArchiveInfo(ArchiveFormat.SEVEN_Z, "7z", fields);
+        }
+    }
+
+    private static long saturatingSum(long[] values) {
+        long sum = 0;
+        for (long value : values) {
+            if (Long.MAX_VALUE - sum < value) return Long.MAX_VALUE;
+            sum += value;
+        }
+        return sum;
     }
 
     /** Bytes scanned from a zip's tail: max comment (64 KB) plus the records. */

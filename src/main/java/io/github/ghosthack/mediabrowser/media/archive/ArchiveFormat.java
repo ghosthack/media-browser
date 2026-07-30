@@ -1,5 +1,7 @@
 package io.github.ghosthack.mediabrowser.media.archive;
 
+import io.github.ghosthack.cue.CueArchive;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.SeekableByteChannel;
@@ -19,8 +21,8 @@ import java.util.Set;
  * are UDF-only or plain junk; magic alone would mean sniffing the head of every
  * file in every directory scan, which is exactly the per-file read cost the
  * fast listing path exists to avoid. Requiring both keeps the check to a
- * handful of files per folder and never promotes something the reader will
- * then fail to open.</p>
+ * handful of files per folder and filters obvious mismatches before a mount
+ * asks the full format reader to validate the container.</p>
  */
 public enum ArchiveFormat {
 
@@ -28,7 +30,16 @@ public enum ArchiveFormat {
     ZIP(Set.of("zip", "cbz")),
 
     /** ISO 9660 disc image, read through the vendored reader. */
-    ISO(Set.of("iso"));
+    ISO(Set.of("iso")),
+
+    /** RAR 1.5–7 archives and the CBR comic-book alias. */
+    RAR(Set.of("rar", "cbr")),
+
+    /** 7z archives and the CB7 comic-book alias. */
+    SEVEN_Z(Set.of("7z", "cb7")),
+
+    /** A CUE sheet whose sole mountable data track contains ISO 9660. */
+    CUE(Set.of("cue"));
 
     /** Bytes needed to check the furthest-out signature (ISO's, at 0x8001). */
     private static final int ISO_MAGIC_OFFSET = 32769;
@@ -89,6 +100,29 @@ public enum ArchiveFormat {
                 byte[] magic = at(file, ISO_MAGIC_OFFSET, 5);
                 yield magic.length == 5 && magic[0] == 'C' && magic[1] == 'D'
                         && magic[2] == '0' && magic[3] == '0' && magic[4] == '1';
+            }
+            case RAR -> {
+                byte[] header = head(file, 8);
+                boolean common = header.length >= 7
+                        && header[0] == 'R' && header[1] == 'a' && header[2] == 'r'
+                        && header[3] == '!' && header[4] == 0x1A && header[5] == 0x07;
+                yield common && (header[6] == 0x00
+                        || header.length == 8 && header[6] == 0x01 && header[7] == 0x00);
+            }
+            case SEVEN_Z -> {
+                byte[] header = head(file, 6);
+                yield header.length == 6
+                        && header[0] == 0x37 && header[1] == 0x7A
+                        && header[2] == (byte) 0xBC && header[3] == (byte) 0xAF
+                        && header[4] == 0x27 && header[5] == 0x1C;
+            }
+            case CUE -> {
+                // A CUE is only enterable when the exact operation mount()
+                // performs can succeed. BIN itself has no reliable magic and
+                // is intentionally never promoted to a container.
+                try (CueArchive cue = CueArchive.open(file)) {
+                    yield cue.iso9660Tracks().size() == 1;
+                }
             }
         };
     }

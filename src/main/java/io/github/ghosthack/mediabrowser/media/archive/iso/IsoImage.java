@@ -3,11 +3,9 @@ package io.github.ghosthack.mediabrowser.media.archive.iso;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -40,9 +38,8 @@ import java.util.Optional;
  * under its {@code RR_MOVED} home, which is where an unaware reader would see
  * it anyway.</p>
  *
- * <p>Instances are thread-safe for reading: every read is a positional
- * {@link FileChannel#read(ByteBuffer, long)}, which does not disturb or depend
- * on channel position.</p>
+ * <p>Instances are thread-safe for reading: every read is positional and does
+ * not disturb or depend on source position.</p>
  */
 public final class IsoImage implements Closeable {
 
@@ -63,7 +60,7 @@ public final class IsoImage implements Closeable {
     private static final byte FLAG_DIRECTORY = 0x02;
     private static final byte FLAG_MULTI_EXTENT = (byte) 0x80;
 
-    private final FileChannel channel;
+    private final IsoData channel;
     private final IsoEntry root;
     private final String volumeName;
     private final boolean joliet;
@@ -72,7 +69,7 @@ public final class IsoImage implements Closeable {
     private final byte[] primaryDescriptor;
     private final boolean bootable;
 
-    private IsoImage(FileChannel channel, IsoEntry root, String volumeName,
+    private IsoImage(IsoData channel, IsoEntry root, String volumeName,
                      boolean joliet, boolean rockRidge,
                      byte[] primaryDescriptor, boolean bootable) {
         this.channel = channel;
@@ -93,7 +90,20 @@ public final class IsoImage implements Closeable {
      *                     something better than "unreadable"
      */
     public static IsoImage open(Path file) throws IOException {
-        FileChannel channel = FileChannel.open(file, StandardOpenOption.READ);
+        String displayName = file.getFileName() == null ? file.toString()
+                : file.getFileName().toString();
+        return open(displayName, IsoData.open(file));
+    }
+
+    /** Opens the sole ISO 9660 data track described by {@code cue}. */
+    public static IsoImage openCue(Path cue) throws IOException {
+        String displayName = cue.getFileName() == null ? cue.toString()
+                : cue.getFileName().toString();
+        return open(displayName, CueIsoData.open(cue));
+    }
+
+    /** Opens ISO 9660 from an arbitrary positional source such as a CUE data track. */
+    static IsoImage open(String displayName, IsoData channel) throws IOException {
         try {
             byte[] primary = null;
             byte[] supplementary = null;
@@ -115,7 +125,7 @@ public final class IsoImage implements Closeable {
                 }
             }
             if (primary == null && supplementary == null) {
-                throw new IOException("no ISO 9660 volume descriptor in " + file.getFileName()
+                throw new IOException("no ISO 9660 volume descriptor in " + displayName
                         + " (a UDF-only or non-ISO image; not supported)");
             }
             byte[] descriptor = supplementary != null ? supplementary : primary;
@@ -527,7 +537,7 @@ public final class IsoImage implements Closeable {
         return false;
     }
 
-    private static byte[] read(FileChannel channel, long at, int length) throws IOException {
+    private static byte[] read(IsoData channel, long at, int length) throws IOException {
         ByteBuffer buffer = ByteBuffer.allocate(length);
         long position = at;
         while (buffer.hasRemaining()) {

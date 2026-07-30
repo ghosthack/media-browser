@@ -1,6 +1,8 @@
 package io.github.ghosthack.mediabrowser.ui;
 
 import io.github.ghosthack.mediabrowser.media.Metadata;
+import io.github.ghosthack.mediabrowser.ui.icon.AppIcon;
+import io.github.ghosthack.mediabrowser.ui.icon.IconBinding;
 
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ReadOnlyStringWrapper;
@@ -78,13 +80,15 @@ public final class MetadataPanel extends VBox {
                 "Auto-load metadata on navigation (off by default; debounced)"));
 
         toolsToggle.setTooltip(new Tooltip("Show or hide filter and copy controls"));
-        toolsToggle.setAccessibleText("Show metadata filter and copy controls");
+        IconBinding.install(toolsToggle, AppIcon.MORE, "...", "",
+                "Show metadata filter and copy controls");
 
         var titleSpacer = new Region();
         HBox.setHgrow(titleSpacer, Priority.ALWAYS);
         titleRow = new HBox(6, title, titleSpacer, loadButton, autoToggle, toolsToggle);
         titleRow.setAlignment(Pos.CENTER_LEFT);
         titleRow.setPadding(new Insets(0, 6, 0, 0));
+        titleRow.getStyleClass().addAll("tool-bar", "side-panel-header");
 
         filterField.setPromptText("Filter…");
         filterField.textProperty().addListener((o, was, now) -> applyFilter());
@@ -100,6 +104,7 @@ public final class MetadataPanel extends VBox {
         var filterRow = new HBox(6, filterField, copyAll);
         filterRow.setAlignment(Pos.CENTER_LEFT);
         filterRow.setPadding(new Insets(2, 6, 4, 6));
+        filterRow.getStyleClass().addAll("tool-bar", "side-panel-header");
         filterRow.visibleProperty().bind(toolsToggle.selectedProperty());
         filterRow.managedProperty().bind(toolsToggle.selectedProperty());
 
@@ -109,9 +114,6 @@ public final class MetadataPanel extends VBox {
         var keyCol = new TreeTableColumn<Object, String>("Property");
         keyCol.setCellValueFactory(d -> new ReadOnlyStringWrapper(keyText(d.getValue().getValue())));
         keyCol.setCellFactory(c -> styledKeyCell());
-        // Pinned to the Info and Diagnostics tables' Property column, so every
-        // table in the stack breaks at the same x (see InfoPanel.fixWidth).
-        InfoPanel.fixWidth(keyCol);
         var valueCol = new TreeTableColumn<Object, String>("Value");
         valueCol.setCellValueFactory(d -> new ReadOnlyStringWrapper(valueText(d.getValue().getValue())));
         valueCol.setCellFactory(c -> styledValueCell());
@@ -120,7 +122,9 @@ public final class MetadataPanel extends VBox {
         table.setRoot(root);
         table.setShowRoot(false);
         table.getColumns().setAll(List.of(keyCol, valueCol));
-        table.getStyleClass().add("headerless-table");
+        // Share the headerless 24px row rhythm and pinned Property-column width
+        // used by Info and Diagnostics; only Metadata's tree grouping differs.
+        InfoPanel.configurePropertyValueTable(table, keyCol);
         table.setColumnResizePolicy(TreeTableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         table.setPlaceholder(placeholder);
         table.setRowFactory(tv -> rowWithCopyMenu());

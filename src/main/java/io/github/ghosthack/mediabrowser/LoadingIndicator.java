@@ -11,15 +11,24 @@ package io.github.ghosthack.mediabrowser;
  *   <li>{@link #GAME_CONSOLE} — a 2000s CD-console "Now loading …" overlay in
  *       the viewport's bottom-left, drawn over the current visual.</li>
  *   <li>{@link #ASCII_MATRIX} — a grayscale ASCII-glyph overlay whose streams
- *       travel horizontally through the same bottom-left corner (the default
- *       for a fresh install).</li>
+ *       travel horizontally through the same bottom-left corner.</li>
+ *   <li>{@link #ASCII_MATRIX_BLACK_LABEL} — the same terminal treatment with
+ *       its top aligned to the first glyph-run highlight and its bottom
+ *       unchanged, plus the same glyph streams; each character run and its
+ *       {@code "NOW LOADING..."} copy is additionally backed by opaque black
+ *       from the left edge, fading beyond its leading edge.</li>
+ *   <li>{@link #NOW_LOADING} — the Black Label variant's final animated
+ *       {@code "NOW LOADING..."} strip without the horizontal glyph rain; the
+ *       default for a fresh install.</li>
  * </ul>
  */
 public enum LoadingIndicator {
     NONE("None"),
     DEFAULT("Basic label"),
     GAME_CONSOLE("Game Console"),
-    ASCII_MATRIX("ASCII Matrix");
+    ASCII_MATRIX("ASCII Matrix"),
+    ASCII_MATRIX_BLACK_LABEL("ASCII Matrix (Black Label)"),
+    NOW_LOADING("Now Loading");
 
     private final String label;
 

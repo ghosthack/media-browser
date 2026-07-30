@@ -11,6 +11,7 @@ import io.github.ghosthack.mediabrowser.ui.AppShell;
 import io.github.ghosthack.mediabrowser.ui.MainWindow;
 import io.github.ghosthack.mediabrowser.ui.ThemeManager;
 import io.github.ghosthack.mediabrowser.ui.ViewerWindow;
+import io.github.ghosthack.mediabrowser.ui.icon.IconPackManager;
 
 import javafx.application.Application;
 import javafx.application.Platform;
@@ -42,6 +43,9 @@ public final class App extends Application {
         // Seed the current theme before any window builds its scene, so each
         // registers and is themed from the first frame.
         ThemeManager.get().setCurrent(settings.theme());
+        // Likewise seed icon artwork before controls and virtualized cells are
+        // constructed, so the first frame uses the persisted pack.
+        IconPackManager.get().setCurrent(settings.iconPack());
         // Playback decode policy (auto/software/hardware) for the FFM
         // backends — applied before the backend binds so the first playback
         // session already honours it.

@@ -79,6 +79,18 @@ public final class IsoFileSystemProvider extends FileSystemProvider {
         Path key = file.toAbsolutePath().normalize();
         if (mounts.containsKey(key)) throw new FileSystemAlreadyExistsException(key.toString());
         IsoImage image = IsoImage.open(key);
+        return publish(key, image);
+    }
+
+    /** Mounts the sole ISO 9660 data track described by a CUE sheet. */
+    public IsoFileSystem newCueFileSystem(Path cue) throws IOException {
+        Path key = cue.toAbsolutePath().normalize();
+        if (mounts.containsKey(key)) throw new FileSystemAlreadyExistsException(key.toString());
+        IsoImage image = IsoImage.openCue(key);
+        return publish(key, image);
+    }
+
+    private IsoFileSystem publish(Path key, IsoImage image) throws IOException {
         IsoFileSystem created = new IsoFileSystem(this, key, image);
         IsoFileSystem raced = mounts.putIfAbsent(key, created);
         if (raced != null) {

@@ -1,6 +1,7 @@
 package io.github.ghosthack.mediabrowser.ui;
 
 import io.github.ghosthack.mediabrowser.AppSettings;
+import io.github.ghosthack.mediabrowser.IconPack;
 import io.github.ghosthack.mediabrowser.LoadingIndicator;
 import io.github.ghosthack.mediabrowser.MosaicFolderGlyph;
 import io.github.ghosthack.mediabrowser.MosaicSelectionAnimation;
@@ -20,6 +21,12 @@ import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
+import io.github.ghosthack.mediabrowser.ui.icon.AppIcon;
+import io.github.ghosthack.mediabrowser.ui.icon.IconBinding;
+import io.github.ghosthack.mediabrowser.ui.icon.IconPackManager;
+import io.github.ghosthack.mediabrowser.ui.icon.IconView;
+import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileSet;
+import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileSets;
 
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
@@ -176,6 +183,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final Typeahead typeahead = new Typeahead();
 
     private Path currentDir;
+    /** The current directory-listing failure, shown without removing its {@code ..} escape. */
+    private String listingFailureMessage;
     /**
      * Bumped on every navigation; the latest wins. Read off the FX thread by the
      * streaming reclassification's {@code stillWanted} guard, so {@code volatile}
@@ -323,6 +332,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         StackPane.setAlignment(emptyStateLabel, Pos.CENTER);
         listView.setCellFactory(lv -> new ListCell<>() {
             private final Label icon = new Label();
+            private final IconBinding iconBinding =
+                    IconBinding.install(icon, null, "", "", null);
             private final ContextMenu menu = new ContextMenu();
             {
                 icon.setMinWidth(28);
@@ -364,11 +375,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             protected void updateItem(DirEntry entry, boolean empty) {
                 super.updateItem(entry, empty);
                 if (empty || entry == null) {
+                    iconBinding.update(null, "", "");
                     setText(null);
                     setGraphic(null);
                     setContextMenu(null);
                 } else {
-                    icon.setText(iconFor(entry));
+                    AppIcon role = iconFor(entry);
+                    iconBinding.update(role, role == null ? "" : role.originalGlyph(), "");
                     setGraphic(icon);
                     setText(entry.displayName());
                     setContextMenu(menu);
@@ -849,6 +862,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         updateHistoryItems();
         currentDir = target;
+        listingFailureMessage = null;
         addressField.setText(ArchivePaths.format(target));
         statusLabel.setText("Scanning " + ArchivePaths.format(target) + "…");
         countLabel.setText("");
@@ -874,8 +888,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     Platform.runLater(() -> {
                         if (seq != scanSequence) return; // user already navigated elsewhere
                         if (error != null) {
-                            entries.clear();
-                            statusLabel.setText(rootMessage(error));
+                            showListingFailure(target, select, error);
                             return;
                         }
                         showListing(fast, select);
@@ -887,8 +900,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     Platform.runLater(() -> {
                         if (seq != scanSequence) return;
                         if (error != null) {
-                            entries.clear();
-                            statusLabel.setText(rootMessage(error));
+                            showListingFailure(target, select, error);
                             return;
                         }
                         showListing(listing, select);
@@ -896,6 +908,25 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     }));
         }
         return true;
+    }
+
+    /**
+     * Leaves an unreadable folder navigable: its contents are unknown, but the
+     * parent link is still valid and must remain available as an escape hatch.
+     */
+    private void showListingFailure(Path target, Path select, Throwable error) {
+        listingFailureMessage = rootMessage(error);
+        mosaic.onDirectoryScanFailed(target, listingFailureMessage);
+        showListing(navigationOnlyListing(target), select);
+        statusLabel.setText(listingFailureMessage);
+    }
+
+    /** A listing containing only {@code ..}, or empty at a filesystem/archive root. */
+    static List<DirEntry> navigationOnlyListing(Path dir) {
+        Path parent = ArchivePaths.parentOf(dir);
+        return parent == null
+                ? List.of()
+                : List.of(new DirEntry(parent, DirEntry.Type.PARENT, null, 0, 0));
     }
 
     /**
@@ -972,8 +1003,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             Optional<MediaKind> kind = changes.get(cur.path());
             if (kind == null) continue;
             DirEntry refined = kind.isPresent()
-                    ? new DirEntry(cur.path(), DirEntry.Type.MEDIA, kind.get(), cur.size(), cur.lastModifiedMillis())
-                    : new DirEntry(cur.path(), DirEntry.Type.OTHER, null, cur.size(), cur.lastModifiedMillis());
+                    ? new DirEntry(cur.path(), DirEntry.Type.MEDIA, kind.get(),
+                            cur.size(), cur.lastModifiedMillis(), cur.traits())
+                    : new DirEntry(cur.path(), DirEntry.Type.OTHER, null,
+                            cur.size(), cur.lastModifiedMillis(), cur.traits());
             if (!refined.equals(cur)) {
                 updated.set(i, refined);
                 any = true;
@@ -1118,6 +1151,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private void updateEmptyState() {
         if (hasNonParentEntry(visibleEntries)) {
             emptyStateLabel.setVisible(false);
+            return;
+        }
+        if (listingFailureMessage != null) {
+            emptyStateLabel.setText("Can't read this folder — " + listingFailureMessage);
+            emptyStateLabel.setVisible(true);
             return;
         }
         var offFilters = new ArrayList<String>(3);
@@ -1277,7 +1315,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 boundCheck("_Address Bar", showAddressProp, keys.mod1Shift(KeyCode.L)),
                 navTreeItem,
                 boundCheck("Action _Log", showActionLogProp, keys.mod1(KeyCode.J)),
-                boundCheck("Dia_gnostics", showDiagnosticsProp),
+                boundCheck("Dia_gnostics", showDiagnosticsProp, keys.mod1(KeyCode.G)),
                 new SeparatorMenuItem(),
                 header("Listing filter"),
                 boundCheck("_Viewable Media", showViewableProp),
@@ -1508,7 +1546,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 objRadio("_None", LoadingIndicator.NONE, loadingProp, loadingGroup),
                 objRadio("_Default", LoadingIndicator.DEFAULT, loadingProp, loadingGroup),
                 objRadio("_Game Console", LoadingIndicator.GAME_CONSOLE, loadingProp, loadingGroup),
-                objRadio("_ASCII Matrix", LoadingIndicator.ASCII_MATRIX, loadingProp, loadingGroup));
+                objRadio("_ASCII Matrix", LoadingIndicator.ASCII_MATRIX, loadingProp, loadingGroup),
+                objRadio("ASCII Matrix (_Black Label)",
+                        LoadingIndicator.ASCII_MATRIX_BLACK_LABEL,
+                        loadingProp, loadingGroup),
+                objRadio("_Now Loading", LoadingIndicator.NOW_LOADING,
+                        loadingProp, loadingGroup));
         var panelsMenu = new Menu("_Panels", null,
                 boundCheck("_Info Panel", viewer.infoPanelVisibleProperty()),
                 boundCheck("_Metadata", viewer.metadataPanelVisibleProperty()),
@@ -1523,6 +1566,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 boundCheck("Slide_show", viewer.slideshowProperty()),
                 action("Slideshow _Settings\u2026", null, viewer::showSlideshowDialog),
                 boundCheck("Flip_book", viewer.flipbookProperty()),
+                boundCheck("Flipbook _Loop", viewer.flipbookLoopProperty()),
                 action("Flipbook Settings\u2026", null, viewer::showFlipbookDialog),
                 new SeparatorMenuItem(),
                 objRadio("_Fit", ViewerWindow.ScaleMode.FIT, scaleProp, scaleGroup),
@@ -1753,17 +1797,17 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         statusLabel.setText("Copied path: " + path);
     }
 
-    private static String iconFor(DirEntry entry) {
+    private static AppIcon iconFor(DirEntry entry) {
         return switch (entry.type()) {
-            case PARENT -> "⬆";
-            case DIRECTORY -> "📁";
-            case ARCHIVE -> "🗄";
+            case PARENT -> AppIcon.UP;
+            case DIRECTORY -> AppIcon.FOLDER;
+            case ARCHIVE -> AppIcon.ARCHIVE;
             case MEDIA -> switch (entry.mediaKind()) {
-                case IMAGE -> "🖼";
-                case VIDEO -> "🎬";
-                case AUDIO -> "🎵";
+                case IMAGE -> AppIcon.IMAGE;
+                case VIDEO -> AppIcon.VIDEO;
+                case AUDIO -> AppIcon.AUDIO;
             };
-            case OTHER -> "";
+            case OTHER -> null;
         };
     }
 
@@ -1896,6 +1940,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 // Browsable, so "not viewable media" would be actively
                 // misleading — it reads as a dead end.
                 case ARCHIVE -> "iso".equals(entry.extension())
+                        || "cue".equals(entry.extension())
                         ? "Reading disc image…"
                         : "Reading archive…";
                 default -> "Not viewable media";
@@ -1925,25 +1970,36 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     }
 
     /**
-     * Fills the info panel's File section for {@code entry} — name, size and
-     * timestamps read straight from an async filesystem stat, independent of
-     * the (potentially slow) native probe — or clears it for the parent link
-     * and folders. Guarded on {@code probeSequence} like the probe itself, so
-     * a superseded selection's facts are dropped.
+     * Fills the info panel's File section for {@code entry}: files show name,
+     * size and timestamps; folders show name, timestamps, and an Items row only
+     * when an earlier listing already supplied the direct-child count. The
+     * filesystem stat is asynchronous and independent of the potentially slow
+     * native probe. Guarded on {@code probeSequence} like the probe itself, so a
+     * superseded selection's facts are dropped.
      */
     private void updateFileFacts(DirEntry entry, int seq) {
-        if (entry.type() == DirEntry.Type.PARENT || entry.type() == DirEntry.Type.DIRECTORY) {
+        if (entry.type() == DirEntry.Type.PARENT) {
             infoPanel.clearFileFacts();
             return;
+        }
+        boolean folder = entry.type() == DirEntry.Type.DIRECTORY;
+        if (folder) {
+            // Name (and a free cached count, if known) can appear immediately;
+            // the existing async stat fills in the dates without blocking FX.
+            infoPanel.showFileFacts(InfoPanel.folderFactRows(
+                    entry.displayName(), service.knownFolderItemCount(entry.path())));
         }
         service.fileFacts(entry.path()).whenComplete((facts, error) ->
                 Platform.runLater(() -> {
                     if (seq != probeSequence) return;
                     if (error != null) {
-                        infoPanel.clearFileFacts();
+                        if (!folder) infoPanel.clearFileFacts();
                     } else {
-                        infoPanel.showFileFacts(
-                                InfoPanel.fileFactRows(entry.displayName(), facts));
+                        infoPanel.showFileFacts(folder
+                                ? InfoPanel.folderFactRows(
+                                        entry.displayName(), facts,
+                                        service.knownFolderItemCount(entry.path()))
+                                : InfoPanel.fileFactRows(entry.displayName(), facts));
                     }
                 }));
     }
@@ -2157,6 +2213,38 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         refreshAfterMove(focusPath);
     }
 
+    /**
+     * A pack selector cell with a small, pack-locked gallery. The icon colours
+     * follow the cell label so popup selection and all themes remain legible.
+     */
+    private static ListCell<IconPack> iconPackCell() {
+        return new ListCell<>() {
+            @Override
+            protected void updateItem(IconPack pack, boolean empty) {
+                super.updateItem(pack, empty);
+                if (empty || pack == null) {
+                    setText(null);
+                    setGraphic(null);
+                    return;
+                }
+                var label = new Label(pack.label());
+                label.setMinWidth(62);
+                label.textFillProperty().bind(textFillProperty());
+                var samples = new HBox(5);
+                for (AppIcon role : List.of(
+                        AppIcon.FOLDER, AppIcon.IMAGE, AppIcon.PLAY, AppIcon.PIN)) {
+                    var icon = new IconView(pack, role, 16);
+                    icon.colorProperty().bind(textFillProperty());
+                    samples.getChildren().add(icon);
+                }
+                var row = new HBox(8, label, samples);
+                row.setAlignment(Pos.CENTER_LEFT);
+                setText(null);
+                setGraphic(row);
+            }
+        };
+    }
+
     private void showSettings() {
         // --- General tab: cross-window application settings --------------------
         var backendCombo = new ComboBox<MediaBackend>();
@@ -2211,6 +2299,17 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 ThemeManager.get().setCurrent(val));
         var themeRow = new HBox(8, new Label("Theme:"), themeCombo);
         themeRow.setAlignment(Pos.CENTER_LEFT);
+
+        var iconPackCombo = new ComboBox<IconPack>();
+        iconPackCombo.getItems().setAll(IconPack.values());
+        iconPackCombo.setValue(settings.iconPack());
+        iconPackCombo.setCellFactory(list -> iconPackCell());
+        iconPackCombo.setButtonCell(iconPackCell());
+        iconPackCombo.setAccessibleText("Icon pack");
+        iconPackCombo.valueProperty().addListener((obs, old, val) ->
+                IconPackManager.get().setCurrent(val));
+        var iconPackRow = new HBox(8, new Label("Icon pack:"), iconPackCombo);
+        iconPackRow.setAlignment(Pos.CENTER_LEFT);
 
         var decorationsCombo = new ComboBox<WindowDecorations>();
         decorationsCombo.getItems().setAll(WindowDecorations.values());
@@ -2291,7 +2390,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         loadingDelayRow.setAlignment(Pos.CENTER_LEFT);
         var hint = new Label("Applies after restarting the application.");
         hint.setStyle("-fx-text-fill: gray;");
-        var generalContent = new VBox(8, themeRow, backendRow, decodeRow,
+        var generalContent = new VBox(8, themeRow, iconPackRow, backendRow, decodeRow,
                 actionLogBox, actionLogFileBox, extensionFixBox,
                 new Separator(), loadingIndicatorRow, loadingDelayRow,
                 new Separator(),
@@ -2345,6 +2444,26 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
         var layoutTitle = new Label("Grid layout & appearance");
         layoutTitle.setStyle("-fx-font-weight: bold;");
+        var tileSetCombo = new ComboBox<MosaicTileSet>();
+        tileSetCombo.getItems().setAll(MosaicTileSets.values());
+        tileSetCombo.setConverter(new StringConverter<>() {
+            @Override public String toString(MosaicTileSet set) {
+                return set == null ? "" : set.label();
+            }
+            @Override public MosaicTileSet fromString(String value) {
+                return null;
+            }
+        });
+        tileSetCombo.setValue(MosaicTileSets.resolve(settings.mosaicTileSetId()));
+        tileSetCombo.setAccessibleText("Mosaic tile set");
+        tileSetCombo.setTooltip(new Tooltip(
+                "Generated artwork for folders and files without thumbnails. "
+                + "Current preserves the original Mosaic rendering."));
+        tileSetCombo.valueProperty().addListener((obs, old, value) -> {
+            if (value != null) mosaic.tileSetProperty().set(value);
+        });
+        var tileSetRow = new HBox(8, new Label("Tile set:"), tileSetCombo);
+        tileSetRow.setAlignment(Pos.CENTER_LEFT);
         var tileSizeSpinner = new Spinner<Integer>(64, 512, settings.mosaicTileSize(), 8);
         tileSizeSpinner.setEditable(true);
         tileSizeSpinner.setPrefWidth(100);
@@ -2380,6 +2499,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         folderGlyphCombo.setValue(settings.mosaicFolderGlyph());
         var folderGlyphRow = new HBox(8, new Label("Folder glyph:"), folderGlyphCombo);
         folderGlyphRow.setAlignment(Pos.CENTER_LEFT);
+        folderGlyphCombo.disableProperty().bind(Bindings.createBooleanBinding(
+                () -> tileSetCombo.getValue() != null
+                        && !tileSetCombo.getValue().usesLegacyFolderGlyph(),
+                tileSetCombo.valueProperty()));
         var thumbnailsBox = new CheckBox("Show thumbnails in the mosaic");
         thumbnailsBox.setSelected(settings.mosaicThumbnailsVisible());
         var fillBox = new CheckBox("Crop tiles to fill (squares, no letterbox)");
@@ -2442,7 +2565,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
         var mosaicContent = new VBox(8, mosaicMenuBox, mosaicToolbarBox, mosaicStatusBox,
                 mosaicLocationBox,
-                new Separator(), layoutTitle, tileSizeRow, marginRow, borderWidthRow,
+                new Separator(), layoutTitle, tileSetRow, tileSizeRow, marginRow, borderWidthRow,
                 borderColorRow, folderGridRow, folderGlyphRow, thumbnailsBox, fillBox,
                 seamlessBox,
                 new Separator(), renditionTitle, maxEdgeRow, budgetRow,
@@ -2495,15 +2618,21 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         dialog.getDialogPane().getButtonTypes().addAll(save, ButtonType.CANCEL);
 
         Theme themeBefore = settings.theme();
+        IconPack iconPackBefore = settings.iconPack();
+        MosaicTileSet tileSetBefore = mosaic.tileSetProperty().get();
         if (dialog.showAndWait().filter(b -> b == save).isEmpty()) {
-            // Cancelled: revert any live theme preview to the persisted value.
+            // Cancelled: revert all live appearance previews to their prior values.
             ThemeManager.get().setCurrent(themeBefore);
+            IconPackManager.get().setCurrent(iconPackBefore);
+            mosaic.tileSetProperty().set(tileSetBefore);
             return;
         }
 
         // --- General -----------------------------------------------------------
         settings.setTheme(themeCombo.getValue());
         ThemeManager.get().setCurrent(themeCombo.getValue());
+        settings.setIconPack(iconPackCombo.getValue());
+        IconPackManager.get().setCurrent(iconPackCombo.getValue());
         settings.setMediaBackend(backendCombo.getValue().settingsValue());
         // Persist + apply live: the next playback session honours the policy.
         String decodeDevice = decodeCombo.getValue().name().toLowerCase(java.util.Locale.ROOT);
@@ -2566,6 +2695,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setMosaicBorderWidth(borderWidthSpinner.getValue());
         settings.setMosaicBorderColor(webHex(borderColorPicker.getValue()));
         settings.setMosaicFolderPreviewGrid(folderGridSpinner.getValue());
+        settings.setMosaicTileSetId(tileSetCombo.getValue().id());
         settings.setMosaicThumbnailsVisible(thumbnailsBox.isSelected());
         settings.setMosaicFillTiles(fillBox.isSelected());
         settings.setMosaicSeamless(seamlessBox.isSelected());

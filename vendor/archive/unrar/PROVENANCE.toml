@@ -1,0 +1,59 @@
+schema = 1
+
+[[components]]
+name = "junrar"
+kind = "vendored-source"
+repository = "https://github.com/junrar/junrar.git"
+tag = "v8.0.0"
+commit = "c78e224757c2dff1126fdf2539361f1e65d4af99"
+commit_date = "2026-07-23T14:45:59+08:00"
+imported_date = "2026-07-29"
+license = "UnRAR License"
+license_file = "vendor/junrar/LICENSE"
+upstream_paths = [
+  "src/main/java/com/github/junrar",
+  "src/test/java/com/github/junrar",
+  "src/test/resources/com/github/junrar",
+  "src/regressionTest",
+]
+local_paths = [
+  "src/main/java/io/github/ghosthack/unrar/internal/junrar",
+  "src/test/java/io/github/ghosthack/unrar/internal/junrar",
+  "src/test/resources/io/github/ghosthack/unrar/internal/junrar",
+  "src/regressionTest/java/io/github/ghosthack/unrar/internal/junrar/regression",
+  "src/regressionTest/resources",
+  "src/regressionTest/corpus/corpus.zip",
+]
+source_set_digest_algorithm = "sha256(sha256(file) records sorted by upstream path)"
+source_set_digest = "540be17d2bf9c99e1ccbb5b735ee0b9222514f9369fc99768eb08f27563040c4"
+
+[components.import]
+method = "copy and package relocation"
+package_from = "com.github.junrar"
+package_to = "io.github.ghosthack.unrar.internal.junrar"
+preserved_supporting_files = [
+  "vendor/junrar/LICENSE",
+  "vendor/junrar/README.md",
+  "vendor/junrar/CHANGELOG.md",
+  "vendor/junrar/CONTRIBUTING.md",
+]
+local_changes = [
+  "Maven 3.9 and JDK 26 build",
+  "Maven coordinate io.github.ghosthack:unrar and JPMS/public namespace io.github.ghosthack.unrar",
+  "explicit JPMS descriptor with internal decoder encapsulation",
+  "read-only public facade",
+  "resource budgets and header-count limit",
+  "password-copy wiping",
+  "virtual-thread member streams with producer-error propagation",
+  "parsed-index decoder sessions with bounded reuse and independent channels",
+  "complete 12,475-case upstream regression corpus integrated into Maven",
+  "coverage-guided public-facade fuzz target with valid and hostile seeds",
+  "source-level UnRAR restriction notices on derived Java sources",
+  "test package and resource relocation",
+]
+
+[components.upstream_files]
+"vendor/junrar/LICENSE" = "sha256:9d90c3649d4eb064ce2fff366a7421107fbbc3c65d8eede45df5dec95e4e016c"
+"vendor/junrar/README.md" = "sha256:a82b8d8e5ba1912da817d860739aebefa318fb727323aeef0ed34d59bd8074a7"
+"vendor/junrar/CHANGELOG.md" = "sha256:9c4a8ee6b50d3d953f78f21051b7cd33df6c0bc32dfe0c2b69082c22c5d5a518"
+"vendor/junrar/CONTRIBUTING.md" = "sha256:488d278ffba43787a86a3a68aa2f4d809c9e9c8d316fd93c328db291f8a696d0"

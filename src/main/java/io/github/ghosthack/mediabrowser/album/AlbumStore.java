@@ -113,7 +113,7 @@ public final class AlbumStore {
                 String trimmed = line.trim();
                 if (trimmed.isEmpty()) continue;
                 if (trimmed.contains(ArchivePaths.SEPARATOR)) {
-                    // A member inside a disc image or zip; mounting it is what
+                    // A member inside an archive; mounting it is what
                     // turns the locator back into a usable path. A container
                     // that has since moved or gone unreadable drops out of the
                     // listing, the same way a deleted member would.

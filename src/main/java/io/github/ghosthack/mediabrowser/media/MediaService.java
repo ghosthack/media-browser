@@ -17,6 +17,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -79,6 +80,13 @@ public final class MediaService implements AutoCloseable {
     private volatile boolean folderPreviewSniff;
     /** Listing filters; see the setters for why the first defaults on. */
     private volatile boolean listingIgnoreJunk = true;
+    /**
+     * Direct-child counts learned as a by-product of listings already requested
+     * by navigation or folder previews. Info panels may read this map, but never
+     * trigger a directory listing merely to obtain an Items row.
+     */
+    private final ConcurrentMap<Path, Integer> knownFolderItemCounts =
+            new ConcurrentHashMap<>();
     /**
      * What the most recent {@link #scan} dropped, so a view can put a count on
      * screen rather than omitting silently. Scans are serialized on one
@@ -281,8 +289,8 @@ public final class MediaService implements AutoCloseable {
      * for an ordinary file, or an extracted copy when it lives inside an
      * archive.
      *
-     * <p>Every backend opens media by OS path, and an entry inside an ISO or
-     * zip has none. Materializing here — at the one point where the service
+     * <p>Every backend opens media by OS path, and an entry inside a mounted
+     * container has none. Materializing here — at the one point where the service
      * crosses into the facade — is what lets all six backends stay unaware that
      * archives exist, and keeps browsing inside a container behave-alike with
      * browsing a folder. Note that the <em>caller-facing</em> path stays the
@@ -351,7 +359,8 @@ public final class MediaService implements AutoCloseable {
             throw new MediaException("cannot read " + archive.getFileName()
                     + ": " + e.getMessage(), e);
         }
-        String group = info.format() == ArchiveFormat.ISO ? "Volume" : "Archive";
+        String group = info.format() == ArchiveFormat.ISO
+                || info.format() == ArchiveFormat.CUE ? "Volume" : "Archive";
         var builder = new Metadata.Builder(archive);
         builder.add(group, "Format", info.summary());
         for (ArchiveInfo.Field field : info.fields()) {
@@ -459,6 +468,16 @@ public final class MediaService implements AutoCloseable {
         boolean sniff = folderPreviewSniff;
         return CompletableFuture.supplyAsync(() -> scanFolderPreview(dir, limit, sniff),
                 thumbnailExecutor);
+    }
+
+    /**
+     * Returns a direct-child count only when an existing navigation listing or
+     * folder-preview scan already supplied it. Performs no filesystem I/O.
+     */
+    public OptionalInt knownFolderItemCount(Path dir) {
+        if (dir == null) return OptionalInt.empty();
+        Integer count = knownFolderItemCounts.get(folderCountKey(dir));
+        return count == null ? OptionalInt.empty() : OptionalInt.of(count);
     }
 
     /**
@@ -674,7 +693,7 @@ public final class MediaService implements AutoCloseable {
      * {@link FolderVerdict#NORMAL}; a folder that yields none has had every
      * file tested anyway, so {@link FolderVerdict#NO_VISUAL} is exact.</p>
      */
-    private static FolderPreview scanFolderPreview(Path dir, int limit, boolean sniff) {
+    private FolderPreview scanFolderPreview(Path dir, int limit, boolean sniff) {
         var files = new ArrayList<Path>();
         int subdirs = 0, junkOrEmpty = 0;
         try (java.nio.file.DirectoryStream<Path> children = Files.newDirectoryStream(dir)) {
@@ -705,6 +724,7 @@ public final class MediaService implements AutoCloseable {
         } catch (IOException | RuntimeException e) {
             return FolderPreview.UNREADABLE;
         }
+        rememberFolderItemCount(dir, subdirs + files.size());
         files.sort(Comparator.comparing(p -> p.getFileName().toString(),
                 String.CASE_INSENSITIVE_ORDER));
 
@@ -818,8 +838,8 @@ public final class MediaService implements AutoCloseable {
     }
 
     /**
-     * Reads a container's self-description (format, ISO volume identity, ZIP
-     * entry count) on the {@code media-file-op} thread.
+     * Reads a container's self-description (format, volume identity, entry
+     * counts) on the {@code media-file-op} thread.
      *
      * <p>Runs when an archive is merely <em>selected</em>, so it deliberately
      * does not mount: see {@link ArchiveInfo}. Kept off the facade thread too,
@@ -877,6 +897,7 @@ public final class MediaService implements AutoCloseable {
         } catch (IOException e) {
             throw new MediaException("cannot list " + dir + ": " + e.getMessage(), e);
         }
+        rememberFolderItemCount(dir, children.size());
         // Stems of every non-sidecar file, so a matched .AAE (one editing a file
         // we list) can be hidden while an orphaned .AAE stays visible.
         Set<String> fileStems = new HashSet<>();
@@ -908,7 +929,8 @@ public final class MediaService implements AutoCloseable {
                         continue;
                     }
                 }
-                dirs.add(new DirEntry(p, DirEntry.Type.DIRECTORY, null, 0, 0));
+                dirs.add(new DirEntry(p, DirEntry.Type.DIRECTORY, null, 0, 0,
+                        FileTraits.read(p, false)));
             } else if (Sidecars.isRotationSidecar(p)
                     || Sidecars.isMatchedAaeSidecar(p, fileStems)) {
                 // Internal bookkeeping (the rotation sidecar) and matched Apple
@@ -918,23 +940,29 @@ public final class MediaService implements AutoCloseable {
             } else {
                 long size = sizeOf(p);
                 long mtime = mtimeOf(p);
+                boolean junk = isJunk(p);
+                FileTraits traits = FileTraits.read(p, junk);
                 if (listingHideEmptyFiles && size == 0) {
                     hiddenEmptyFiles++;
                     continue;
                 }
                 DirEntry entry;
-                if (isJunk(p)) {
-                    entry = new DirEntry(p, DirEntry.Type.OTHER, null, size, mtime);
+                if (junk) {
+                    entry = new DirEntry(
+                            p, DirEntry.Type.OTHER, null, size, mtime, traits);
                 } else if (ArchivePaths.isArchiveFile(p)) {
                     // Checked in both the fast and the full scan: the check only
                     // reads bytes for names that already look like a container,
                     // and a row typed ARCHIVE in the fast listing that turned out
                     // not to be one would offer a folder the user cannot open.
-                    entry = new DirEntry(p, DirEntry.Type.ARCHIVE, null, size, mtime);
+                    entry = new DirEntry(
+                            p, DirEntry.Type.ARCHIVE, null, size, mtime, traits);
                 } else {
                     entry = classifier.apply(p)
-                            .map(kind -> new DirEntry(p, DirEntry.Type.MEDIA, kind, size, mtime))
-                            .orElseGet(() -> new DirEntry(p, DirEntry.Type.OTHER, null, size, mtime));
+                            .map(kind -> new DirEntry(
+                                    p, DirEntry.Type.MEDIA, kind, size, mtime, traits))
+                            .orElseGet(() -> new DirEntry(
+                                    p, DirEntry.Type.OTHER, null, size, mtime, traits));
                 }
                 files.add(entry);
             }
@@ -949,6 +977,14 @@ public final class MediaService implements AutoCloseable {
         entries.addAll(files);
         lastHidden = new ListingHidden(dir, hiddenJunk, hiddenEmptyFiles, hiddenEmptyFolders);
         return entries;
+    }
+
+    private void rememberFolderItemCount(Path dir, int count) {
+        knownFolderItemCounts.put(folderCountKey(dir), Math.max(0, count));
+    }
+
+    private static Path folderCountKey(Path dir) {
+        return dir.normalize();
     }
 
     /** Classifies one file per the current {@link DetectionMode}. */

@@ -8,6 +8,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 
 /**
@@ -38,6 +39,7 @@ public final class AppSettings {
     private static final String DECODE_DEVICE_KEY = "decode.device";
     private static final String DETECTION_KEY = "media.detection";
     private static final String THEME_KEY = "ui.theme";
+    private static final String ICON_PACK_KEY = "ui.iconPack";
     private static final String THUMB_MAX_EDGE_KEY = "mosaic.thumbnail.maxEdge";
     private static final String THUMB_BUDGET_MB_KEY = "mosaic.thumbnail.memoryBudgetMb";
     private static final String MOSAIC_THUMBNAILS_VISIBLE_KEY = "mosaic.thumbnail.visible";
@@ -55,6 +57,7 @@ public final class AppSettings {
     private static final String MOSAIC_BORDER_WIDTH_KEY = "mosaic.borderWidth";
     private static final String MOSAIC_BORDER_COLOR_KEY = "mosaic.borderColor";
     private static final String MOSAIC_FOLDER_PREVIEW_GRID_KEY = "mosaic.folderPreview.grid";
+    private static final String MOSAIC_TILE_SET_KEY = "mosaic.tileSet";
     private static final String MOSAIC_FOLDER_PREVIEW_SNIFF_KEY = "mosaic.folderPreview.sniff";
     // docs/empty-states.md. The three listing.* keys govern the browser list
     // and the mosaic grid alike, which is why they are not mosaic-scoped.
@@ -95,8 +98,9 @@ public final class AppSettings {
     /** Viewer slideshow (timed auto-advance) config; the toggle itself is runtime-only. */
     private static final String VIEWER_SLIDESHOW_INTERVAL_KEY = "viewer.slideshow.intervalSeconds";
     private static final String VIEWER_SLIDESHOW_REVERSE_KEY = "viewer.slideshow.reverse";
-    /** Viewer flipbook (buffered image-sequence playback) config; the toggle itself is runtime-only. */
+    /** Viewer flipbook (buffered image-sequence playback) config; playback itself is runtime-only. */
     private static final String VIEWER_FLIPBOOK_FPS_KEY = "viewer.flipbook.fps";
+    private static final String VIEWER_FLIPBOOK_LOOP_KEY = "viewer.flipbook.loop";
     private static final String VIEWER_LOADING_INDICATOR_KEY = "viewer.loadingIndicator";
     private static final String VIEWER_LOADING_INDICATOR_DELAY_KEY = "viewer.loadingIndicator.delayMs";
     private static final String MOSAIC_MENU_BAR_KEY = "mosaic.menuBar.visible";
@@ -137,6 +141,11 @@ public final class AppSettings {
     private static final int DEFAULT_THUMB_MAX_EDGE = 300;
     private static final int DEFAULT_THUMB_BUDGET_MB = 256;
 
+    /** Fresh-install visual defaults. Explicit persisted choices always win. */
+    private static final Theme DEFAULT_THEME = Theme.CUPERTINO_DARK;
+    private static final IconPack DEFAULT_ICON_PACK = IconPack.LUCID;
+    private static final String DEFAULT_MOSAIC_TILE_SET_ID = "xedge-additive";
+
     /** Defaults for the mosaic grid layout. */
     private static final int DEFAULT_MOSAIC_TILE_SIZE = 100;
     private static final int DEFAULT_MOSAIC_MARGIN = 10;
@@ -151,7 +160,7 @@ public final class AppSettings {
     private static final MosaicFolderGlyph DEFAULT_MOSAIC_FOLDER_GLYPH =
             MosaicFolderGlyph.GLYPH;
     private static final LoadingIndicator DEFAULT_VIEWER_LOADING_INDICATOR =
-            LoadingIndicator.ASCII_MATRIX;
+            LoadingIndicator.NOW_LOADING;
     /**
      * Delay, in milliseconds, before the viewer shows its loading indicator: a
      * grace period that gates the indicator so a fast/cached decode landing
@@ -209,6 +218,7 @@ public final class AppSettings {
     private String decodeDevice;
     private String detectionMode;
     private Theme theme;
+    private IconPack iconPack;
     private int thumbnailMaxEdge;
     private int thumbnailMemoryBudgetMb;
     private boolean mosaicThumbnailsVisible;
@@ -224,6 +234,7 @@ public final class AppSettings {
     private int mosaicBorderWidth;
     private String mosaicBorderColor;
     private int mosaicFolderPreviewGrid;
+    private String mosaicTileSetId;
     private boolean mosaicFolderPreviewSniff;
     private boolean listingIgnoreJunkFiles;
     private boolean listingHideEmptyFiles;
@@ -252,6 +263,7 @@ public final class AppSettings {
     private int viewerLoadingIndicatorDelayMs = DEFAULT_VIEWER_LOADING_INDICATOR_DELAY_MS;
     private boolean viewerSlideshowReverse;
     private int viewerFlipbookFps = DEFAULT_VIEWER_FLIPBOOK_FPS;
+    private boolean viewerFlipbookLoop = true;
     private boolean mosaicMenuBarVisible;
     private boolean mosaicToolbarVisible;
     private boolean mosaicStatusBarVisible;
@@ -307,7 +319,9 @@ public final class AppSettings {
         settings.mediaBackend = props.getProperty(BACKEND_KEY, "ffmpeg-ffm-turbojpeg");
         settings.decodeDevice = props.getProperty(DECODE_DEVICE_KEY, "auto");
         settings.detectionMode = props.getProperty(DETECTION_KEY, "extension");
-        settings.theme = Theme.fromSettings(props.getProperty(THEME_KEY), Theme.PLAIN_DARK_GRAY);
+        settings.theme = Theme.fromSettings(props.getProperty(THEME_KEY), DEFAULT_THEME);
+        settings.iconPack = IconPack.fromSettings(
+                props.getProperty(ICON_PACK_KEY), DEFAULT_ICON_PACK);
         settings.thumbnailMaxEdge = parseBoundedInt(
                 props.getProperty(THUMB_MAX_EDGE_KEY), DEFAULT_THUMB_MAX_EDGE, 32, 2048);
         settings.thumbnailMemoryBudgetMb = parseBoundedInt(
@@ -315,7 +329,7 @@ public final class AppSettings {
         settings.mosaicThumbnailsVisible =
                 Boolean.parseBoolean(props.getProperty(MOSAIC_THUMBNAILS_VISIBLE_KEY, "true"));
         settings.mosaicFillTiles =
-                Boolean.parseBoolean(props.getProperty(MOSAIC_FILL_TILES_KEY, "false"));
+                Boolean.parseBoolean(props.getProperty(MOSAIC_FILL_TILES_KEY, "true"));
         settings.mosaicSeamless =
                 Boolean.parseBoolean(props.getProperty(MOSAIC_SEAMLESS_KEY, "true"));
         settings.mosaicAutoOpen =
@@ -350,6 +364,8 @@ public final class AppSettings {
         settings.mosaicFolderPreviewGrid = parseBoundedInt(
                 props.getProperty(MOSAIC_FOLDER_PREVIEW_GRID_KEY),
                 DEFAULT_MOSAIC_FOLDER_PREVIEW_GRID, 0, 4);
+        settings.mosaicTileSetId = normalizedId(
+                props.getProperty(MOSAIC_TILE_SET_KEY), DEFAULT_MOSAIC_TILE_SET_ID);
         settings.mosaicFolderPreviewSniff = Boolean.parseBoolean(
                 props.getProperty(MOSAIC_FOLDER_PREVIEW_SNIFF_KEY, "false"));
         settings.listingIgnoreJunkFiles = Boolean.parseBoolean(
@@ -382,7 +398,7 @@ public final class AppSettings {
         settings.mosaicFileLabelsVisible =
                 Boolean.parseBoolean(props.getProperty(MOSAIC_FILE_LABELS_KEY, "true"));
         settings.mosaicMediaLabelsVisible =
-                Boolean.parseBoolean(props.getProperty(MOSAIC_MEDIA_LABELS_KEY, "true"));
+                Boolean.parseBoolean(props.getProperty(MOSAIC_MEDIA_LABELS_KEY, "false"));
         settings.moveHistoryLimit = parseBoundedInt(
                 props.getProperty(MOVE_HISTORY_LIMIT_KEY), DEFAULT_MOVE_HISTORY_LIMIT,
                 MIN_MOVE_HISTORY_LIMIT, MAX_MOVE_HISTORY_LIMIT);
@@ -392,9 +408,9 @@ public final class AppSettings {
                 DEFAULT_ADJUSTMENTS_VOLATILE_MAX_DIRS,
                 MIN_ADJUSTMENTS_VOLATILE_MAX_DIRS, MAX_ADJUSTMENTS_VOLATILE_MAX_DIRS);
         settings.albumRecents = loadAlbumRecents(props);
-        // Per-window chrome visibility. Defaults: the browser, viewer and mosaic
-        // menu bars and the browser nav tree shown, all three toolbars hidden,
-        // and the browser and mosaic status bars shown.
+        // Per-window chrome visibility. Defaults: all menu bars, the browser nav
+        // tree, both mosaic tool strips, and browser/mosaic status bars shown;
+        // browser and viewer toolbars remain hidden.
         settings.browserMenuBarVisible =
                 Boolean.parseBoolean(props.getProperty(BROWSER_MENU_BAR_KEY, "true"));
         settings.browserToolbarVisible =
@@ -417,6 +433,8 @@ public final class AppSettings {
         settings.viewerFlipbookFps = parseBoundedInt(
                 props.getProperty(VIEWER_FLIPBOOK_FPS_KEY), DEFAULT_VIEWER_FLIPBOOK_FPS,
                 MIN_VIEWER_FLIPBOOK_FPS, MAX_VIEWER_FLIPBOOK_FPS);
+        settings.viewerFlipbookLoop =
+                Boolean.parseBoolean(props.getProperty(VIEWER_FLIPBOOK_LOOP_KEY, "true"));
         settings.viewerLoadingIndicator = LoadingIndicator.fromSettings(
                 props.getProperty(VIEWER_LOADING_INDICATOR_KEY), DEFAULT_VIEWER_LOADING_INDICATOR);
         settings.viewerLoadingIndicatorDelayMs = parseBoundedInt(
@@ -426,11 +444,11 @@ public final class AppSettings {
         settings.mosaicMenuBarVisible =
                 Boolean.parseBoolean(props.getProperty(MOSAIC_MENU_BAR_KEY, "true"));
         settings.mosaicToolbarVisible =
-                Boolean.parseBoolean(props.getProperty(MOSAIC_TOOLBAR_KEY, "false"));
+                Boolean.parseBoolean(props.getProperty(MOSAIC_TOOLBAR_KEY, "true"));
         settings.mosaicStatusBarVisible =
                 Boolean.parseBoolean(props.getProperty(MOSAIC_STATUS_BAR_KEY, "true"));
         settings.mosaicLocationBarVisible =
-                Boolean.parseBoolean(props.getProperty(MOSAIC_LOCATION_BAR_KEY, "false"));
+                Boolean.parseBoolean(props.getProperty(MOSAIC_LOCATION_BAR_KEY, "true"));
         // One flag for all three views; a properties file from before the
         // unification carries the per-view pair instead — migrate as their OR.
         String actionLogVisibleProp = props.getProperty(ACTION_LOG_VISIBLE_KEY);
@@ -523,6 +541,12 @@ public final class AppSettings {
         return Math.max(min, Math.min(max, n));
     }
 
+    private static String normalizedId(String value, String fallback) {
+        if (value == null) return fallback;
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        return normalized.matches("[a-z0-9][a-z0-9.-]*") ? normalized : fallback;
+    }
+
     /** Writes the current values back to the default settings file. */
     public void save() throws IOException {
         save(FILE);
@@ -547,6 +571,7 @@ public final class AppSettings {
         props.setProperty(DECODE_DEVICE_KEY, decodeDevice);
         props.setProperty(DETECTION_KEY, detectionMode);
         props.setProperty(THEME_KEY, theme.name());
+        props.setProperty(ICON_PACK_KEY, iconPack.name());
         props.setProperty(THUMB_MAX_EDGE_KEY, Integer.toString(thumbnailMaxEdge));
         props.setProperty(THUMB_BUDGET_MB_KEY, Integer.toString(thumbnailMemoryBudgetMb));
         props.setProperty(MOSAIC_THUMBNAILS_VISIBLE_KEY,
@@ -566,6 +591,7 @@ public final class AppSettings {
         props.setProperty(MOSAIC_BORDER_COLOR_KEY, mosaicBorderColor);
         props.setProperty(MOSAIC_FOLDER_PREVIEW_GRID_KEY,
                 Integer.toString(mosaicFolderPreviewGrid));
+        props.setProperty(MOSAIC_TILE_SET_KEY, mosaicTileSetId);
         props.setProperty(MOSAIC_FOLDER_PREVIEW_SNIFF_KEY,
                 Boolean.toString(mosaicFolderPreviewSniff));
         props.setProperty(LISTING_IGNORE_JUNK_KEY, Boolean.toString(listingIgnoreJunkFiles));
@@ -600,6 +626,7 @@ public final class AppSettings {
         props.setProperty(VIEWER_SLIDESHOW_INTERVAL_KEY, Integer.toString(viewerSlideshowIntervalSeconds));
         props.setProperty(VIEWER_SLIDESHOW_REVERSE_KEY, Boolean.toString(viewerSlideshowReverse));
         props.setProperty(VIEWER_FLIPBOOK_FPS_KEY, Integer.toString(viewerFlipbookFps));
+        props.setProperty(VIEWER_FLIPBOOK_LOOP_KEY, Boolean.toString(viewerFlipbookLoop));
         props.setProperty(VIEWER_LOADING_INDICATOR_KEY, viewerLoadingIndicator.name());
         props.setProperty(VIEWER_LOADING_INDICATOR_DELAY_KEY,
                 Integer.toString(viewerLoadingIndicatorDelayMs));
@@ -782,7 +809,7 @@ public final class AppSettings {
 
     /**
      * The application look applied across every window (default
-     * {@link Theme#PLAIN_DARK_GRAY}). Applied live by {@code ui.ThemeManager} when
+     * {@link Theme#CUPERTINO_DARK}). Applied live by {@code ui.ThemeManager} when
      * changed in the Settings dialog.
      */
     public Theme theme() {
@@ -790,7 +817,19 @@ public final class AppSettings {
     }
 
     public void setTheme(Theme theme) {
-        this.theme = theme == null ? Theme.DEFAULT : theme;
+        this.theme = theme == null ? DEFAULT_THEME : theme;
+    }
+
+    /**
+     * Application-wide icon artwork (default {@link IconPack#LUCID}).
+     * Applied live by {@code ui.icon.IconPackManager}.
+     */
+    public IconPack iconPack() {
+        return iconPack;
+    }
+
+    public void setIconPack(IconPack iconPack) {
+        this.iconPack = iconPack == null ? DEFAULT_ICON_PACK : iconPack;
     }
 
     /** Longest-edge pixel cap for mosaic preview renditions (default 300). */
@@ -831,7 +870,7 @@ public final class AppSettings {
     /**
      * Whether mosaic media tiles are crop-to-fill squares (seamless, no
      * letterbox) rather than aspect-preserved fits on black. Defaults to
-     * {@code false} (aspect-preserved fit).
+     * {@code true}.
      */
     public boolean mosaicFillTiles() {
         return mosaicFillTiles;
@@ -965,6 +1004,15 @@ public final class AppSettings {
 
     public void setMosaicFolderPreviewGrid(int grid) {
         this.mosaicFolderPreviewGrid = Math.max(0, Math.min(4, grid));
+    }
+
+    /** ID of the generated-art tile set used by Mosaic; {@code xedge-additive} by default. */
+    public String mosaicTileSetId() {
+        return mosaicTileSetId;
+    }
+
+    public void setMosaicTileSetId(String id) {
+        this.mosaicTileSetId = normalizedId(id, DEFAULT_MOSAIC_TILE_SET_ID);
     }
 
     /**
@@ -1106,7 +1154,7 @@ public final class AppSettings {
     }
 
     /**
-     * Whether mosaic media tiles show their name caption (default {@code true}).
+     * Whether mosaic media tiles show their name caption (default {@code false}).
      */
     public boolean mosaicMediaLabelsVisible() {
         return mosaicMediaLabelsVisible;
@@ -1290,8 +1338,9 @@ public final class AppSettings {
 
     /**
      * Which loading indicator the viewer shows while the next media decodes
-     * (default {@link LoadingIndicator#ASCII_MATRIX}). Seeded into the viewer at
-     * startup, persisted on every change, and editable from the Settings dialog.
+     * (default {@link LoadingIndicator#NOW_LOADING}). Seeded into
+     * the viewer at startup, persisted on every change, and editable from the
+     * Settings dialog.
      */
     public LoadingIndicator viewerLoadingIndicator() {
         return viewerLoadingIndicator;
@@ -1355,6 +1404,15 @@ public final class AppSettings {
                 Math.min(MAX_VIEWER_FLIPBOOK_FPS, fps));
     }
 
+    /** Whether flipbook playback wraps after its last frame (default {@code true}). */
+    public boolean viewerFlipbookLoop() {
+        return viewerFlipbookLoop;
+    }
+
+    public void setViewerFlipbookLoop(boolean loop) {
+        this.viewerFlipbookLoop = loop;
+    }
+
     /** Whether the mosaic window shows its menu bar (default {@code true}). */
     public boolean mosaicMenuBarVisible() {
         return mosaicMenuBarVisible;
@@ -1364,7 +1422,7 @@ public final class AppSettings {
         this.mosaicMenuBarVisible = visible;
     }
 
-    /** Whether the mosaic window shows its toolbar (default {@code false}). */
+    /** Whether the mosaic window shows its toolbar (default {@code true}). */
     public boolean mosaicToolbarVisible() {
         return mosaicToolbarVisible;
     }
@@ -1382,7 +1440,7 @@ public final class AppSettings {
         this.mosaicStatusBarVisible = visible;
     }
 
-    /** Whether the mosaic window shows its location bar (default {@code false}). */
+    /** Whether the mosaic window shows its location bar (default {@code true}). */
     public boolean mosaicLocationBarVisible() {
         return mosaicLocationBarVisible;
     }

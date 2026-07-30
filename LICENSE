@@ -2,6 +2,10 @@ MIT License
 
 Copyright (c) 2026 ghosthack
 
+This license applies to Media Browser's original code. Source-vendored
+third-party components identified in THIRD-PARTY.md and vendor/archive remain
+under their respective licenses.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

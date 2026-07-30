@@ -92,7 +92,7 @@ public final class ImageSequences {
             return false;
         }
         // Read through java.nio.file, not java.io.File: this runs during every
-        // directory scan, and an entry inside a ZIP/ISO has no java.io.File at
+        // directory scan, and an entry inside an archive has no java.io.File at
         // all. The probes below only walk headers, so they work the same on
         // either filesystem — and crucially without extracting anything, which
         // a per-file scan must never trigger.
