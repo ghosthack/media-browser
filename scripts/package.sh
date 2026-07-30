@@ -88,6 +88,7 @@ fi
 }
 cp "$LICENSE_FILE" "$INPUT_DIR/LICENSE"
 cp "$NOTICES_FILE" "$INPUT_DIR/THIRD-PARTY.md"
+bash "$ROOT/scripts/stage-release-licenses.sh" "$INPUT_DIR"
 
 shopt -s nullglob
 APP_JARS=("$INPUT_DIR/media-browser-$VERSION.jar")
@@ -229,6 +230,32 @@ case "$PLATFORM" in
         tar -C "$IMAGE_DIR" -czf "$PORTABLE" "$APP_NAME"
         ;;
 esac
+
+case "$PLATFORM" in
+    macos)   RUNTIME_LEGAL="$IMAGE_PATH/Contents/runtime/Contents/Home/legal" ;;
+    windows) RUNTIME_LEGAL="$IMAGE_PATH/runtime/legal" ;;
+    linux)   RUNTIME_LEGAL="$IMAGE_PATH/lib/runtime/legal" ;;
+esac
+[[ -d "$RUNTIME_LEGAL" ]] || {
+    echo "error: packaged Java runtime legal directory is missing: $RUNTIME_LEGAL" >&2
+    exit 1
+}
+
+LICENSE_ARTIFACT_NAME="media-browser-$VERSION-$ASSET_PLATFORM-licenses"
+LICENSE_ARTIFACT_ROOT="$PACKAGE_ROOT/license-artifact"
+LICENSE_ARTIFACT_DIR="$LICENSE_ARTIFACT_ROOT/$LICENSE_ARTIFACT_NAME"
+rm -rf "$LICENSE_ARTIFACT_ROOT"
+mkdir -p "$LICENSE_ARTIFACT_DIR"
+cp -R "$INPUT_DIR/THIRD-PARTY-LICENSES/." "$LICENSE_ARTIFACT_DIR/"
+mkdir -p "$LICENSE_ARTIFACT_DIR/runtime"
+cp -RL "$RUNTIME_LEGAL/." "$LICENSE_ARTIFACT_DIR/runtime/"
+(
+    cd "$LICENSE_ARTIFACT_DIR"
+    find . -type f -print | sed 's|^\./||' | LC_ALL=C sort > CONTENTS.txt
+)
+jar --create --no-manifest \
+    --file "$RELEASE_DIR/$LICENSE_ARTIFACT_NAME.zip" \
+    -C "$LICENSE_ARTIFACT_ROOT" "$LICENSE_ARTIFACT_NAME"
 
 echo "release artifacts:"
 find "$RELEASE_DIR" -maxdepth 1 -type f -print

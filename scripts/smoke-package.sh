@@ -40,7 +40,7 @@ esac
     echo "error: packaged application launcher is missing: $LAUNCHER" >&2
     exit 1
 }
-for required in LICENSE THIRD-PARTY.md; do
+for required in LICENSE THIRD-PARTY.md THIRD-PARTY-LICENSES/CONTENTS.txt; do
     [[ -f "$APP_DIR/$required" ]] || {
         echo "error: packaged notice is missing: $APP_DIR/$required" >&2
         exit 1

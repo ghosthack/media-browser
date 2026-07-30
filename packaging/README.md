@@ -8,6 +8,13 @@ with the JDK's `jpackage` tool. It supports:
 - Linux x64 with glibc 2.38+ (including Ubuntu 24.04): `.deb` plus a
   portable `.tar.gz`
 
+Each full packaging run also emits a platform-specific
+`media-browser-X.Y.Z-PLATFORM-licenses.zip`. It contains the application
+license, dependency notices, source-vendored archive licensing/provenance,
+legal and build-information files extracted from the runtime JARs, and the
+`legal/` tree from the exact packaged Java runtime. The non-runtime portion is
+also installed under `THIRD-PARTY-LICENSES`.
+
 The script first builds an `app-image` and runs `scripts/smoke-package.sh`
 against the Java runtime and dependency jars inside that image. Only after the
 bundled FFmpeg backend initializes successfully does it create an installer.

@@ -30,6 +30,13 @@ under `META-INF/licenses/archive` in the application JAR. The CUE/BIN adapter
 and archive filesystem integration are first-party Media Browser code covered
 by this repository's MIT license.
 
+Each platform release includes a matching `-licenses.zip` artifact containing
+the controlling dependency texts and notices, the exact archive-reader
+allowlist, native-library build/source records extracted from the shipped
+classifier JARs, and the complete `legal/` tree from the packaged Java runtime.
+The same application and dependency material is installed in the application
+under `THIRD-PARTY-LICENSES`.
+
 The pom also declares test-scope dependencies that are not part of the built
 application: JUnit Jupiter 5.11.4 (EPL-2.0) and the Bytedeco
 JavaCV/JavaCPP/FFmpeg-preset stack 1.5.13 (Apache-2.0 or GPLv2+CE dual),
