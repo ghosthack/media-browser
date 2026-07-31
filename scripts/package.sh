@@ -2,7 +2,7 @@
 # Build a self-contained Media Browser app image and native installer for the
 # current OS/architecture. Run from any directory:
 #
-#   scripts/package.sh [all|app-image] [X.Y.Z]
+#   scripts/package.sh [all|app-image|installer] [X.Y.Z]
 #
 # The release workflow supplies X.Y.Z from its vX.Y.Z tag. Local builds default
 # to 1.0.0. Signing is optional and is enabled by the environment variables
@@ -21,8 +21,8 @@ PACKAGE_ROOT="$ROOT/target/jpackage"
 IMAGE_DIR="$PACKAGE_ROOT/images"
 RELEASE_DIR="$PACKAGE_ROOT/release"
 
-if [[ "$MODE" != "all" && "$MODE" != "app-image" ]]; then
-    echo "error: mode must be 'all' or 'app-image'" >&2
+if [[ "$MODE" != "all" && "$MODE" != "app-image" && "$MODE" != "installer" ]]; then
+    echo "error: mode must be 'all', 'app-image', or 'installer'" >&2
     exit 2
 fi
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -70,12 +70,6 @@ case "$(uname -s)" in
         ;;
 esac
 
-rm -rf "$INPUT_DIR" "$PACKAGE_ROOT"
-mkdir -p "$INPUT_DIR" "$IMAGE_DIR" "$RELEASE_DIR"
-
-echo "==> Staging the $ASSET_PLATFORM runtime dependencies"
-mvn -B -ntp -Pdist -DskipTests -Drevision="$VERSION" clean package
-
 LICENSE_FILE="$ROOT/LICENSE"
 NOTICES_FILE="$ROOT/THIRD-PARTY.md"
 if [[ ! -f "$LICENSE_FILE" ]]; then
@@ -86,83 +80,106 @@ fi
     echo "error: LICENSE and THIRD-PARTY.md are required packaging inputs" >&2
     exit 1
 }
-cp "$LICENSE_FILE" "$INPUT_DIR/LICENSE"
-cp "$NOTICES_FILE" "$INPUT_DIR/THIRD-PARTY.md"
-bash "$ROOT/scripts/stage-release-licenses.sh" "$INPUT_DIR"
 
 shopt -s nullglob
-APP_JARS=("$INPUT_DIR/media-browser-$VERSION.jar")
-if (( ${#APP_JARS[@]} != 1 )); then
-    echo "error: expected one staged media-browser-$VERSION.jar" >&2
-    exit 1
-fi
-MAIN_JAR="$(basename "${APP_JARS[0]}")"
 
-case "$PLATFORM" in
-    macos)   ICON="$ROOT/packaging/icons/media-browser.icns" ;;
-    windows) ICON="$ROOT/packaging/icons/media-browser.ico" ;;
-    linux)   ICON="$ROOT/packaging/icons/media-browser.png" ;;
-esac
+if [[ "$MODE" != "installer" ]]; then
+    rm -rf "$INPUT_DIR" "$PACKAGE_ROOT"
+    mkdir -p "$INPUT_DIR" "$IMAGE_DIR" "$RELEASE_DIR"
 
-echo "==> Creating the self-contained application image"
-IMAGE_ARGS=(
-    --type app-image
-    --dest "$IMAGE_DIR"
-    --name "$APP_NAME"
-    --app-version "$VERSION"
-    --vendor "ghosthack contributors"
-    --description "A JavaFX desktop media browser"
-    --copyright "Copyright © 2026 ghosthack contributors"
-    --input "$INPUT_DIR"
-    --main-jar "$MAIN_JAR"
-    --main-class "$MAIN_CLASS"
-    --add-modules "$RUNTIME_MODULES"
-    --java-options "--add-modules=$RUNTIME_MODULES"
-    --java-options "-Djavafx.enablePreview=true"
-    --java-options "-Djavafx.suppressPreviewWarning=true"
-    --java-options "--enable-native-access=ALL-UNNAMED"
-    --java-options "--sun-misc-unsafe-memory-access=allow"
-)
-if [[ -f "$ICON" ]]; then
-    IMAGE_ARGS+=(--icon "$ICON")
-fi
-if [[ "$PLATFORM" == "macos" ]]; then
-    IMAGE_ARGS+=(
-        --mac-package-identifier "$APP_ID"
-        --mac-package-name "$APP_NAME"
-        --mac-app-category photography
-    )
-fi
-jpackage "${IMAGE_ARGS[@]}"
+    echo "==> Staging the $ASSET_PLATFORM runtime dependencies"
+    mvn -B -ntp -Pdist -DskipTests -Drevision="$VERSION" clean package
 
-if [[ "$PLATFORM" == "macos" && -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
-    echo "==> Signing the macOS application image"
-    SIGN_ARGS=(
-        --type app-image
-        --app-image "$IMAGE_PATH"
-        --mac-sign
-        --mac-app-image-sign-identity "$MACOS_SIGNING_IDENTITY"
-    )
-    if [[ -n "${MACOS_KEYCHAIN:-}" ]]; then
-        SIGN_ARGS+=(--mac-signing-keychain "$MACOS_KEYCHAIN")
+    cp "$LICENSE_FILE" "$INPUT_DIR/LICENSE"
+    cp "$NOTICES_FILE" "$INPUT_DIR/THIRD-PARTY.md"
+    bash "$ROOT/scripts/stage-release-licenses.sh" "$INPUT_DIR"
+
+    APP_JARS=("$INPUT_DIR/media-browser-$VERSION.jar")
+    if (( ${#APP_JARS[@]} != 1 )); then
+        echo "error: expected one staged media-browser-$VERSION.jar" >&2
+        exit 1
     fi
-    jpackage "${SIGN_ARGS[@]}"
-fi
+    MAIN_JAR="$(basename "${APP_JARS[0]}")"
 
-if [[ "$PLATFORM" == "windows" && -n "${WINDOWS_PFX_FILE:-}" ]]; then
-    echo "==> Signing the Windows application launcher"
-    pwsh -NoProfile -File "$ROOT/scripts/sign-windows.ps1" \
-        -Path "$IMAGE_PATH/$APP_NAME.exe"
-fi
+    case "$PLATFORM" in
+        macos)   ICON="$ROOT/packaging/icons/media-browser.icns" ;;
+        windows) ICON="$ROOT/packaging/icons/media-browser.ico" ;;
+        linux)   ICON="$ROOT/packaging/icons/media-browser.png" ;;
+    esac
 
-if [[ "${SKIP_PACKAGE_SMOKE:-false}" != "true" ]]; then
-    echo "==> Smoke-testing the packaged runtime and native backend"
-    bash "$ROOT/scripts/smoke-package.sh" "$IMAGE_PATH"
-fi
+    echo "==> Creating the self-contained application image"
+    IMAGE_ARGS=(
+        --type app-image
+        --dest "$IMAGE_DIR"
+        --name "$APP_NAME"
+        --app-version "$VERSION"
+        --vendor "ghosthack contributors"
+        --description "A JavaFX desktop media browser"
+        --copyright "Copyright © 2026 ghosthack contributors"
+        --input "$INPUT_DIR"
+        --main-jar "$MAIN_JAR"
+        --main-class "$MAIN_CLASS"
+        --add-modules "$RUNTIME_MODULES"
+        --java-options "--add-modules=$RUNTIME_MODULES"
+        --java-options "-Djavafx.enablePreview=true"
+        --java-options "-Djavafx.suppressPreviewWarning=true"
+        --java-options "--enable-native-access=ALL-UNNAMED"
+        --java-options "--sun-misc-unsafe-memory-access=allow"
+    )
+    if [[ -f "$ICON" ]]; then
+        IMAGE_ARGS+=(--icon "$ICON")
+    fi
+    if [[ "$PLATFORM" == "macos" ]]; then
+        IMAGE_ARGS+=(
+            --mac-package-identifier "$APP_ID"
+            --mac-package-name "$APP_NAME"
+            --mac-app-category photography
+        )
+    fi
+    jpackage "${IMAGE_ARGS[@]}"
 
-if [[ "$MODE" == "app-image" ]]; then
-    echo "application image: $IMAGE_PATH"
-    exit 0
+    if [[ "$PLATFORM" == "macos" && -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
+        echo "==> Signing the macOS application image"
+        SIGN_ARGS=(
+            --type app-image
+            --app-image "$IMAGE_PATH"
+            --mac-sign
+            --mac-app-image-sign-identity "$MACOS_SIGNING_IDENTITY"
+        )
+        if [[ -n "${MACOS_KEYCHAIN:-}" ]]; then
+            SIGN_ARGS+=(--mac-signing-keychain "$MACOS_KEYCHAIN")
+        fi
+        jpackage "${SIGN_ARGS[@]}"
+    fi
+
+    if [[ "$PLATFORM" == "windows" && -n "${WINDOWS_PFX_FILE:-}" ]]; then
+        echo "==> Signing the Windows application launcher"
+        pwsh -NoProfile -File "$ROOT/scripts/sign-windows.ps1" \
+            -Path "$IMAGE_PATH/$APP_NAME.exe"
+    fi
+
+    if [[ "${SKIP_PACKAGE_SMOKE:-false}" != "true" ]]; then
+        echo "==> Smoke-testing the packaged runtime and native backend"
+        bash "$ROOT/scripts/smoke-package.sh" "$IMAGE_PATH"
+    fi
+
+    if [[ "$MODE" == "app-image" ]]; then
+        echo "application image: $IMAGE_PATH"
+        exit 0
+    fi
+else
+    [[ -d "$IMAGE_PATH" ]] || {
+        echo "error: application image does not exist: $IMAGE_PATH" >&2
+        echo "Run app-image mode before installer mode." >&2
+        exit 1
+    }
+    [[ -d "$INPUT_DIR/THIRD-PARTY-LICENSES" ]] || {
+        echo "error: staged license inputs do not exist in $INPUT_DIR" >&2
+        echo "Run app-image mode before installer mode." >&2
+        exit 1
+    }
+    rm -rf "$RELEASE_DIR" "$PACKAGE_ROOT/license-artifact"
+    mkdir -p "$RELEASE_DIR"
 fi
 
 echo "==> Creating the $NATIVE_TYPE installer"
