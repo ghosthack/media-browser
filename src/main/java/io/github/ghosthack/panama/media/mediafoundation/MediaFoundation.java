@@ -797,8 +797,10 @@ public final class MediaFoundation {
     /**
      * Extracts a single video frame at the given time position.
      * <p>
-    * The returned {@link DecodedImage} contains BGRA pixels allocated in the
-     * caller's {@code arena}. The pixel data is valid for the arena's lifetime.
+     * The returned {@link DecodedImage} contains tightly packed BGRA pixels at
+     * the visible display dimensions, with decoder surface padding removed,
+     * allocated in the caller's {@code arena}. The pixel data is valid for the
+     * arena's lifetime.
      *
      * <h2>Pipeline Fallback Chain</h2>
      * <p>
@@ -807,8 +809,8 @@ public final class MediaFoundation {
      *   <li><b>Source Reader (RGB32)</b> — Tries to configure the Source Reader with
      *       RGB32 output. Fastest path and supports all codecs (H.264, HEVC, VP8/VP9,
      *       AV1, etc.) because Windows selects the appropriate decoder automatically.</li>
-    *   <li><b>Source Reader (NV12)</b> — Fallback if RGB32 fails. Returns NV12
-    *       which is then converted to BGRA in software.</li>
+     *   <li><b>Source Reader (NV12)</b> — Fallback if RGB32 fails. Returns NV12
+     *       which is then converted to BGRA in software.</li>
      *   <li><b>Manual MFT Pipeline</b> — Fallback when Source Reader fails with
      *       E_INVALIDARG (0x80070057). This occurs on systems where the MFT
      *       registry is incomplete (missing HKLM\...\Windows Media Foundation\Transforms).
@@ -820,7 +822,7 @@ public final class MediaFoundation {
      * @param arena      the arena that owns the output pixel memory
      * @param path       file system path to the video file
      * @param timeMillis seek position in milliseconds
-    * @return decoded frame as BGRA pixels
+     * @return decoded frame as BGRA pixels
      * @throws IllegalStateException    if Media Foundation is not available
      * @throws IllegalArgumentException if decoding fails
      */
@@ -917,6 +919,129 @@ public final class MediaFoundation {
         int dw = Math.max(2, ((int) Math.round(w * scale)) & ~1);
         int dh = Math.max(2, ((int) Math.round(h * scale)) & ~1);
         return ((long) dw << 32) | (dh & 0xFFFFFFFFL);
+    }
+
+    record FrameDimensions(int width, int height) {
+        long packed() {
+            return ((long) width << 32) | (height & 0xFFFFFFFFL);
+        }
+    }
+
+    record VisibleArea(int x, int y, int width, int height) {}
+
+    private static FrameDimensions frameDimensions(
+            Arena temp, MemorySegment mediaType) throws Throwable {
+        MemorySegment pFrameSize = temp.allocate(ValueLayout.JAVA_LONG);
+        int hr = (int) IMFAttributes_GetUINT64.invokeExact(
+                vtable(mediaType, 8), mediaType,
+                MF_MT_FRAME_SIZE, pFrameSize);
+        check(hr, "GetUINT64(MF_MT_FRAME_SIZE)");
+        long packed = pFrameSize.get(ValueLayout.JAVA_LONG, 0);
+        int width = (int) (packed >>> 32);
+        int height = (int) (packed & 0xFFFFFFFFL);
+        if (width <= 0 || height <= 0) {
+            throw new DecodeException(
+                    "Invalid video frame dimensions: " + width + "x" + height);
+        }
+        return new FrameDimensions(width, height);
+    }
+
+    /**
+     * Returns the visible dimensions carried by a media type. The display
+     * aperture wins when present; otherwise the coded/surface frame size is
+     * the only available display-size signal.
+     */
+    private static FrameDimensions displayDimensions(
+            Arena temp, MemorySegment mediaType) throws Throwable {
+        FrameDimensions surface = frameDimensions(temp, mediaType);
+        MemorySegment area = temp.allocate(16);
+        int hr = (int) IMFAttributes_GetBlob.invokeExact(
+                vtable(mediaType, 15), mediaType,
+                MF_MT_MINIMUM_DISPLAY_APERTURE,
+                area, 16, MemorySegment.NULL);
+        if (!failed(hr)) {
+            int width = area.get(ValueLayout.JAVA_INT, 8);
+            int height = area.get(ValueLayout.JAVA_INT, 12);
+            if (width > 0 && width <= surface.width()
+                    && height > 0 && height <= surface.height()) {
+                return new FrameDimensions(width, height);
+            }
+        }
+        return surface;
+    }
+
+    private static FrameDimensions nativeDisplayDimensions(
+            Arena temp, MemorySegment reader) throws Throwable {
+        MemorySegment ppType = temp.allocate(ValueLayout.ADDRESS);
+        int hr = (int) IMFSourceReader_GetNativeMediaType.invokeExact(
+                vtable(reader, 5), reader,
+                MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, ppType);
+        check(hr, "GetNativeMediaType");
+        MemorySegment nativeType = ppType.get(ValueLayout.ADDRESS, 0);
+        try {
+            return displayDimensions(temp, nativeType);
+        } finally {
+            release(nativeType);
+        }
+    }
+
+    private static FrameDimensions fittedDisplayDimensions(
+            FrameDimensions source, int maxEdge) {
+        long fitted = fitFrameSize(source.packed(), maxEdge);
+        if (fitted == 0) return source;
+        return new FrameDimensions(
+                (int) (fitted >>> 32),
+                (int) (fitted & 0xFFFFFFFFL));
+    }
+
+    /**
+     * Resolves the visible rectangle within an aligned decoder surface.
+     * {@code expected} comes from the input media type (and an accepted
+     * downscale request), preventing a padded output surface from being
+     * mistaken for display pixels.
+     */
+    private static VisibleArea visibleArea(
+            Arena temp,
+            MemorySegment mediaType,
+            FrameDimensions surface,
+            FrameDimensions expected) throws Throwable {
+        int x = 0;
+        int y = 0;
+        int apertureWidth = surface.width();
+        int apertureHeight = surface.height();
+
+        MemorySegment area = temp.allocate(16);
+        int hr = (int) IMFAttributes_GetBlob.invokeExact(
+                vtable(mediaType, 15), mediaType,
+                MF_MT_MINIMUM_DISPLAY_APERTURE,
+                area, 16, MemorySegment.NULL);
+        if (!failed(hr)) {
+            int candidateX = area.get(ValueLayout.JAVA_SHORT, 0);
+            int candidateY = area.get(ValueLayout.JAVA_SHORT, 4);
+            int candidateWidth = area.get(ValueLayout.JAVA_INT, 8);
+            int candidateHeight = area.get(ValueLayout.JAVA_INT, 12);
+            if (candidateX >= 0 && candidateY >= 0
+                    && candidateWidth > 0 && candidateHeight > 0
+                    && candidateX + candidateWidth <= surface.width()
+                    && candidateY + candidateHeight <= surface.height()) {
+                x = candidateX;
+                y = candidateY;
+                apertureWidth = candidateWidth;
+                apertureHeight = candidateHeight;
+            }
+        }
+
+        int width = Math.min(expected.width(), apertureWidth);
+        int height = Math.min(expected.height(), apertureHeight);
+        if (width <= 0 || height <= 0
+                || x + width > surface.width()
+                || y + height > surface.height()) {
+            x = 0;
+            y = 0;
+            width = Math.min(expected.width(), surface.width());
+            height = Math.min(expected.height(), surface.height());
+        }
+        return new VisibleArea(x, y, width, height);
     }
 
     // -- Streaming video frame reader ----------------------------------------
@@ -1562,15 +1687,9 @@ public final class MediaFoundation {
         double frameRate = 0.0;
         String codec = null;
         try {
-            // Frame size: packed as (width << 32 | height)
-            MemorySegment pFrameSize = temp.allocate(ValueLayout.JAVA_LONG);
-            hr = (int) IMFAttributes_GetUINT64.invokeExact(
-                    vtable(nativeType, 8), nativeType,
-                    MF_MT_FRAME_SIZE, pFrameSize);
-            check(hr, "GetUINT64(MF_MT_FRAME_SIZE)");
-            long frameSize = pFrameSize.get(ValueLayout.JAVA_LONG, 0);
-            width = (int) (frameSize >>> 32);
-            height = (int) (frameSize & 0xFFFFFFFFL);
+            FrameDimensions display = displayDimensions(temp, nativeType);
+            width = display.width();
+            height = display.height();
 
             // Frame rate: packed as (numerator << 32 | denominator)
             MemorySegment pFrameRate = temp.allocate(ValueLayout.JAVA_LONG);
@@ -1829,6 +1948,13 @@ public final class MediaFoundation {
         // Container display rotation, baked into the returned poster so Windows
         // tiles are upright (matching playback / the other backends). Best-effort.
         int qcw = readRotationCw(temp, reader);
+        FrameDimensions sourceDisplay =
+                nativeDisplayDimensions(temp, reader);
+        FrameDimensions reducedDisplay =
+                fittedDisplayDimensions(sourceDisplay, maxEdge);
+        boolean reductionRequested =
+                !reducedDisplay.equals(sourceDisplay);
+        boolean reductionAccepted = false;
         boolean useNV12 = false;
         // Create output media type requesting RGB32
         MemorySegment ppType = temp.allocate(ValueLayout.ADDRESS);
@@ -1877,37 +2003,21 @@ public final class MediaFoundation {
             // rejected, MF leaves the already-active full-size type in place, so
             // the working poster path never regresses. GetCurrentMediaType below
             // reads whatever size actually took effect.
-            if (maxEdge > 0) {
-                MemorySegment ppCur = temp.allocate(ValueLayout.ADDRESS);
-                int chr = (int) IMFSourceReader_GetCurrentMediaType.invokeExact(
-                        vtable(reader, 6), reader,
-                        MF_SOURCE_READER_FIRST_VIDEO_STREAM, ppCur);
-                if (!failed(chr)) {
-                    MemorySegment curType = ppCur.get(ValueLayout.ADDRESS, 0);
-                    try {
-                        MemorySegment pNative = temp.allocate(ValueLayout.JAVA_LONG);
-                        int nhr = (int) IMFAttributes_GetUINT64.invokeExact(
-                                vtable(curType, 8), curType, MF_MT_FRAME_SIZE, pNative);
-                        if (!failed(nhr)) {
-                            long target = fitFrameSize(
-                                    pNative.get(ValueLayout.JAVA_LONG, 0), maxEdge);
-                            if (target != 0) {
-                                int shr = (int) IMFAttributes_SetUINT64.invokeExact(
-                                        vtable(mediaType, 22), mediaType,
-                                        MF_MT_FRAME_SIZE, target);
-                                if (!failed(shr)) {
-                                    int rhr = (int) IMFSourceReader_SetCurrentMediaType.invokeExact(
-                                            vtable(reader, 7), reader,
-                                            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                                            MemorySegment.NULL, mediaType);
-                                    if (failed(rhr) && DEBUG)
-                                        System.err.println("[MF] SR downscale hint rejected (0x"
-                                                + Integer.toHexString(rhr) + "); full size");
-                                }
-                            }
-                        }
-                    } finally {
-                        release(curType);
+            if (reductionRequested) {
+                int shr = (int) IMFAttributes_SetUINT64.invokeExact(
+                        vtable(mediaType, 22), mediaType,
+                        MF_MT_FRAME_SIZE, reducedDisplay.packed());
+                if (!failed(shr)) {
+                    int rhr = (int) IMFSourceReader_SetCurrentMediaType.invokeExact(
+                            vtable(reader, 7), reader,
+                            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                            MemorySegment.NULL, mediaType);
+                    reductionAccepted = !failed(rhr);
+                    if (failed(rhr) && DEBUG) {
+                        System.err.println(
+                                "[MF] SR downscale hint rejected (0x"
+                                        + Integer.toHexString(rhr)
+                                        + "); full size");
                     }
                 }
             }
@@ -1991,17 +2101,16 @@ public final class MediaFoundation {
                 check(hr, "GetCurrentMediaType");
                 MemorySegment currentType = ppCurrentType.get(ValueLayout.ADDRESS, 0);
 
-                int width;
-                int height;
+                FrameDimensions surface;
+                VisibleArea visible;
                 try {
-                    MemorySegment pFrameSize = temp.allocate(ValueLayout.JAVA_LONG);
-                    hr = (int) IMFAttributes_GetUINT64.invokeExact(
-                            vtable(currentType, 8), currentType,
-                            MF_MT_FRAME_SIZE, pFrameSize);
-                    check(hr, "GetUINT64(MF_MT_FRAME_SIZE)");
-                    long frameSize = pFrameSize.get(ValueLayout.JAVA_LONG, 0);
-                    width = (int) (frameSize >>> 32);
-                    height = (int) (frameSize & 0xFFFFFFFFL);
+                    surface = frameDimensions(temp, currentType);
+                    FrameDimensions expected =
+                            reductionAccepted
+                                    ? reducedDisplay
+                                    : sourceDisplay;
+                    visible = visibleArea(
+                            temp, currentType, surface, expected);
                 } finally {
                     release(currentType);
                 }
@@ -2009,30 +2118,38 @@ public final class MediaFoundation {
                 MemorySegment srcPixels = data.reinterpret(curLen);
 
                 if (useNV12) {
-                    // NV12: Y plane (w*h) + interleaved UV plane (w*h/2)
-                    int nv12Expected = width * height * 3 / 2;
+                    int srcStride = inferNv12Stride(
+                            curLen, surface.width(), surface.height());
+                    int nv12Expected =
+                            srcStride * surface.height() * 3 / 2;
                     if (curLen < nv12Expected)
                         throw new DecodeException(
                                 "NV12 buffer too small: expected " + nv12Expected
                                         + " bytes, got " + curLen);
                     return rotateDecoded(arena,
-                            convertNV12toBGRA(srcPixels, width, height, arena), qcw);
+                            convertNV12toBGRA(
+                                    srcPixels,
+                                    srcStride,
+                                    surface.height(),
+                                    visible,
+                                    arena),
+                            qcw);
                 }
 
                 // RGB32 = 4 bytes per pixel
-                int stride = width * RGBA_BPP;
-                int expectedLen = stride * height;
+                int stride = inferBgraStride(
+                        curLen, surface.width(), surface.height());
+                int expectedLen = stride * surface.height();
                 if (curLen < expectedLen)
                     throw new DecodeException(
                             "Pixel buffer too small: expected " + expectedLen
                                     + " bytes, got " + curLen);
 
-                long outputSize = (long) stride * height;
-                MemorySegment output = arena.allocate(ValueLayout.JAVA_BYTE, outputSize);
-                MemorySegment.copy(srcPixels, 0, output, 0, outputSize);
-
-                return rotateDecoded(arena, new DecodedImage<>(output, width, height, stride,
-                        PixelFormat.BGRA), qcw);
+                return rotateDecoded(
+                        arena,
+                        copyVisibleBgra(
+                                srcPixels, stride, visible, arena),
+                        qcw);
             } finally {
                 // Unlock -- best-effort
                 try {
@@ -2389,6 +2506,97 @@ public final class MediaFoundation {
         return new DecodedImage<>(output, width, height, stride, PixelFormat.BGRA);
     }
 
+    static int inferBgraStride(
+            int bufferLength, int surfaceWidth, int surfaceHeight) {
+        int packed = Math.multiplyExact(surfaceWidth, RGBA_BPP);
+        if (surfaceHeight > 0 && bufferLength % surfaceHeight == 0) {
+            int inferred = bufferLength / surfaceHeight;
+            if (inferred >= packed) return inferred;
+        }
+        return packed;
+    }
+
+    static int inferNv12Stride(
+            int bufferLength, int surfaceWidth, int surfaceHeight) {
+        if (surfaceHeight > 0) {
+            long numerator = (long) bufferLength * 2;
+            long denominator = (long) surfaceHeight * 3;
+            if (numerator % denominator == 0) {
+                long inferred = numerator / denominator;
+                if (inferred >= surfaceWidth
+                        && inferred <= Integer.MAX_VALUE) {
+                    return (int) inferred;
+                }
+            }
+        }
+        return surfaceWidth;
+    }
+
+    static DecodedImage<PixelFormat> copyVisibleBgra(
+            MemorySegment source,
+            int sourceStride,
+            VisibleArea visible,
+            Arena arena) {
+        int outputStride =
+                Math.multiplyExact(visible.width(), RGBA_BPP);
+        MemorySegment output =
+                arena.allocate(
+                        ValueLayout.JAVA_BYTE,
+                        Math.multiplyExact(
+                                (long) outputStride, visible.height()));
+        for (int y = 0; y < visible.height(); y++) {
+            long sourceOffset =
+                    Math.addExact(
+                            Math.multiplyExact(
+                                    (long) (visible.y() + y),
+                                    sourceStride),
+                            Math.multiplyExact(
+                                    (long) visible.x(), RGBA_BPP));
+            MemorySegment.copy(
+                    source,
+                    sourceOffset,
+                    output,
+                    (long) y * outputStride,
+                    outputStride);
+        }
+        return new DecodedImage<>(
+                output,
+                visible.width(),
+                visible.height(),
+                outputStride,
+                PixelFormat.BGRA);
+    }
+
+    static DecodedImage<PixelFormat> convertNV12toBGRA(
+            MemorySegment nv12Data,
+            int sourceStride,
+            int sourceCodedHeight,
+            VisibleArea visible,
+            Arena arena) {
+        int outputStride =
+                Math.multiplyExact(visible.width(), RGBA_BPP);
+        MemorySegment output =
+                arena.allocate(
+                        ValueLayout.JAVA_BYTE,
+                        Math.multiplyExact(
+                                (long) outputStride, visible.height()));
+        convertNV12intoBGRA(
+                nv12Data,
+                sourceStride,
+                sourceCodedHeight,
+                visible.x(),
+                visible.y(),
+                visible.width(),
+                visible.height(),
+                output);
+        return new DecodedImage<>(
+                output,
+                visible.width(),
+                visible.height(),
+                outputStride,
+                PixelFormat.BGRA);
+    }
+
     /**
      * Converts NV12 pixel data to BGRA, writing into an existing tightly packed
      * {@code dstWidth*dstHeight*4} output segment (overwritten in place). Used by
@@ -2404,17 +2612,39 @@ public final class MediaFoundation {
     private static void convertNV12intoBGRA(
             MemorySegment nv12Data, int srcStride, int srcCodedHeight,
             int dstWidth, int dstHeight, MemorySegment output) {
+        convertNV12intoBGRA(
+                nv12Data,
+                srcStride,
+                srcCodedHeight,
+                0,
+                0,
+                dstWidth,
+                dstHeight,
+                output);
+    }
+
+    private static void convertNV12intoBGRA(
+            MemorySegment nv12Data, int srcStride, int srcCodedHeight,
+            int srcX, int srcY,
+            int dstWidth, int dstHeight, MemorySegment output) {
         int dstStride = dstWidth * 4;
         long uvPlane = (long) srcStride * srcCodedHeight;
 
         for (int y = 0; y < dstHeight; y++) {
-            long yRow = (long) y * srcStride;
-            long uvRow = uvPlane + (long) (y / 2) * srcStride;
+            int sourceY = srcY + y;
+            long yRow = (long) sourceY * srcStride;
+            long uvRow =
+                    uvPlane + (long) (sourceY / 2) * srcStride;
             long outRow = (long) y * dstStride;
             for (int x = 0; x < dstWidth; x++) {
-                int yVal = nv12Data.get(ValueLayout.JAVA_BYTE, yRow + x) & 0xFF;
+                int sourceX = srcX + x;
+                int yVal =
+                        nv12Data.get(
+                                        ValueLayout.JAVA_BYTE,
+                                        yRow + sourceX)
+                                & 0xFF;
                 // UV plane is subsampled 2x2; same padded stride as Y.
-                long uvOffset = uvRow + (x & ~1);
+                long uvOffset = uvRow + (sourceX & ~1);
                 int u = nv12Data.get(ValueLayout.JAVA_BYTE, uvOffset) & 0xFF;
                 int v = nv12Data.get(ValueLayout.JAVA_BYTE, uvOffset + 1) & 0xFF;
 
@@ -2485,6 +2715,13 @@ public final class MediaFoundation {
                                 MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, ppNativeType);
                         check(hr, "GetNativeMediaType");
                         MemorySegment nativeType = ppNativeType.get(ValueLayout.ADDRESS, 0);
+                        FrameDimensions sourceDisplay =
+                                displayDimensions(temp, nativeType);
+                        FrameDimensions reducedDisplay =
+                                fittedDisplayDimensions(
+                                        sourceDisplay, maxEdge);
+                        boolean reductionRequested =
+                                !reducedDisplay.equals(sourceDisplay);
 
                         MemorySegment d3dDevice = MemorySegment.NULL;
                         MemorySegment d3dContext = MemorySegment.NULL;
@@ -2554,7 +2791,6 @@ public final class MediaFoundation {
                             check(hr, "Decoder GetOutputAvailableType");
                             MemorySegment decoderOutputType = ppDecOut.get(ValueLayout.ADDRESS, 0);
 
-                            MemorySegment pFrameSize = temp.allocate(ValueLayout.JAVA_LONG);
                             // Native poster downscale: ask the decoder to emit a
                             // frame that fits maxEdge on its longer edge (never
                             // upscaling). The stock MS H.264 MFT on some boxes
@@ -2562,24 +2798,19 @@ public final class MediaFoundation {
                             // SetOutputType MUST fall back to a fresh full-size
                             // type — the working poster path never regresses.
                             boolean hinted = false;
-                            if (maxEdge > 0) {
-                                int ghr = (int) IMFAttributes_GetUINT64.invokeExact(
-                                        vtable(decoderOutputType, 8), decoderOutputType,
-                                        MF_MT_FRAME_SIZE, pFrameSize);
-                                if (!failed(ghr)) {
-                                    long target = fitFrameSize(
-                                            pFrameSize.get(ValueLayout.JAVA_LONG, 0), maxEdge);
-                                    if (target != 0) {
-                                        int shr = (int) IMFAttributes_SetUINT64.invokeExact(
-                                                vtable(decoderOutputType, 22), decoderOutputType,
-                                                MF_MT_FRAME_SIZE, target);
-                                        hinted = !failed(shr);
-                                    }
-                                }
+                            if (reductionRequested) {
+                                int shr = (int) IMFAttributes_SetUINT64.invokeExact(
+                                        vtable(decoderOutputType, 22),
+                                        decoderOutputType,
+                                        MF_MT_FRAME_SIZE,
+                                        reducedDisplay.packed());
+                                hinted = !failed(shr);
                             }
 
                             hr = (int) IMFTransform_SetOutputType.invokeExact(
                                     vtable(decoder, 16), decoder, 0, decoderOutputType, 0);
+                            boolean reductionAccepted =
+                                    hinted && !failed(hr);
                             if (failed(hr) && hinted) {
                                 if (DEBUG) System.err.println("[MF] downscale hint rejected (0x"
                                         + Integer.toHexString(hr) + "); decoding full size");
@@ -2594,13 +2825,21 @@ public final class MediaFoundation {
                             }
                             check(hr, "Decoder SetOutputType");
 
-                            hr = (int) IMFAttributes_GetUINT64.invokeExact(
-                                    vtable(decoderOutputType, 8), decoderOutputType,
-                                    MF_MT_FRAME_SIZE, pFrameSize);
-                            check(hr, "GetUINT64(MF_MT_FRAME_SIZE)");
-                            long frameSize = pFrameSize.get(ValueLayout.JAVA_LONG, 0);
-                            int width = (int) (frameSize >>> 32);
-                            int height = (int) (frameSize & 0xFFFFFFFFL);
+                            FrameDimensions surface =
+                                    frameDimensions(
+                                            temp, decoderOutputType);
+                            FrameDimensions expectedDisplay =
+                                    reductionAccepted
+                                            ? reducedDisplay
+                                            : sourceDisplay;
+                            VisibleArea visible =
+                                    visibleArea(
+                                            temp,
+                                            decoderOutputType,
+                                            surface,
+                                            expectedDisplay);
+                            int width = surface.width();
+                            int height = surface.height();
 
                             release(decoderOutputType);
                             release(nativeType);
@@ -2711,15 +2950,17 @@ public final class MediaFoundation {
                                     hrNew = (int) IMFTransform_SetOutputType.invokeExact(
                                             vtable(decoder, 16), decoder, 0, newOutType, 0);
                                     check(hrNew, "Re-SetOutputType");
-                                    MemorySegment pNewSize = temp.allocate(ValueLayout.JAVA_LONG);
-                                    hrNew = (int) IMFAttributes_GetUINT64.invokeExact(
-                                            vtable(newOutType, 8), newOutType,
-                                            MF_MT_FRAME_SIZE, pNewSize);
-                                    if (!failed(hrNew)) {
-                                        long newSize = pNewSize.get(ValueLayout.JAVA_LONG, 0);
-                                        width = (int) (newSize >>> 32);
-                                        height = (int) (newSize & 0xFFFFFFFFL);
-                                    }
+                                    surface =
+                                            frameDimensions(
+                                                    temp, newOutType);
+                                    visible =
+                                            visibleArea(
+                                                    temp,
+                                                    newOutType,
+                                                    surface,
+                                                    expectedDisplay);
+                                    width = surface.width();
+                                    height = surface.height();
                                     MemorySegment pNewSI = temp.allocate(12);
                                     hrNew = (int) IMFTransform_GetOutputStreamInfo.invokeExact(
                                             vtable(decoder, 7), decoder, 0, pNewSI);
@@ -2781,14 +3022,21 @@ public final class MediaFoundation {
                                     MemorySegment data = ppData.get(ValueLayout.ADDRESS, 0);
                                     int curLen = pCurLen.get(ValueLayout.JAVA_INT, 0);
 
-                                    int yPlaneSize = width * height;
-                                    int expectedLen = yPlaneSize + (yPlaneSize / 2);
+                                    int srcStride = inferNv12Stride(
+                                            curLen, width, height);
+                                    int expectedLen =
+                                            srcStride * height * 3 / 2;
                                     if (curLen < expectedLen)
                                         throw new DecodeException(
                                                 "NV12 buffer too small: " + curLen + " < " + expectedLen);
 
                                     return rotateDecoded(arena,
-                                            convertNV12toBGRA(data.reinterpret(curLen), width, height, arena),
+                                            convertNV12toBGRA(
+                                                    data.reinterpret(curLen),
+                                                    srcStride,
+                                                    height,
+                                                    visible,
+                                                    arena),
                                             qcw);
                                 } finally {
                                     try {

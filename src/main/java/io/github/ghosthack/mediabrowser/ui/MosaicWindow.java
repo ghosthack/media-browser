@@ -1710,7 +1710,7 @@ public final class MosaicWindow
                 Platform.runLater(() -> {
                     if (gen != probeSequence) return;
                     if (error != null) {
-                        metadataPanel.showMessage(rootMessage(error));
+                        metadataPanel.showFailure(rootMessage(error));
                     } else {
                         metadataPanel.show(md);
                     }

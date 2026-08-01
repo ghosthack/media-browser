@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Native-agnostic full-metadata snapshot of a media file, as produced by
@@ -26,7 +28,11 @@ import java.util.Map;
  *
  * <p>Groups and entries preserve insertion order (use {@link Builder}).</p>
  */
-public record Metadata(Path path, List<Group> groups) {
+public record Metadata(Path path,
+                       Provider provider,
+                       Status status,
+                       Optional<String> message,
+                       List<Group> groups) {
 
     /**
      * Maximum number of characters kept in {@link Entry#value()} (the
@@ -35,13 +41,67 @@ public record Metadata(Path path, List<Group> groups) {
      */
     public static final int MAX_VALUE_CHARS = 2048;
 
+    /** Provider identity carried across the backend-agnostic metadata boundary. */
+    public record Provider(String id, String displayName) {
+        public static final Provider UNSPECIFIED = new Provider("unspecified", "");
+        public static final Provider PURE = new Provider("pure", "Pure");
+
+        public Provider {
+            id = Objects.requireNonNull(id, "id");
+            displayName = Objects.requireNonNull(displayName, "displayName");
+            if (id.isBlank()) throw new IllegalArgumentException("provider id must not be blank");
+        }
+
+        public boolean isSpecified() {
+            return this != UNSPECIFIED && !displayName.isBlank();
+        }
+    }
+
+    /** A successful metadata capability outcome; extraction failures remain exceptional. */
+    public enum Status {
+        FOUND,
+        NO_TAGS,
+        UNSUPPORTED
+    }
+
+    /** Backwards-compatible snapshot constructor for providers not yet outcome-aware. */
+    public Metadata(Path path, List<Group> groups) {
+        this(path, Provider.UNSPECIFIED,
+                groups.isEmpty() ? Status.NO_TAGS : Status.FOUND,
+                Optional.empty(), groups);
+    }
+
     public Metadata {
+        path = Objects.requireNonNull(path, "path");
+        provider = Objects.requireNonNull(provider, "provider");
+        status = Objects.requireNonNull(status, "status");
+        message = Objects.requireNonNull(message, "message");
         groups = List.copyOf(groups);
+        if (status == Status.UNSUPPORTED) {
+            if (!groups.isEmpty()) {
+                throw new IllegalArgumentException("unsupported metadata cannot carry groups");
+            }
+            if (message.filter(value -> !value.isBlank()).isEmpty()) {
+                throw new IllegalArgumentException("unsupported metadata requires a reason");
+            }
+        }
     }
 
     /** An empty snapshot (the {@link MediaFacade#readMetadata} default / no coverage). */
     public static Metadata empty(Path path) {
         return new Metadata(path, List.of());
+    }
+
+    /** A provider supports the item but found no embedded metadata tags. */
+    public static Metadata noTags(Path path, Provider provider, Optional<String> message,
+                                  List<Group> headerGroups) {
+        return new Metadata(path, provider, Status.NO_TAGS, message, headerGroups);
+    }
+
+    /** A provider does not expose metadata for this item. */
+    public static Metadata unsupported(Path path, Provider provider, String reason) {
+        return new Metadata(path, provider, Status.UNSUPPORTED,
+                Optional.of(reason), List.of());
     }
 
     /** Whether there are no groups at all (backend has no metadata coverage / no tags). */

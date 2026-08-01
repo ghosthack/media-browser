@@ -53,7 +53,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Consumer-owned NIO adapter over robust-unrar, robust-seven, pdf-media, and epub-media.
  *
- * <p>The vendored readers retain parsing, decoding and resource-budget policy;
+ * <p>The media-inspection readers retain parsing, decoding and resource-budget policy;
  * this layer owns filesystem concerns: safe path normalization, synthesized
  * parent directories, deterministic duplicate handling and read-only NIO
  * behavior.
@@ -71,7 +71,7 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
 
     @Override public String getScheme() { return SCHEME; }
 
-    /** Mounts a streaming source with the matching vendored mechanics reader. */
+    /** Mounts a streaming source with the matching media-inspection reader. */
     public StreamFileSystem newFileSystem(Path source, ArchiveFormat format) throws IOException {
         if (format != ArchiveFormat.RAR
                 && format != ArchiveFormat.SEVEN_Z

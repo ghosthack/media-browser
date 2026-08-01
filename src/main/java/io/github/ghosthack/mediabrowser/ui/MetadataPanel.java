@@ -56,9 +56,13 @@ public final class MetadataPanel extends VBox {
     /** A group header row; carries the entry count for the value column. */
     private record GroupHeader(String name, int count) {}
 
+    /** Headless-testable rendering decision for a metadata outcome. */
+    record Presentation(String providerText, String placeholderText, boolean showGroups) {}
+
     private final TreeTableView<Object> table = new TreeTableView<>();
     private final TreeItem<Object> root = new TreeItem<>(null);
     private final Label placeholder = new Label(PLACEHOLDER);
+    private final Label providerLabel = new Label();
     private final Button loadButton = new Button("Load");
     private final ToggleButton autoToggle = new ToggleButton("Auto");
     private final ToggleButton toolsToggle = new ToggleButton("...");
@@ -72,6 +76,7 @@ public final class MetadataPanel extends VBox {
     public MetadataPanel() {
         var title = new Label("Metadata");
         title.setStyle("-fx-font-weight: bold; -fx-padding: 6 8 6 8;");
+        providerLabel.setStyle("-fx-opacity: 0.72;");
 
         loadButton.setTooltip(new Tooltip("Read the full metadata of the on-screen item"));
         loadButton.setOnAction(e -> onLoadRequested.run());
@@ -85,7 +90,8 @@ public final class MetadataPanel extends VBox {
 
         var titleSpacer = new Region();
         HBox.setHgrow(titleSpacer, Priority.ALWAYS);
-        titleRow = new HBox(6, title, titleSpacer, loadButton, autoToggle, toolsToggle);
+        titleRow = new HBox(6, title, providerLabel, titleSpacer,
+                loadButton, autoToggle, toolsToggle);
         titleRow.setAlignment(Pos.CENTER_LEFT);
         titleRow.setPadding(new Insets(0, 6, 0, 0));
         titleRow.getStyleClass().addAll("tool-bar", "side-panel-header");
@@ -162,12 +168,12 @@ public final class MetadataPanel extends VBox {
     /** Populates the table with a freshly read snapshot (or a "no metadata" note). */
     public void show(Metadata metadata) {
         this.master = metadata;
-        if (metadata == null || metadata.isEmpty()) {
+        Presentation presentation = presentation(metadata);
+        providerLabel.setText(presentation.providerText());
+        if (!presentation.showGroups()) {
             this.master = null;
             root.getChildren().clear();
-            placeholder.setText(metadata == null
-                    ? PLACEHOLDER
-                    : "No metadata exposed by this backend for this item");
+            placeholder.setText(presentation.placeholderText());
             return;
         }
         applyFilter();
@@ -176,13 +182,54 @@ public final class MetadataPanel extends VBox {
     /** Clears the table and shows {@code message} in the placeholder area. */
     public void showMessage(String message) {
         this.master = null;
+        providerLabel.setText("");
         root.getChildren().clear();
         placeholder.setText(message);
+    }
+
+    /** Shows an extraction failure distinctly from unsupported and no-tags outcomes. */
+    public void showFailure(String message) {
+        Presentation presentation = failurePresentation(message);
+        this.master = null;
+        providerLabel.setText(presentation.providerText());
+        root.getChildren().clear();
+        placeholder.setText(presentation.placeholderText());
     }
 
     /** Resets to the manual-default placeholder for a newly navigated item. */
     public void resetToPlaceholder() {
         showMessage(PLACEHOLDER);
+    }
+
+    static Presentation presentation(Metadata metadata) {
+        if (metadata == null) return new Presentation("", PLACEHOLDER, false);
+
+        String provider = metadata.provider().isSpecified()
+                ? metadata.provider().displayName() : "";
+        String suffix = switch (metadata.status()) {
+            case FOUND -> "";
+            case NO_TAGS -> " · no embedded tags";
+            case UNSUPPORTED -> " · unsupported";
+        };
+        String providerText = provider.isBlank() ? "" : provider + suffix;
+
+        if (metadata.status() == Metadata.Status.UNSUPPORTED) {
+            return new Presentation(providerText, metadata.message()
+                    .orElse("This provider does not expose metadata for this item"), false);
+        }
+        if (metadata.isEmpty()) {
+            String message = metadata.status() == Metadata.Status.NO_TAGS
+                    ? metadata.message().orElse("This item contains no embedded metadata tags")
+                    : "No metadata fields were returned";
+            return new Presentation(providerText, message, false);
+        }
+        return new Presentation(providerText, "", true);
+    }
+
+    static Presentation failurePresentation(String message) {
+        return new Presentation("Extraction failed",
+                message == null || message.isBlank() ? "Metadata extraction failed" : message,
+                false);
     }
 
     // --- rendering ----------------------------------------------------------

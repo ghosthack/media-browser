@@ -34,7 +34,7 @@ public enum ArchiveFormat {
     /** EPUB package media selected through its OPF manifest. */
     EPUB(Set.of("epub")),
 
-    /** ISO 9660 disc image, read through the vendored reader. */
+    /** ISO 9660 disc image, read through the media-inspection reader. */
     ISO(Set.of("iso")),
 
     /** RAR 1.5–7 archives and the CBR comic-book alias. */

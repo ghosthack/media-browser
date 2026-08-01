@@ -158,7 +158,8 @@ final class PdfEntryDetails {
 
     private static Metadata remapPath(Path source, Metadata decoded) {
         return source.equals(decoded.path())
-                ? decoded : new Metadata(source, decoded.groups());
+                ? decoded : new Metadata(source, decoded.provider(), decoded.status(),
+                        decoded.message(), decoded.groups());
     }
 
     private static String encoding(PdfRasterDescriptor raster) {

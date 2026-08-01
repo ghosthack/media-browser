@@ -6,7 +6,7 @@ Maven JARs do not carry their own license file.
 The release packager combines them with:
 
 - the Media Browser `LICENSE` and `THIRD-PARTY.md`;
-- the source-vendored inspection-mechanics metadata selected by
+- the inspection-dependency metadata selected by
   `vendor/archive/REDISTRIBUTION.allowlist`;
 - every license, notice, copyright, source, and build-information file found
   inside the staged runtime JARs; and

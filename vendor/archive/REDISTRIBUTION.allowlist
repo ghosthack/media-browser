@@ -2,6 +2,17 @@ epub/LICENSE
 pdf/LICENSE
 pdf/NOTICE.md
 pdf/PROVENANCE.toml
+pdf/vendor/commons-logging/LICENSE.txt
+pdf/vendor/commons-logging/NOTICE.txt
+pdf/vendor/fontbox/DEPENDENCIES
+pdf/vendor/fontbox/LICENSE
+pdf/vendor/fontbox/NOTICE
+pdf/vendor/pdfbox-io/DEPENDENCIES
+pdf/vendor/pdfbox-io/LICENSE
+pdf/vendor/pdfbox-io/NOTICE
+pdf/vendor/pdfbox/DEPENDENCIES
+pdf/vendor/pdfbox/LICENSE
+pdf/vendor/pdfbox/NOTICE
 seven/LICENSE
 seven/NOTICE.md
 seven/PROVENANCE.toml

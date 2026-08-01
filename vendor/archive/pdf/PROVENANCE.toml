@@ -3,14 +3,82 @@ project = "pdf-media-extraction"
 
 [[components]]
 name = "Apache PDFBox"
-kind = "runtime-dependency"
+kind = "vendored-source"
 coordinates = "org.apache.pdfbox:pdfbox:3.0.8"
 repository = "https://github.com/apache/pdfbox.git"
 release_date = "2026-07-11"
 integrated_date = "2026-07-30"
 license = "Apache-2.0"
+source_artifact_sha256 = "eaed642d27599c78229857e4ab571805979f828f5ec8c695e3135ca933766132"
+vendored = true
+relocated = true
+
+[[components]]
+name = "Apache PDFBox IO"
+kind = "vendored-source"
+coordinates = "org.apache.pdfbox:pdfbox-io:3.0.8"
+license = "Apache-2.0"
+source_artifact_sha256 = "c0ce16d1ea7b2e68607741e43b2ea14a2e9193eb7a2b344853c4c64b397fb250"
+vendored = true
+relocated = true
+
+[[components]]
+name = "Apache FontBox"
+kind = "fully-pruned-upstream-input"
+coordinates = "org.apache.pdfbox:fontbox:3.0.8"
+license = "Apache-2.0"
+source_artifact_sha256 = "ccb9a570f102b776974dd3ab5a5dd96972c90e2dd30cd3e9ecc59d854f1dc1b0"
 vendored = false
 relocated = false
+note = "verified during deterministic staging; no FontBox source, class, or resource is retained"
+
+[[components]]
+name = "Apache Commons Logging"
+kind = "compatibility-contract-upstream-input"
+coordinates = "commons-logging:commons-logging:1.4.0"
+license = "Apache-2.0"
+source_artifact_sha256 = "28104e5057a11c6e9cda72e973d767b3a0185e65363fede91bc848bc6a309634"
+vendored = false
+relocated = false
+note = "upstream implementation fully pruned; internal call contract is provided by a local System.Logger adapter"
+
+[import]
+script = "scripts/vendor-pdfbox.sh"
+snapshot_sha256 = "7a858e24bb1fff3c3a6287f179da8000c0cabfd9d5f461ea29dd5476315de3dd"
+snapshot_hash_method = "SHA-256 of the sorted 'SHA-256  relative-path' records for files under src/vendor/java and src/vendor/resources"
+package_map = [
+  "org.apache.pdfbox -> io.github.ghosthack.pdfmedia.internal.pdfbox",
+  "org.apache.fontbox -> io.github.ghosthack.pdfmedia.internal.fontbox",
+  "org.apache.commons.logging -> io.github.ghosthack.pdfmedia.internal.logging",
+]
+removed_upstream_sources = [
+  "Bouncy Castle public-key encryption",
+  "Apache Commons Logging discovery and adapter implementation",
+  "Avalon, Log4j, LogKit, SLF4J, javax.servlet, and jakarta.servlet logging bridges",
+]
+removed_source_policy = "removed from the checked-in source subset after relocation and review"
+
+[usage_baseline]
+method = "pre-pruning JDK class-load logging while running the original 16-test pdf-media suite"
+direct_production_imports = 30
+loaded_pdfbox_top_level_types = 149
+loaded_fontbox_top_level_types = 0
+loaded_commons_logging_top_level_types = 6
+caveat = "observed test coverage only; an unloaded type is not proven safe to remove"
+
+[runtime_pruning]
+policy = "direct COS traversal with only the parsing, decryption, filter, tokenization, and media-demuxing closure retained"
+retained_upstream_java_sources = 93
+retained_vendor_resources = 8
+removed_java_sources = 708
+removed_package_documents = 45
+removed_resources = 118
+omitted_class_files = 715
+runtime_jar_bytes_before = 3714172
+runtime_jar_reduction = "approximately 89 percent"
+omitted_application_engines = ["FontBox and PDF font models", "page rendering", "printing", "text extraction", "forms", "merge/split", "PDF writing", "general page-content interpretation"]
+corpus_validation = "293 PDFs: all 257 successful inspections and 36 expected failures matched the complete graph for page counts, entry descriptors, and SHA-256 hashes of every opened entry stream"
+source_snapshot_policy = "scripts/vendor-pdfbox.sh removes every version-specific path in scripts/pruned-sources.txt and scripts/pruned-resources.txt after relocation"
 
 [policy]
 native_code = false

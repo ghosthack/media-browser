@@ -10,8 +10,8 @@ with the JDK's `jpackage` tool. It supports:
 
 Each full packaging run also emits a platform-specific
 `media-browser-X.Y.Z-PLATFORM-licenses.zip`. It contains the application
-license, dependency notices, source-vendored inspection-mechanics
-licensing/provenance, legal and build-information files extracted from the
+license, dependency notices, inspection-library licensing/provenance, legal
+and build-information files extracted from the
 runtime JARs, and the `legal/` tree from the exact packaged Java runtime. The
 non-runtime portion is also installed under `THIRD-PARTY-LICENSES`.
 

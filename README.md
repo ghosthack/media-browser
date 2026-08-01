@@ -70,7 +70,6 @@ decodes through its assigned engine or reports the error.
 ## About this repository
 
 Media Browser's original code is licensed under the [MIT License](LICENSE).
-Source-vendored inspection mechanics retain their upstream licenses, including
-the non-OSI UnRAR restriction; exact notices and provenance live under
-`vendor/archive`. See [THIRD-PARTY.md](THIRD-PARTY.md) for the complete
-dependency overview.
+Inspection dependencies retain their upstream licenses, including the non-OSI
+UnRAR restriction; exact notices and provenance live under `vendor/archive`.
+See [THIRD-PARTY.md](THIRD-PARTY.md) for the complete dependency overview.

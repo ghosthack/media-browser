@@ -1766,7 +1766,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                 Platform.runLater(() -> {
                     if (seq != loadSequence) return;
                     if (error != null) {
-                        metadataPanel.showMessage(rootMessage(error));
+                        metadataPanel.showFailure(rootMessage(error));
                         return;
                     }
                     metadataPanel.show(md);

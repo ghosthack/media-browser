@@ -35,12 +35,10 @@
     <!-- jcodec (pure Java: H.264/MPEG/ProRes) for the TWELVEMONKEYS_JCODEC
          backend's video path. No native; jcodec-javase adds AWTUtil. -->
     <jcodec.version>0.2.5</jcodec.version>
-    <!-- Runtime logging facade used by the source-vendored robust-unrar core. -->
+    <!-- Runtime logging facade used transitively by the UnRAR reader. -->
     <slf4j.version>2.0.17</slf4j.version>
-    <!-- Parser dependency for the temporarily source-vendored pdf-media
-         mechanics module. The source-vendored EPUB mechanics use only JDK
-         ZIP/XML APIs. Both become normal Maven dependencies after their first
-         Central releases. -->
+    <!-- Test-fixture builder for PdfMediaBrowserIntegrationTest. Production PDF
+         parsing is self-contained inside the pdf-media artifact. -->
     <pdfbox.version>3.0.8</pdfbox.version>
     <!-- Pure-Java ImageIO decoder for JBIG2 raster streams embedded in PDFs. -->
     <jbig2-imageio.version>3.0.5</jbig2-imageio.version>
@@ -79,26 +77,53 @@
     <mosaic.telemetry.fxStallMs>50</mosaic.telemetry.fxStallMs>
   </properties>
 
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>io.github.ghosthack</groupId>
+        <artifactId>media-inspection-bom</artifactId>
+        <version>${media-inspection.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
   <dependencies>
     <dependency>
       <groupId>io.github.ghosthack</groupId>
       <artifactId>iso9660</artifactId>
-      <version>${media-inspection.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>cue</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>seven</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>unrar</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>pdf-media</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.pdfbox</groupId>
       <artifactId>pdfbox</artifactId>
       <version>${pdfbox.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>epub-media</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.pdfbox</groupId>
       <artifactId>jbig2-imageio</artifactId>
       <version>${jbig2-imageio.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>slf4j-api</artifactId>
-      <version>${slf4j.version}</version>
     </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
@@ -423,7 +448,7 @@
       <!-- The OSS source export and the application JAR share one explicit
            redistribution manifest. This keeps upstream development notes and
            roadmaps out while retaining the required license/notice records
-           and provenance for source-vendored inspection mechanics. -->
+           and provenance for the inspection dependencies. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-antrun-plugin</artifactId>
