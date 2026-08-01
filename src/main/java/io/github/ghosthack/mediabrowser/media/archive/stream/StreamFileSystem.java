@@ -10,7 +10,7 @@ import java.nio.file.attribute.UserPrincipalLookupService;
 import java.util.List;
 import java.util.Set;
 
-/** A mounted RAR or 7z archive exposed through the standard read-only NIO API. */
+/** A mounted streaming archive or embedded-media index exposed through read-only NIO. */
 public final class StreamFileSystem extends FileSystem {
     private final StreamFileSystemProvider provider;
     private final Path source;

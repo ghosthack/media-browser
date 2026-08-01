@@ -5,6 +5,7 @@ import io.github.ghosthack.cue.internal.CueParser;
 import io.github.ghosthack.cue.internal.CueParser.ParsedCue;
 import io.github.ghosthack.cue.internal.CueParser.ParsedFile;
 import io.github.ghosthack.cue.internal.CueParser.ParsedTrack;
+import io.github.ghosthack.cue.internal.ConcatenatedTrackChannel;
 import io.github.ghosthack.cue.internal.NormalizedTrackChannel;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -177,7 +178,13 @@ public final class CueArchive implements AutoCloseable {
     }
 
     /**
-     * Opens the only ISO 9660 data track.
+     * Opens the logical ISO 9660 data space beginning at the only track with a
+     * volume descriptor.
+     *
+     * <p>Some CD-ROM XA bridge discs split one ISO volume across consecutive
+     * data tracks. Physically contiguous supported data tracks following the
+     * descriptor-bearing track are therefore concatenated; an audio track,
+     * another companion, or a physical gap ends the volume view.</p>
      *
      * @throws CueArchiveException when zero or multiple tracks are mountable
      */
@@ -187,17 +194,52 @@ public final class CueArchive implements AutoCloseable {
             throw new CueArchiveException(
                     "expected exactly one ISO 9660 data track, found " + candidates.size());
         }
-        return openTrack(candidates.getFirst());
+        List<CueTrack> volumeTracks = isoVolumeTracks(candidates.getFirst());
+        if (volumeTracks.size() == 1) return openTrack(volumeTracks.getFirst());
+
+        var opened = new ArrayList<SeekableByteChannel>(volumeTracks.size());
+        try {
+            for (CueTrack track : volumeTracks) opened.add(openTrack(track));
+            return new ConcatenatedTrackChannel(opened);
+        } catch (IOException | RuntimeException e) {
+            for (SeekableByteChannel channel : opened) {
+                try {
+                    channel.close();
+                } catch (IOException closeFailure) {
+                    e.addSuppressed(closeFailure);
+                }
+            }
+            throw e;
+        }
     }
 
-    /** Opens the only ISO 9660 data track as a thread-safe positional source. */
+    /** Opens the ISO volume data space as a thread-safe positional source. */
     public CueTrackData openIsoData() throws IOException {
-        List<CueTrack> candidates = iso9660Tracks();
-        if (candidates.size() != 1) {
-            throw new CueArchiveException(
-                    "expected exactly one ISO 9660 data track, found " + candidates.size());
+        return new CueTrackData(openIsoTrack());
+    }
+
+    private List<CueTrack> isoVolumeTracks(CueTrack first) throws IOException {
+        var result = new ArrayList<CueTrack>();
+        result.add(first);
+        CueTrack previous = first;
+        for (int index = first.index() + 1; index < tracks.size(); index++) {
+            CueTrack next = tracks.get(index);
+            long expectedOffset;
+            try {
+                expectedOffset = Math.addExact(
+                        previous.storedDataOffset(), previous.storedDataBytes());
+            } catch (ArithmeticException e) {
+                throw new CueArchiveException("track boundary overflows", e);
+            }
+            if (!next.supportedData()
+                    || !next.file().equals(previous.file())
+                    || next.storedDataOffset() != expectedOffset) {
+                break;
+            }
+            result.add(next);
+            previous = next;
         }
-        return openTrackData(candidates.getFirst());
+        return List.copyOf(result);
     }
 
     @Override

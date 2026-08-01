@@ -13,8 +13,11 @@ not a license text — each project's own license governs.
 | [LWJGL 3](https://www.lwjgl.org) (core, opengl, glfw) | 3.4.1 | BSD 3-Clause | offscreen GL video rendering |
 | [TwelveMonkeys ImageIO](https://github.com/haraldk/TwelveMonkeys) (14 plugins) | 3.13.1 | BSD 3-Clause | still-image decoding (JPEG/CMYK, TIFF, WebP, PSD, …) |
 | [jcodec](https://github.com/jcodec/jcodec) (core, javase) | 0.2.5 | BSD 2-Clause (FreeBSD) | pure-Java H.264/MPEG/ProRes video backend |
+| [media-inspection `iso9660`](https://github.com/ghosthack/media-inspection) | 0.2.0 | MIT | bounded read-only ISO 9660, Joliet, and Rock Ridge inspection |
 | Source-vendored robust-unrar / junrar reader lineage | snapshot in `vendor/archive/unrar` | UnRAR License (source-available, not OSI-approved; cannot be used to recreate a RAR archiver) | read-only RAR/CBR browsing |
 | Source-vendored robust-seven reader slice | snapshot in `vendor/archive/seven` | Apache-2.0 (Commons Compress portions) and 0BSD (XZ for Java portions) | read-only 7z/CB7 browsing |
+| Source-vendored `pdf-media` mechanics | snapshot in `vendor/archive/pdf` | Apache-2.0 | read-only PDF attachment and raster-bitstream inspection |
+| [Apache PDFBox](https://pdfbox.apache.org/) | 3.0.8 | Apache-2.0 | PDF parsing used by the vendored `pdf-media` mechanics |
 | [SLF4J](https://www.slf4j.org/) API + no-op provider | 2.0.17 | MIT | logging facade required by the vendored RAR decoder |
 | [ffmpeg-ffm](https://github.com/ghosthack/ffmpeg-ffm) | 8.1.2-0.3.1 | MIT bindings; natives convey FFmpeg 8.1.2, LGPL v2.1+ (no GPL/version3/nonfree components) | bundled FFmpeg — stills + video for the default backend |
 | [turbojpeg-ffm](https://github.com/ghosthack/turbojpeg-ffm) | 3.2.0-0.2.0 | MIT bindings; natives convey libjpeg-turbo 3.2.0 (BSD 3-Clause, IJG, zlib) | baseline-JPEG thumbnail fast path |
@@ -24,11 +27,13 @@ The three `*-ffm` artifacts ship natives as per-platform classifier jars
 (macos-arm64, windows-x64, linux-x64); each artifact's own repository
 documents exactly what its native bundle contains.
 
-The archive-reader source, exact lineage, retained-file manifests, notices,
+The vendored mechanics source, exact lineage, retained-file manifests, notices,
 and license texts are preserved under `vendor/archive` and are also embedded
 under `META-INF/licenses/archive` in the application JAR. The CUE/BIN adapter
 and archive filesystem integration are first-party Media Browser code covered
-by this repository's MIT license.
+by this repository's MIT license. PDFBox, FontBox, PDFBox IO, and Commons
+Logging legal files are extracted from their runtime JARs into each release's
+license bundle.
 
 Each platform release includes a matching `-licenses.zip` artifact containing
 the controlling dependency texts and notices, the exact archive-reader

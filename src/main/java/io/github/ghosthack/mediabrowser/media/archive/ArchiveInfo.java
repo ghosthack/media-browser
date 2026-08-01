@@ -1,8 +1,13 @@
 package io.github.ghosthack.mediabrowser.media.archive;
 
 import io.github.ghosthack.cue.CueArchive;
-import io.github.ghosthack.mediabrowser.media.archive.iso.IsoImage;
-import io.github.ghosthack.mediabrowser.media.archive.iso.IsoVolumeInfo;
+import io.github.ghosthack.epubmedia.EpubArchive;
+import io.github.ghosthack.epubmedia.EpubEntry;
+import io.github.ghosthack.iso9660.IsoImage;
+import io.github.ghosthack.iso9660.IsoVolumeInfo;
+import io.github.ghosthack.mediabrowser.media.archive.iso.CueIsoData;
+import io.github.ghosthack.pdfmedia.PdfArchive;
+import io.github.ghosthack.pdfmedia.PdfEntry;
 import io.github.ghosthack.seven.SevenArchive;
 import io.github.ghosthack.unrar.RarArchive;
 
@@ -54,9 +59,11 @@ public record ArchiveInfo(ArchiveFormat format, String summary, List<Field> fiel
         return switch (format) {
             case ISO -> readIso(archive);
             case ZIP -> readZip(archive);
+            case EPUB -> readEpub(archive);
             case RAR -> readRar(archive);
             case SEVEN_Z -> readSeven(archive);
             case CUE -> readCue(archive);
+            case PDF -> readPdf(archive);
         };
     }
 
@@ -82,7 +89,7 @@ public record ArchiveInfo(ArchiveFormat format, String summary, List<Field> fiel
     private static ArchiveInfo readCue(Path archive) throws IOException {
         var fields = new ArrayList<Field>();
         try (CueArchive cue = CueArchive.open(archive);
-                IsoImage image = IsoImage.openCue(archive)) {
+                IsoImage image = CueIsoData.openImage(archive)) {
             IsoVolumeInfo volume = image.volumeInfo();
             for (Map.Entry<String, String> field : volume.fields().entrySet()) {
                 fields.add(new Field(field.getKey(), field.getValue()));
@@ -124,6 +131,69 @@ public record ArchiveInfo(ArchiveFormat format, String summary, List<Field> fiel
             if (seven.passwordProtected()) fields.add(new Field("Encryption", "AES-256"));
             return new ArchiveInfo(ArchiveFormat.SEVEN_Z, "7z", fields);
         }
+    }
+
+    private static ArchiveInfo readPdf(Path archive) throws IOException {
+        try (PdfArchive pdf = PdfArchive.open(archive)) {
+            var fields = new ArrayList<Field>();
+            fields.add(new Field("Pages", String.valueOf(pdf.pageCount())));
+            fields.add(new Field("Media entries", String.valueOf(pdf.entries().size())));
+            long embedded = pdf.entries().stream()
+                    .filter(entry -> entry.kind() == PdfEntry.Kind.EMBEDDED_FILE)
+                    .count();
+            long rasters = pdf.entries().stream()
+                    .filter(entry -> entry.kind() == PdfEntry.Kind.RASTER)
+                    .count();
+            if (embedded > 0) fields.add(new Field("Embedded files", String.valueOf(embedded)));
+            if (rasters > 0) fields.add(new Field("Raster objects", String.valueOf(rasters)));
+            if (!pdf.mrcComposites().isEmpty()) {
+                fields.add(new Field(
+                        "MRC composites", String.valueOf(pdf.mrcComposites().size())));
+            }
+            if (pdf.passwordProtected()) {
+                fields.add(new Field("Encryption", "Password protected"));
+            }
+            return new ArchiveInfo(ArchiveFormat.PDF, "PDF media", fields);
+        }
+    }
+
+    private static ArchiveInfo readEpub(Path archive) throws IOException {
+        try (EpubArchive epub = EpubArchive.open(archive)) {
+            var publication = epub.publication();
+            var fields = new ArrayList<Field>();
+            publication.title().ifPresent(value -> fields.add(new Field("Title", value)));
+            publication.creator().ifPresent(value -> fields.add(new Field("Creator", value)));
+            publication.language().ifPresent(value -> fields.add(new Field("Language", value)));
+            publication.identifier().ifPresent(value -> fields.add(new Field("Identifier", value)));
+            fields.add(new Field("Package document", publication.packagePath()));
+            fields.add(new Field("Manifest items", String.valueOf(publication.manifestItemCount())));
+            fields.add(new Field("Spine items", String.valueOf(publication.spineItemCount())));
+            fields.add(new Field("Media entries", String.valueOf(epub.entries().size())));
+            addKindCount(fields, epub, EpubEntry.Kind.IMAGE, "Images");
+            addKindCount(fields, epub, EpubEntry.Kind.AUDIO, "Audio");
+            addKindCount(fields, epub, EpubEntry.Kind.VIDEO, "Video");
+            long covers = epub.entries().stream().filter(EpubEntry::cover).count();
+            if (covers > 0) fields.add(new Field("Cover resources", String.valueOf(covers)));
+            if (publication.missingLocalResourceCount() > 0) {
+                fields.add(new Field(
+                        "Missing local media",
+                        String.valueOf(publication.missingLocalResourceCount())));
+            }
+            if (publication.remoteResourceCount() > 0) {
+                fields.add(new Field(
+                        "Ignored remote media",
+                        String.valueOf(publication.remoteResourceCount())));
+            }
+            String version = publication.version().isBlank()
+                    ? "EPUB" : "EPUB " + publication.version();
+            return new ArchiveInfo(ArchiveFormat.EPUB, version, fields);
+        }
+    }
+
+    private static void addKindCount(
+            List<Field> fields, EpubArchive epub, EpubEntry.Kind kind, String label) {
+        long count = epub.entries().stream().filter(entry -> entry.kind() == kind).count();
+        if (count > 0) fields.add(new Field(label, String.valueOf(count)));
     }
 
     private static long saturatingSum(long[] values) {

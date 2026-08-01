@@ -1,5 +1,6 @@
 package io.github.ghosthack.mediabrowser.media.archive.stream;
 
+import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.NoSuchFileException;
@@ -18,6 +19,11 @@ final class StreamArchive implements AutoCloseable {
         InputStream open() throws IOException;
     }
 
+    @FunctionalInterface
+    interface RasterOpener {
+        BufferedImage open() throws IOException;
+    }
+
     static final class Node {
         final String path;
         final String name;
@@ -27,6 +33,9 @@ final class StreamArchive implements AutoCloseable {
         FileTime modified = FileTime.fromMillis(0);
         Object key;
         InputOpener opener;
+        String presentationExtension;
+        InputOpener presentationOpener;
+        RasterOpener rasterOpener;
 
         Node(String path, String name, boolean directory) {
             this.path = path;
@@ -50,6 +59,19 @@ final class StreamArchive implements AutoCloseable {
      */
     void add(String rawName, boolean directory, long size, FileTime modified,
              Object key, InputOpener opener) {
+        add(rawName, directory, size, modified, key, opener, null, null);
+    }
+
+    void add(String rawName, boolean directory, long size, FileTime modified,
+             Object key, InputOpener opener, String presentationExtension,
+             InputOpener presentationOpener) {
+        add(rawName, directory, size, modified, key, opener, presentationExtension,
+                presentationOpener, null);
+    }
+
+    void add(String rawName, boolean directory, long size, FileTime modified,
+             Object key, InputOpener opener, String presentationExtension,
+             InputOpener presentationOpener, RasterOpener rasterOpener) {
         List<String> parts = safeParts(rawName);
         if (parts.isEmpty()) return;
 
@@ -78,10 +100,15 @@ final class StreamArchive implements AutoCloseable {
         // First file wins for duplicate normalized names, matching archive
         // order and avoiding a mutable "last entry wins" surprise.
         if (!directory && !parent.directory && parent.opener == null) {
-            parent.size = Math.max(0, size);
+            // -1 means the streaming reader cannot know the logical size
+            // without opening the entry (PDF attachments commonly omit it).
+            parent.size = Math.max(-1, size);
             parent.modified = modified == null ? FileTime.fromMillis(0) : modified;
             parent.key = key;
             parent.opener = opener;
+            parent.presentationExtension = presentationExtension;
+            parent.presentationOpener = presentationOpener;
+            parent.rasterOpener = rasterOpener;
         } else if (directory) {
             parent.modified = modified == null ? parent.modified : modified;
             parent.key = parent.key == null ? key : parent.key;

@@ -1,11 +1,18 @@
 package io.github.ghosthack.mediabrowser.media.archive.stream;
 
 import io.github.ghosthack.mediabrowser.media.archive.ArchiveFormat;
+import io.github.ghosthack.epubmedia.EpubArchive;
+import io.github.ghosthack.epubmedia.EpubEntry;
+import io.github.ghosthack.pdfmedia.PdfArchive;
+import io.github.ghosthack.pdfmedia.PdfEntry;
+import io.github.ghosthack.pdfmedia.PdfFilter;
+import io.github.ghosthack.pdfmedia.PdfMrcComposite;
 import io.github.ghosthack.seven.SevenArchive;
 import io.github.ghosthack.seven.SevenEntry;
 import io.github.ghosthack.unrar.RarArchive;
 import io.github.ghosthack.unrar.RarEntry;
 
+import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -34,13 +41,17 @@ import java.nio.file.attribute.FileAttributeView;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.spi.FileSystemProvider;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Consumer-owned NIO adapter over robust-unrar and robust-seven.
+ * Consumer-owned NIO adapter over robust-unrar, robust-seven, pdf-media, and epub-media.
  *
  * <p>The vendored readers retain parsing, decoding and resource-budget policy;
  * this layer owns filesystem concerns: safe path normalization, synthesized
@@ -60,15 +71,25 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
 
     @Override public String getScheme() { return SCHEME; }
 
-    /** Mounts a RAR or 7z source with the matching vendored mechanics reader. */
+    /** Mounts a streaming source with the matching vendored mechanics reader. */
     public StreamFileSystem newFileSystem(Path source, ArchiveFormat format) throws IOException {
-        if (format != ArchiveFormat.RAR && format != ArchiveFormat.SEVEN_Z) {
+        if (format != ArchiveFormat.RAR
+                && format != ArchiveFormat.SEVEN_Z
+                && format != ArchiveFormat.PDF
+                && format != ArchiveFormat.EPUB) {
             throw new IllegalArgumentException("not a streaming archive format: " + format);
         }
         Path key = source.toAbsolutePath().normalize();
         if (mounts.containsKey(key)) throw new FileSystemAlreadyExistsException(key.toString());
 
-        StreamArchive archive = format == ArchiveFormat.RAR ? openRar(key) : openSeven(key);
+        StreamArchive archive = switch (format) {
+            case RAR -> openRar(key);
+            case SEVEN_Z -> openSeven(key);
+            case PDF -> openPdf(key);
+            case EPUB -> openEpub(key);
+            default -> throw new IllegalArgumentException(
+                    "not a streaming archive format: " + format);
+        };
         StreamFileSystem created = new StreamFileSystem(this, key, archive);
         StreamFileSystem raced = mounts.putIfAbsent(key, created);
         if (raced != null) {
@@ -111,11 +132,236 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
         }
     }
 
+    private static StreamArchive openEpub(Path source) throws IOException {
+        EpubArchive reader = EpubArchive.open(source);
+        try {
+            StreamArchive archive = new StreamArchive(reader);
+            Set<String> usedNames = new HashSet<>();
+            for (EpubEntry entry : reader.entries()) {
+                String name = uniqueName(entry.packagePath(), usedNames);
+                archive.add(
+                        name,
+                        false,
+                        entry.uncompressedSize(),
+                        null,
+                        entry,
+                        () -> reader.openStream(entry));
+            }
+            return archive;
+        } catch (RuntimeException e) {
+            try {
+                reader.close();
+            } catch (IOException closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Adapts the PDF media index to a flat directory. PDF entry names are
+     * metadata, not paths, so only their leaf is retained and collisions are
+     * made visible rather than silently dropping later physical objects.
+     *
+     * <p>A raster receives a conventional image extension only when its raw
+     * stream is already a complete standalone JPEG or JPEG 2000 bitstream.
+     * PDF-native streams, including JBIG2, retain {@code .pdfimg}: direct NIO
+     * access always exposes the physical source bytes. A JBIG2 raster also
+     * carries a private PNG presentation opener used only when a media backend
+     * needs a standalone file to display it.</p>
+     */
+    private static StreamArchive openPdf(Path source) throws IOException {
+        PdfArchive reader = PdfArchive.open(source);
+        try {
+            StreamArchive archive = new StreamArchive(reader);
+            Set<String> usedNames = new HashSet<>();
+            for (PdfEntry entry : reader.entries()) {
+                String name = uniquePdfName(entry, usedNames);
+                boolean decodedJbig2 = rasterEncodedAs(entry, PdfFilter.Decoder.JBIG2);
+                archive.add(name, false, entry.declaredSize().orElse(-1), null, entry,
+                        () -> reader.openStream(entry),
+                        decodedJbig2 ? "png" : null,
+                        decodedJbig2 ? () -> PdfJbig2Images.openPng(reader, entry) : null,
+                        decodedJbig2 ? () -> PdfJbig2Images.decode(reader, entry) : null);
+            }
+            for (PdfMrcComposite composite : reader.mrcComposites()) {
+                if (!supportsMrc(reader, composite)) continue;
+                String preferred =
+                        String.format(Locale.ROOT, "page-%04d.mrc", composite.pageIndex() + 1);
+                String name = uniqueName(preferred, usedNames);
+                archive.add(name, false, 0, null, composite,
+                        () -> {
+                            throw new IOException(
+                                    "PDF MRC composite has no standalone byte stream: " + name);
+                        });
+            }
+            return archive;
+        } catch (RuntimeException e) {
+            try {
+                reader.close();
+            } catch (IOException closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw e;
+        }
+    }
+
+    private static String uniquePdfName(PdfEntry entry, Set<String> usedNames) {
+        String original = pdfLeafName(entry.name(), entry.index());
+        String preferred = directRasterName(original, entry);
+        String candidate = preferred;
+        int copy = 2;
+        while (!usedNames.add(candidate.toLowerCase(Locale.ROOT))) {
+            candidate = numberedName(preferred, copy++);
+        }
+        return candidate;
+    }
+
+    private static String uniqueName(String preferred, Set<String> usedNames) {
+        String candidate = preferred;
+        int copy = 2;
+        while (!usedNames.add(candidate.toLowerCase(Locale.ROOT))) {
+            candidate = numberedName(preferred, copy++);
+        }
+        return candidate;
+    }
+
+    private static String pdfLeafName(String rawName, int index) {
+        String[] parts = rawName.replace('\\', '/').split("/+");
+        String leaf = "";
+        for (int at = parts.length - 1; at >= 0; at--) {
+            if (!parts[at].isBlank() && !".".equals(parts[at]) && !"..".equals(parts[at])) {
+                leaf = parts[at];
+                break;
+            }
+        }
+        leaf = leaf.replaceAll("[\\p{Cntrl}]", "_").trim();
+        return leaf.isEmpty() ? "entry-" + (index + 1) : leaf;
+    }
+
+    private static String directRasterName(String name, PdfEntry entry) {
+        if (!entry.isRaster()) return name;
+        if (rasterEncodedAs(entry, PdfFilter.Decoder.JPEG)) {
+            return replaceExtension(name, "jpg");
+        }
+        if (rasterEncodedAs(entry, PdfFilter.Decoder.JPEG_2000)) {
+            return replaceExtension(name, "jp2");
+        }
+        return name;
+    }
+
+    /**
+     * Decoder-only rendition for an archive entry, when the raw mounted bytes
+     * are not themselves a standalone format understood by media backends.
+     */
+    public record Presentation(String extension, InputStream input) {}
+
+    public Optional<Presentation> openPresentation(Path path) throws IOException {
+        if (!(path instanceof StreamPath stream)
+                || stream.getFileSystem().provider() != this) {
+            return Optional.empty();
+        }
+        StreamArchive.Node node =
+                stream.getFileSystem().entry(stream.entryPath());
+        if (node.presentationOpener == null) return Optional.empty();
+        return Optional.of(new Presentation(
+                node.presentationExtension, node.presentationOpener.open()));
+    }
+
+    /** The physical PDF layers referenced by a virtual MRC entry. */
+    public record PdfMrcView(
+            PdfMrcComposite descriptor,
+            Path background,
+            PdfEntry backgroundEntry,
+            Path foreground,
+            PdfEntry foregroundEntry,
+            Path mask,
+            PdfEntry maskEntry) {}
+
+    public Optional<PdfMrcView> pdfMrcView(Path path) throws IOException {
+        if (!(path instanceof StreamPath stream)
+                || stream.getFileSystem().provider() != this) {
+            return Optional.empty();
+        }
+        StreamFileSystem fileSystem = stream.getFileSystem();
+        StreamArchive.Node compositeNode = fileSystem.entry(stream.entryPath());
+        if (!(compositeNode.key instanceof PdfMrcComposite descriptor)) {
+            return Optional.empty();
+        }
+        Layer background = layer(fileSystem, descriptor.backgroundEntryIndex());
+        Layer foreground = layer(fileSystem, descriptor.foregroundEntryIndex());
+        Layer mask = layer(fileSystem, descriptor.maskEntryIndex());
+        return Optional.of(new PdfMrcView(
+                descriptor,
+                background.path,
+                background.entry,
+                foreground.path,
+                foreground.entry,
+                mask.path,
+                mask.entry));
+    }
+
+    /** Decodes a PDF-native raster directly, without creating a presentation file. */
+    public Optional<BufferedImage> decodePdfRaster(Path path) throws IOException {
+        if (!(path instanceof StreamPath stream)
+                || stream.getFileSystem().provider() != this) {
+            return Optional.empty();
+        }
+        StreamArchive.Node node = stream.getFileSystem().entry(stream.entryPath());
+        return node.rasterOpener == null
+                ? Optional.empty() : Optional.of(node.rasterOpener.open());
+    }
+
+    private Layer layer(StreamFileSystem fileSystem, int entryIndex) throws IOException {
+        for (StreamArchive.Node node : fileSystem.children("/")) {
+            if (node.key instanceof PdfEntry entry && entry.index() == entryIndex) {
+                return new Layer(fileSystem.getPath(node.path), entry);
+            }
+        }
+        throw new IOException("PDF MRC layer entry is not mounted: " + entryIndex);
+    }
+
+    private record Layer(Path path, PdfEntry entry) {}
+
+    private static boolean rasterEncodedAs(PdfEntry entry, PdfFilter.Decoder decoder) {
+        if (!entry.isRaster()) return false;
+        List<PdfFilter.Decoder> decoders =
+                entry.raster().orElseThrow().decoderStack();
+        return decoders.equals(List.of(decoder));
+    }
+
+    private static boolean supportsMrc(PdfArchive archive, PdfMrcComposite composite) {
+        PdfEntry background = archive.entries().get(composite.backgroundEntryIndex());
+        PdfEntry foreground = archive.entries().get(composite.foregroundEntryIndex());
+        PdfEntry mask = archive.entries().get(composite.maskEntryIndex());
+        return directlyDecodableColorLayer(background)
+                && directlyDecodableColorLayer(foreground)
+                && rasterEncodedAs(mask, PdfFilter.Decoder.JBIG2);
+    }
+
+    private static boolean directlyDecodableColorLayer(PdfEntry entry) {
+        return rasterEncodedAs(entry, PdfFilter.Decoder.JPEG)
+                || rasterEncodedAs(entry, PdfFilter.Decoder.JPEG_2000);
+    }
+
+    private static String replaceExtension(String name, String extension) {
+        int dot = name.lastIndexOf('.');
+        String stem = dot > 0 ? name.substring(0, dot) : name;
+        return stem + "." + extension;
+    }
+
+    private static String numberedName(String name, int copy) {
+        int dot = name.lastIndexOf('.');
+        String stem = dot > 0 ? name.substring(0, dot) : name;
+        String extension = dot > 0 ? name.substring(dot) : "";
+        return stem + " (" + copy + ")" + extension;
+    }
+
     @Override
     public StreamFileSystem newFileSystem(Path path, Map<String, ?> env) throws IOException {
         Object value = env.get("format");
         if (!(value instanceof ArchiveFormat format)) {
-            throw new IllegalArgumentException("env.format must be RAR or SEVEN_Z");
+            throw new IllegalArgumentException("env.format must be RAR, SEVEN_Z, PDF or EPUB");
         }
         return newFileSystem(path, format);
     }
@@ -172,6 +418,10 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
         StreamPath stream = cast(path);
         StreamArchive.Node entry = stream.getFileSystem().entry(stream.entryPath());
         if (entry.directory) throw new IOException("is a directory: " + path);
+        if (entry.key instanceof PdfMrcComposite) {
+            throw new IOException(
+                    "PDF MRC composite has no standalone byte stream: " + entry.name);
+        }
         return new EntryChannel(stream.getFileSystem(), entry);
     }
 
@@ -297,10 +547,13 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
         public int read(ByteBuffer destination) throws IOException {
             ensureOpen();
             if (!destination.hasRemaining()) return 0;
-            if (position >= entry.size) return -1;
+            boolean sizeKnown = entry.size >= 0;
+            if (sizeKnown && position >= entry.size) return -1;
             align();
             byte[] buffer = new byte[(int) Math.min(64 * 1024L,
-                    Math.min(destination.remaining(), entry.size - position))];
+                    sizeKnown
+                            ? Math.min(destination.remaining(), entry.size - position)
+                            : destination.remaining())];
             int count = input.read(buffer);
             if (count < 0) return -1;
             destination.put(buffer, 0, count);
@@ -339,7 +592,7 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
         }
         @Override public long size() throws IOException {
             ensureOpen();
-            return entry.size;
+            return visibleSize(entry);
         }
         @Override public SeekableByteChannel truncate(long size) throws IOException {
             ensureOpen();
@@ -360,7 +613,17 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
         @Override public boolean isDirectory() { return entry.directory; }
         @Override public boolean isSymbolicLink() { return false; }
         @Override public boolean isOther() { return false; }
-        @Override public long size() { return entry.size; }
+        @Override public long size() { return visibleSize(entry); }
         @Override public Object fileKey() { return entry.key; }
+    }
+
+    /**
+     * Directory scans reject zero-byte media before opening it. An unknown PDF
+     * entry size therefore uses a one-byte presence hint; materialization still
+     * streams to EOF and produces the exact real size.
+     */
+    private static long visibleSize(StreamArchive.Node entry) {
+        if (entry.key instanceof PdfMrcComposite) return 0;
+        return entry.size >= 0 ? entry.size : 1;
     }
 }

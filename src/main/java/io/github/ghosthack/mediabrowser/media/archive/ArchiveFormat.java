@@ -1,6 +1,8 @@
 package io.github.ghosthack.mediabrowser.media.archive;
 
 import io.github.ghosthack.cue.CueArchive;
+import io.github.ghosthack.epubmedia.EpubArchive;
+import io.github.ghosthack.pdfmedia.PdfArchive;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,6 +31,9 @@ public enum ArchiveFormat {
     /** ZIP and its comic-book alias, read through the JDK's zipfs provider. */
     ZIP(Set.of("zip", "cbz")),
 
+    /** EPUB package media selected through its OPF manifest. */
+    EPUB(Set.of("epub")),
+
     /** ISO 9660 disc image, read through the vendored reader. */
     ISO(Set.of("iso")),
 
@@ -39,7 +44,10 @@ public enum ArchiveFormat {
     SEVEN_Z(Set.of("7z", "cb7")),
 
     /** A CUE sheet whose sole mountable data track contains ISO 9660. */
-    CUE(Set.of("cue"));
+    CUE(Set.of("cue")),
+
+    /** Physical PDF media plus recognized virtual MRC layer graphs. */
+    PDF(Set.of("pdf"));
 
     /** Bytes needed to check the furthest-out signature (ISO's, at 0x8001). */
     private static final int ISO_MAGIC_OFFSET = 32769;
@@ -94,6 +102,7 @@ public enum ArchiveFormat {
                         || header[2] == 5 && header[3] == 6
                         || header[2] == 7 && header[3] == 8);
             }
+            case EPUB -> EpubArchive.matches(file);
             case ISO -> {
                 // The first volume descriptor sits at sector 16; its standard
                 // identifier is the only cheap, reliable ISO 9660 tell.
@@ -124,6 +133,7 @@ public enum ArchiveFormat {
                     yield cue.iso9660Tracks().size() == 1;
                 }
             }
+            case PDF -> PdfArchive.matches(head(file, 1029));
         };
     }
 

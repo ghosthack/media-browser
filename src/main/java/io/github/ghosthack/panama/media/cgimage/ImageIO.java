@@ -12,6 +12,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.ref.Cleaner;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -655,7 +656,20 @@ public final class ImageIO {
         return flattenCFDictionary(sub);
     }
 
-    /** Walks a CFDictionary, converts keys to Java strings and values via {@link #convertCFValue}. */
+    /**
+     * Walks a CFDictionary, converts keys to Java strings and values via
+     * {@link #convertCFValue}.
+     *
+     * <p>The returned map keeps the order
+     * {@code CFDictionaryGetKeysAndValues} enumerated. Deliberately
+     * {@link Collections#unmodifiableMap} over the {@link LinkedHashMap}
+     * rather than {@link Map#copyOf}: {@code Map.copyOf} returns a map whose
+     * iteration order is not merely unspecified but randomized <em>per JVM
+     * run</em>, which makes the {@code LinkedHashMap} above pointless and
+     * leaves callers listing a photograph's EXIF in a different order every
+     * launch. The map is local and never escapes by any other route, so
+     * wrapping is as immutable to callers as copying.
+     */
     private static Map<String, Object> flattenCFDictionary(MemorySegment dict) {
         long n = CoreFoundation.cfDictionaryGetCount(dict);
         if (n <= 0) return Map.of();
@@ -674,7 +688,7 @@ public final class ImageIO {
                 if (val != null) out.put(key, val);
             }
         }
-        return Map.copyOf(out);
+        return Collections.unmodifiableMap(out);
     }
 
     /**

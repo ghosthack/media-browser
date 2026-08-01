@@ -1,0 +1,30 @@
+schema = 1
+project = "pdf-media-extraction"
+
+[[components]]
+name = "Apache PDFBox"
+kind = "runtime-dependency"
+coordinates = "org.apache.pdfbox:pdfbox:3.0.8"
+repository = "https://github.com/apache/pdfbox.git"
+release_date = "2026-07-11"
+integrated_date = "2026-07-30"
+license = "Apache-2.0"
+vendored = false
+relocated = false
+
+[policy]
+native_code = false
+subprocess_decoder = false
+archive_writing_public_api = false
+page_rendering = false
+external_resource_fetching = false
+
+[development]
+non_dependency_source_origin = "generated with AI under human direction, review, and acceptance"
+human_role = [
+  "specified the project scope, public API, extraction semantics, and integration boundary",
+  "selected and integrated the implementation",
+  "reviewed behavior, dependency provenance, and packaging",
+  "validated the implementation with the documented build and test suite",
+]
+licensing_intent = "Apache-2.0 to the extent applicable rights exist"

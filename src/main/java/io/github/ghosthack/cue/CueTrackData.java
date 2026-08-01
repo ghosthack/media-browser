@@ -6,11 +6,12 @@ import java.nio.channels.SeekableByteChannel;
 import java.util.Objects;
 
 /**
- * A thread-safe positional view of one normalized CUE data track.
+ * A thread-safe positional view of normalized CUE data.
  *
  * <p>This is the narrow adapter expected by filesystem parsers such as an ISO
- * reader: logical offsets start at track {@code INDEX 01}, each logical sector
- * is 2048 bytes, and callers need not understand raw-sector headers.
+ * reader: logical offsets start at the selected track {@code INDEX 01}, each
+ * logical sector is 2048 bytes, and callers need not understand raw-sector
+ * headers. An ISO volume view can span physically contiguous data tracks.
  */
 public final class CueTrackData implements AutoCloseable {
     private final SeekableByteChannel channel;

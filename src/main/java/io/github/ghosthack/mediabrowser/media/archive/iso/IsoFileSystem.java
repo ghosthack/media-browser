@@ -1,5 +1,8 @@
 package io.github.ghosthack.mediabrowser.media.archive.iso;
 
+import io.github.ghosthack.iso9660.IsoEntry;
+import io.github.ghosthack.iso9660.IsoImage;
+
 import java.io.IOException;
 import java.nio.file.FileStore;
 import java.nio.file.FileSystem;

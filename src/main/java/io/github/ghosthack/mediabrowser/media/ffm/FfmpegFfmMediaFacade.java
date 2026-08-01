@@ -5,6 +5,7 @@ import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
 import io.github.ghosthack.mediabrowser.media.Metadata;
+import io.github.ghosthack.mediabrowser.media.PhotoCdImagePack;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.Thumbnail;
@@ -122,6 +123,9 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             return Optional.empty();
         }
         String ext = extension(file);
+        if (PcdOrientation.isPcd(ext) && !PhotoCdImagePack.isImagePack(file)) {
+            return Optional.empty();
+        }
         if (LibRawStills.isRaw(ext)) {
             // RAW is always a still; decode problems surface at view time,
             // never as a listing-time filter.
@@ -139,6 +143,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
 
     @Override
     public MediaProbe probe(Path file) {
+        requirePcdImagePack(file);
         if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
             return rawProbe(file);
         }
@@ -312,11 +317,13 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
      * nothing else changes its failure behaviour.
      */
     private VisualResult firstFrameSteppingDownPcd(Path file) {
+        requirePcdImagePack(file);
         long size = fileSize(file);
         try {
             return av.firstFrameWithProbe(file, size);
         } catch (MediaException first) {
-            if (!PcdOrientation.isPcd(extension(file))) {
+            if (!PcdOrientation.isPcd(extension(file))
+                    || !PhotoCdImagePack.isImagePack(file)) {
                 throw first;
             }
             for (int lowres : PcdOrientation.FALLBACK_LOWRES) {
@@ -334,10 +341,12 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
 
     /** {@link #firstFrameSteppingDownPcd} for the thumbnail path. */
     private Thumbnail thumbnailSteppingDownPcd(Path file, int maxEdge, ThumbnailMode mode) {
+        requirePcdImagePack(file);
         try {
             return av.thumbnail(file, maxEdge, mode);
         } catch (MediaException first) {
-            if (!PcdOrientation.isPcd(extension(file))) {
+            if (!PcdOrientation.isPcd(extension(file))
+                    || !PhotoCdImagePack.isImagePack(file)) {
                 throw first;
             }
             for (int lowres : PcdOrientation.FALLBACK_LOWRES) {
@@ -348,6 +357,15 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                 }
             }
             throw first;
+        }
+    }
+
+    private static void requirePcdImagePack(Path file) {
+        if (PcdOrientation.isPcd(extension(file))
+                && !PhotoCdImagePack.isImagePack(file)) {
+            throw new MediaException(file.getFileName()
+                    + " is a Photo CD control record, not an ImagePac raster"
+                    + " (missing PCD_IPI at offset 0x800)");
         }
     }
 

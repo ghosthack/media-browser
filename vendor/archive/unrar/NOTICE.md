@@ -1,9 +1,9 @@
 # Notices and licensing
 
-`robust-unrar` is an independent, read-only RAR inspection project. It is not
-produced, sponsored, or endorsed by RARLAB, win.rar GmbH, the junrar project,
-or their contributors. RAR and WinRAR are names associated with their
-respective owners.
+`unrar` is an independently licensed, read-only RAR inspection module in the
+media-inspection reactor. It is not produced, sponsored, or endorsed by
+RARLAB, win.rar GmbH, the junrar project, or their contributors. RAR and
+WinRAR are names associated with their respective owners.
 
 ## Distribution classification
 
@@ -17,13 +17,14 @@ distribution for handling RAR archives. It also imposes this restriction:
 
 > The code may not be used to develop a RAR (WinRAR) compatible archiver.
 
-Because that is a field-of-use restriction, this repository should be
-described as **source available under the UnRAR License**, not as OSI-approved
-Open Source. This summary is explanatory; the license text controls.
+Because that is a field-of-use restriction, this module should be described as
+**source available under the UnRAR License**, not as OSI-approved Open Source.
+The media-inspection root MIT license does not relicense this module. This
+summary is explanatory; the license text controls.
 
-No MIT, BSD, Apache, GPL, or other project-wide license is claimed for the
-combined work. Dependencies obtained by Maven remain under their respective
-licenses and are not relicensed by this repository.
+No MIT, BSD, Apache, GPL, or other license is claimed for the combined module.
+Dependencies obtained by Maven remain under their respective licenses and are
+not relicensed by this module.
 
 ## Exact lineage
 

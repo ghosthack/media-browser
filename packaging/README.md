@@ -10,10 +10,10 @@ with the JDK's `jpackage` tool. It supports:
 
 Each full packaging run also emits a platform-specific
 `media-browser-X.Y.Z-PLATFORM-licenses.zip`. It contains the application
-license, dependency notices, source-vendored archive licensing/provenance,
-legal and build-information files extracted from the runtime JARs, and the
-`legal/` tree from the exact packaged Java runtime. The non-runtime portion is
-also installed under `THIRD-PARTY-LICENSES`.
+license, dependency notices, source-vendored inspection-mechanics
+licensing/provenance, legal and build-information files extracted from the
+runtime JARs, and the `legal/` tree from the exact packaged Java runtime. The
+non-runtime portion is also installed under `THIRD-PARTY-LICENSES`.
 
 The script first builds an `app-image` and runs `scripts/smoke-package.sh`
 against the Java runtime and dependency jars inside that image. Only after the
@@ -21,14 +21,8 @@ bundled FFmpeg backend initializes successfully does it create an installer.
 
 ```sh
 scripts/package.sh app-image 1.0.0
-scripts/package.sh installer 1.0.0
 scripts/package.sh all 1.0.0
 ```
-
-`installer` mode reuses the application image and staged inputs from a
-preceding `app-image` run. Release CI uses this split on Windows so it can sign
-the native launcher before `jpackage` embeds that launcher in the installer
-and portable ZIP.
 
 When testing a quarantined macOS app during development, clear the quarantine
 attribute from the installed bundle:
@@ -68,16 +62,13 @@ Windows:
 - `WINDOWS_PFX_PASSWORD`: certificate password, if any
 - `WINDOWS_TIMESTAMP_URL`: RFC 3161 timestamp service; defaults to DigiCert
 
-Local PFX signing remains available through these variables. GitHub release CI
-uses Azure Artifact Signing instead: it signs the app launcher before creating
-the Windows installer and portable ZIP, then signs and verifies the installer.
-The macOS release path continues to use the protected `release` environment
-and notarizes/staples a signed DMG.
+The GitHub release workflow prepares these variables from protected secrets,
+signs the app launcher before creating the Windows installer, signs the
+installer afterward, and notarizes/staples a signed macOS DMG.
 
-Configure GitHub environments named `release` and `release-signing`. macOS,
-Linux, and publication use `release`; Windows packaging uses
-`release-signing`. Either environment can require maintainer approval. Add the
-macOS environment secrets below to `release` as applicable:
+Configure a GitHub environment named `release`. The workflow runs all package
+and publication jobs through that environment, so it can require maintainer
+approval. Add these environment secrets as applicable:
 
 - `MACOS_CERTIFICATE_BASE64`
 - `MACOS_CERTIFICATE_PASSWORD`
@@ -85,10 +76,12 @@ macOS environment secrets below to `release` as applicable:
 - `MACOS_NOTARY_APPLE_ID`
 - `MACOS_NOTARY_PASSWORD`
 - `MACOS_NOTARY_TEAM_ID`
+- `WINDOWS_CERTIFICATE_BASE64`
+- `WINDOWS_CERTIFICATE_PASSWORD`
+- `WINDOWS_TIMESTAMP_URL` (optional)
 
-The macOS certificate value is a base64 encoding of the binary PKCS#12 file.
-The Windows `release-signing` environment requires `AZURE_CLIENT_ID`,
-`AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` secrets plus
-`ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT`, and
-`ARTIFACT_SIGNING_PROFILE` variables. See
-[Release signing setup](SIGNING.md) for details.
+The certificate values are base64 encodings of the binary PKCS#12/PFX files.
+If no signing secrets are configured, manual workflow runs still produce
+unsigned packages. The project currently publishes unsigned releases, so
+macOS Gatekeeper and Windows SmartScreen may require users to approve the app
+manually. Signing can be enabled later without changing the artifact layout.

@@ -37,6 +37,13 @@
     <jcodec.version>0.2.5</jcodec.version>
     <!-- Runtime logging facade used by the source-vendored robust-unrar core. -->
     <slf4j.version>2.0.17</slf4j.version>
+    <!-- Parser dependency for the temporarily source-vendored pdf-media
+         mechanics module. The source-vendored EPUB mechanics use only JDK
+         ZIP/XML APIs. Both become normal Maven dependencies after their first
+         Central releases. -->
+    <pdfbox.version>3.0.8</pdfbox.version>
+    <!-- Pure-Java ImageIO decoder for JBIG2 raster streams embedded in PDFs. -->
+    <jbig2-imageio.version>3.0.5</jbig2-imageio.version>
     <!-- Default LWJGL + JavaCPP native classifiers; overridden per-OS by the
          profiles below (activated by os.family/os.arch). We deliberately use a
          single-platform JavaCPP classifier (mirroring the LWJGL natives) rather
@@ -59,6 +66,7 @@
          built in ../libraw-ffm. Same platform coverage as ffmpeg-ffm; absent
          natives mean RAW extensions are not claimed, they never break a build. -->
     <librawffm.version>0.22.2-0.2.0</librawffm.version>
+    <media-inspection.version>0.2.0</media-inspection.version>
     <librawffm.natives>macos-arm64</librawffm.natives>
     <junit.version>5.11.4</junit.version>
     <app.mainClass>io.github.ghosthack.mediabrowser.App</app.mainClass>
@@ -72,6 +80,21 @@
   </properties>
 
   <dependencies>
+    <dependency>
+      <groupId>io.github.ghosthack</groupId>
+      <artifactId>iso9660</artifactId>
+      <version>${media-inspection.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>pdfbox</artifactId>
+      <version>${pdfbox.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>jbig2-imageio</artifactId>
+      <version>${jbig2-imageio.version}</version>
+    </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
@@ -400,7 +423,7 @@
       <!-- The OSS source export and the application JAR share one explicit
            redistribution manifest. This keeps upstream development notes and
            roadmaps out while retaining the required license/notice records
-           and the provenance manifests for source-vendored archive readers. -->
+           and provenance for source-vendored inspection mechanics. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-antrun-plugin</artifactId>

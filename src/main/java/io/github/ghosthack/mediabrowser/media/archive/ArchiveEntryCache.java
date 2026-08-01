@@ -1,6 +1,9 @@
 package io.github.ghosthack.mediabrowser.media.archive;
 
+import io.github.ghosthack.mediabrowser.media.archive.stream.StreamFileSystemProvider;
+
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -16,15 +19,18 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Extracted copies of archive entries, so the native decoders keep working
+ * Decoder-ready copies of archive entries, so the native decoders keep working
  * unchanged.
  *
  * <p>Every backend — bundled FFmpeg, LibRaw, Apple ImageIO, Windows WIC —
  * ultimately opens a file <em>by OS path</em> ({@code file.toString()} handed
  * to native code). An entry inside any mounted container has no OS path, so the one
- * honest way to decode it is to write the bytes somewhere real first. Doing it
- * here, at a single choke point, is what keeps all six backends free of archive
- * awareness and keeps behaviour identical inside and outside a container.</p>
+ * honest way to decode it is to write the bytes somewhere real first. A mounted
+ * entry may also offer a presentation stream when its physical bytes are a
+ * container-native encoding (currently PDF/JBIG2); that private rendition is
+ * materialized here without changing the entry's NIO bytes or identity. Doing
+ * it at this single choke point keeps all six backends free of archive awareness
+ * and keeps behaviour identical inside and outside a container.</p>
  *
  * <p>Copies live in a per-run temp directory, deleted on exit; they are not
  * reused across runs, since validating a stale copy against its container costs
@@ -62,13 +68,14 @@ public final class ArchiveEntryCache {
     private record Copy(Path file, long bytes) {}
 
     /**
-     * A real OS path with the contents of {@code path}: {@code path} itself
-     * when it is already an ordinary file, otherwise an extracted copy.
+     * A real OS path suitable for decoding {@code path}: {@code path} itself
+     * when it is already an ordinary file, otherwise an extracted copy or the
+     * entry's private presentation rendition.
      *
-     * <p>The copy keeps the entry's original file name, because the backends
-     * read it: the FFM facade routes camera RAW by extension and FFmpeg's
-     * demuxer probe is extension-hinted, so extracting to a neutral name would
-     * quietly change which decoder runs.</p>
+     * <p>An ordinary copy keeps the entry's original file name, because the
+     * backends read it: the FFM facade routes camera RAW by extension and
+     * FFmpeg's demuxer probe is extension-hinted. A presentation rendition uses
+     * its truthful standalone extension (for example {@code .png}).</p>
      */
     public Path materialize(Path path) throws IOException {
         if (!ArchivePaths.inArchive(path)) return path;
@@ -106,14 +113,38 @@ public final class ArchiveEntryCache {
     private Path extract(Path entry, String key) throws IOException {
         Path into = directory().resolve(key);
         Files.createDirectories(into);
-        Path name = entry.getFileName();
-        Path target = into.resolve(name == null ? "entry" : name.toString());
-        Path partial = into.resolve((name == null ? "entry" : name.toString()) + ".part");
-        try (var in = Files.newInputStream(entry)) {
+        Extraction extraction = extraction(entry);
+        Path target = into.resolve(extraction.name());
+        Path partial = into.resolve(extraction.name() + ".part");
+        try (InputStream in = extraction.input()) {
             Files.copy(in, partial, StandardCopyOption.REPLACE_EXISTING);
         }
         Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING);
         return target;
+    }
+
+    private record Extraction(String name, InputStream input) {}
+
+    private static Extraction extraction(Path entry) throws IOException {
+        if (entry.getFileSystem().provider() instanceof StreamFileSystemProvider provider) {
+            var presentation = provider.openPresentation(entry);
+            if (presentation.isPresent()) {
+                String sourceName = entry.getFileName() == null
+                        ? "entry" : entry.getFileName().toString();
+                return new Extraction(replaceExtension(
+                        sourceName, presentation.get().extension()),
+                        presentation.get().input());
+            }
+        }
+        Path name = entry.getFileName();
+        return new Extraction(name == null ? "entry" : name.toString(),
+                Files.newInputStream(entry));
+    }
+
+    private static String replaceExtension(String name, String extension) {
+        int dot = name.lastIndexOf('.');
+        String stem = dot > 0 ? name.substring(0, dot) : name;
+        return stem + "." + extension;
     }
 
     /**

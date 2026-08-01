@@ -1,5 +1,8 @@
 package io.github.ghosthack.mediabrowser.media.archive.iso;
 
+import io.github.ghosthack.iso9660.IsoEntry;
+import io.github.ghosthack.iso9660.IsoImage;
+
 import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -86,7 +89,7 @@ public final class IsoFileSystemProvider extends FileSystemProvider {
     public IsoFileSystem newCueFileSystem(Path cue) throws IOException {
         Path key = cue.toAbsolutePath().normalize();
         if (mounts.containsKey(key)) throw new FileSystemAlreadyExistsException(key.toString());
-        IsoImage image = IsoImage.openCue(key);
+        IsoImage image = CueIsoData.openImage(key);
         return publish(key, image);
     }
 
@@ -353,7 +356,7 @@ public final class IsoFileSystemProvider extends FileSystemProvider {
     private record Attributes(IsoEntry entry) implements BasicFileAttributes {
         @Override
         public FileTime lastModifiedTime() {
-            return FileTime.fromMillis(entry.mtimeMillis());
+            return entry.lastModifiedTime().orElse(FileTime.fromMillis(0));
         }
 
         @Override

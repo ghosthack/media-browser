@@ -1,18 +1,22 @@
 # Release signing setup
 
-The GitHub release workflow uses protected GitHub environments named `release`
-and `release-signing`. Windows releases are signed through Azure Artifact
-Signing. macOS signing and notarization remain optional.
+The GitHub release workflow uses a protected GitHub environment named
+`release`. It can produce unsigned packages when no credentials are present,
+and that is the project's current release policy. Users may need to approve
+the app manually through macOS Gatekeeper or Windows SmartScreen.
 
-Never commit the `.p12` file, its base64 representation, passwords, or Azure
-configuration values. Enter secret text through protected local files or
-GitHub CLI prompts rather than placing it in shell history.
+Signing remains optional. If it is enabled later, Windows packages should be
+signed and the macOS DMG should be signed, notarized, and stapled.
+
+Never commit the `.p12` or `.pfx` files, their base64 representations, or their
+passwords. Enter secret text through the GitHub CLI prompts rather than placing
+it in shell history.
 
 ## Configure the GitHub environment
 
 Open the repository's
 [environment settings](https://github.com/ghosthack/media-browser/settings/environments)
-and select or create both `release` and `release-signing`.
+and select or create `release`.
 
 Recommended protection:
 
@@ -20,9 +24,9 @@ Recommended protection:
 - Leave **Prevent self-review** disabled if there is only one maintainer.
 - Restrict deployments to the `main` branch and tags matching `v*`.
 
-The manual dry run uses `main`; actual releases run from `vX.Y.Z` tags.
-Environment approval prevents jobs from reading environment secrets until a
-reviewer approves the deployment.
+The manual unsigned or signed dry run uses `main`; actual releases run from
+`vX.Y.Z` tags. Environment approval prevents jobs from reading environment
+secrets until a reviewer approves the deployment.
 
 GitHub documentation:
 [Deployments and environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
@@ -117,46 +121,54 @@ Create the notarization password at
 **Sign-In and Security > App-Specific Passwords**. The Team ID appears under
 the Apple Developer account's **Membership details**.
 
-## Windows signing with Azure Artifact Signing
+## Windows signing
 
-Windows release CI authenticates to Azure through GitHub OIDC, so it does not
-store a client secret, certificate private key, PFX, or PFX password in GitHub.
-The Azure Artifact Signing account uses a Public Trust certificate profile.
+The current workflow expects an Authenticode `.pfx` containing both the
+certificate and its exportable private key. If the certificate is stored only
+on a hardware token or in a cloud signing service, it cannot be used through
+the current PFX-based workflow.
 
-The `release-signing` environment contains these secrets:
+Upload an existing PFX without printing its base64 value:
 
-- `AZURE_CLIENT_ID`
-- `AZURE_TENANT_ID`
-- `AZURE_SUBSCRIPTION_ID`
+```sh
+WIN_PFX=/absolute/path/to/codesigning.pfx
 
-It also contains these non-secret environment variables:
+test -r "$WIN_PFX" &&
+  openssl base64 -A -in "$WIN_PFX" |
+  gh secret set WINDOWS_CERTIFICATE_BASE64 \
+    --env release \
+    --repo ghosthack/media-browser
 
-- `ARTIFACT_SIGNING_ENDPOINT`
-- `ARTIFACT_SIGNING_ACCOUNT`
-- `ARTIFACT_SIGNING_PROFILE`
+unset WIN_PFX
+```
 
-The Microsoft Entra app registration has a federated credential whose subject
-matches the `release-signing` GitHub environment. The same app has the
-**Artifact Signing Certificate Profile Signer** role on the Artifact Signing
-account.
+Enter the PFX password interactively:
 
-The workflow:
+```sh
+gh secret set WINDOWS_CERTIFICATE_PASSWORD \
+  --env release \
+  --repo ghosthack/media-browser
+```
 
-1. Builds and smoke-tests a self-contained Windows application image.
-2. Authenticates with `azure/login` using GitHub OIDC.
-3. Signs the native `Media Browser.exe` launcher with a SHA-256 signature and
-   RFC 3161 timestamp.
-4. Builds the installer and portable ZIP from that signed application image.
-5. Signs the finished installer with the same profile and timestamp service.
-6. Fails unless both Authenticode signatures are valid and timestamped.
+`WINDOWS_TIMESTAMP_URL` is optional. The packaging script defaults to
+`http://timestamp.digicert.com`. To override it:
 
-The ZIP itself is not Authenticode-signed, but it contains the signed launcher.
-The installer is Authenticode-signed directly. Azure Artifact Signing keeps
-the certificate private key in the managed service.
+```sh
+gh secret set WINDOWS_TIMESTAMP_URL \
+  --env release \
+  --repo ghosthack/media-browser
+```
 
-Local PFX-based signing remains supported by `scripts/package.sh` and
-`scripts/sign-windows.ps1` when `WINDOWS_PFX_FILE` is set. GitHub release CI
-does not use or require that path.
+### Managed Windows signing alternative
+
+For a new signing setup, consider
+[Microsoft Azure Artifact Signing](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart)
+with a Public Trust certificate profile. It keeps the long-lived signing
+private key out of GitHub and supports public Win32 application signing.
+
+The current release workflow does not yet implement Artifact Signing. It must
+be refactored before using that option; until then, Windows signing requires an
+exportable Authenticode PFX.
 
 ## Verify the configuration
 
@@ -164,11 +176,7 @@ GitHub displays secret names and update times, but never their values:
 
 ```sh
 gh secret list \
-  --env release-signing \
-  --repo ghosthack/media-browser
-
-gh variable list \
-  --env release-signing \
+  --env release \
   --repo ghosthack/media-browser
 ```
 
@@ -182,14 +190,12 @@ gh workflow run release.yml \
   -f publish=false
 ```
 
-Approve the environment deployments when prompted. In the workflow log,
-confirm that:
+Approve the `release` environment deployment when prompted. In the workflow
+log, confirm that:
 
 - macOS does not report that its certificate is missing.
 - macOS notarization completes and stapler validation succeeds.
-- Azure OIDC login succeeds.
-- Both Windows signing operations succeed.
-- Windows signature and timestamp verification succeeds.
+- Windows does not report that its certificate is missing.
 - All three platform artifacts upload successfully.
 
 Only after the dry run succeeds should a `vX.Y.Z` tag be pushed for a public

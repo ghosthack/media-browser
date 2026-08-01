@@ -5,6 +5,7 @@ import io.github.ghosthack.mediabrowser.media.archive.ArchiveEntryCache;
 import io.github.ghosthack.mediabrowser.media.archive.ArchiveFormat;
 import io.github.ghosthack.mediabrowser.media.archive.ArchiveInfo;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
+import io.github.ghosthack.mediabrowser.media.archive.stream.StreamFileSystemProvider.PdfMrcView;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -258,7 +259,7 @@ public final class MediaService implements AutoCloseable {
                 if (stillWanted != null && !stillWanted.getAsBoolean()) return;
                 Path p = files.get(i);
                 if (isJunk(p)) continue;   // forced OTHER in both passes; never changes
-                Optional<MediaKind> byExtension = ExtensionClassifier.classify(p);
+                Optional<MediaKind> byExtension = classifyFast(p);
                 Optional<MediaKind> sniffed;
                 try {
                     sniffed = classify(p);
@@ -272,16 +273,30 @@ public final class MediaService implements AutoCloseable {
 
     public CompletableFuture<MediaProbe> probe(Path file) {
         return CompletableFuture.supplyAsync(() -> {
+            Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
+            if (mrc.isPresent()) return PdfMrcMedia.probe(file, mrc.get());
             rejectIfEmpty(file);
-            return facade.probe(decodable(file));
+            MediaProbe decoded = facade.probe(decodable(file));
+            return EpubEntryDetails.preserveProbe(
+                    file, PdfEntryDetails.preserveProbe(file, decoded));
         }, executor);
     }
 
     public CompletableFuture<VisualResult> loadVisual(Path file) {
         return CompletableFuture.supplyAsync(() -> {
+            Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
+            if (mrc.isPresent()) {
+                return PdfMrcMedia.load(file, mrc.get(), facade, MediaService::decodable);
+            }
             rejectIfEmpty(file);
-            return facade.loadVisual(decodable(file));
+            return preserveVisual(file, facade.loadVisual(decodable(file)));
         }, executor);
+    }
+
+    private static VisualResult preserveVisual(Path source, VisualResult decoded) {
+        MediaProbe probe = PdfEntryDetails.preserveProbe(source, decoded.probe());
+        return new VisualResult(
+                EpubEntryDetails.preserveProbe(source, probe), decoded.frame());
     }
 
     /**
@@ -326,8 +341,12 @@ public final class MediaService implements AutoCloseable {
     public CompletableFuture<VisualResult> loadVisual(Path file, BooleanSupplier stillWanted) {
         return CompletableFuture.supplyAsync(() -> {
             if (!stillWanted.getAsBoolean()) return null;
+            Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
+            if (mrc.isPresent()) {
+                return PdfMrcMedia.load(file, mrc.get(), facade, MediaService::decodable);
+            }
             rejectIfEmpty(file);
-            return facade.loadVisual(decodable(file));
+            return preserveVisual(file, facade.loadVisual(decodable(file)));
         }, executor);
     }
 
@@ -345,8 +364,12 @@ public final class MediaService implements AutoCloseable {
             // produce a decode failure, when what it actually has to say is its
             // volume identity.
             if (ArchivePaths.isArchiveFile(file)) return archiveMetadata(file);
+            Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
+            if (mrc.isPresent()) return PdfMrcMedia.metadata(file, mrc.get());
             rejectIfEmpty(file);
-            return facade.readMetadata(decodable(file));
+            Metadata decoded = facade.readMetadata(decodable(file));
+            return EpubEntryDetails.preserveMetadata(
+                    file, PdfEntryDetails.preserveMetadata(file, decoded));
         }, metadataExecutor);
     }
 
@@ -398,6 +421,13 @@ public final class MediaService implements AutoCloseable {
                 CompletableFuture<Thumbnail> generated = CompletableFuture.supplyAsync(() -> {
                     long loadStart = MosaicTelemetry.now();
                     try {
+                        Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
+                        if (mrc.isPresent()) {
+                            return thumbnailCache.get(k,
+                                    () -> PdfMrcMedia.thumbnail(
+                                            mrc.get(), facade, MediaService::decodable,
+                                            maxEdge, mode));
+                        }
                         rejectIfEmpty(file);
                         return thumbnailCache.get(k,
                                 () -> facade.loadThumbnail(decodable(file), maxEdge, mode));
@@ -551,7 +581,10 @@ public final class MediaService implements AutoCloseable {
      * holder off the dead-end list.
      */
     private static boolean isContent(Path file) {
-        return ExtensionClassifier.classify(file).isPresent()
+        if (PhotoCdImagePack.hasPcdExtension(file)) {
+            return PhotoCdImagePack.isImagePack(file);
+        }
+        return classifyFast(file).isPresent()
                 || ArchiveFormat.looksLikeArchive(file);
     }
 
@@ -768,7 +801,10 @@ public final class MediaService implements AutoCloseable {
      * ({@code .DS_Store} et al.) from paying the read.
      */
     private static boolean isVisualPreview(Path file, boolean sniff) {
-        Optional<MediaKind> byExtension = ExtensionClassifier.classify(file);
+        if (PhotoCdImagePack.hasPcdExtension(file)) {
+            return PhotoCdImagePack.isImagePack(file);
+        }
+        Optional<MediaKind> byExtension = classifyFast(file);
         if (byExtension.isPresent()) return isVisualPreviewKind(file, byExtension.get());
         if (!sniff || isJunk(file)) return false;
         return ContentSniffer.sniff(file)
@@ -885,7 +921,7 @@ public final class MediaService implements AutoCloseable {
      * the slow content-sniff path.
      */
     private List<DirEntry> scanFast(Path dir) {
-        return scan(dir, ExtensionClassifier::classify);
+        return scan(dir, MediaService::classifyFast);
     }
 
     private List<DirEntry> scan(Path dir, Function<Path, Optional<MediaKind>> classifier) {
@@ -942,7 +978,9 @@ public final class MediaService implements AutoCloseable {
                 long mtime = mtimeOf(p);
                 boolean junk = isJunk(p);
                 FileTraits traits = FileTraits.read(p, junk);
-                if (listingHideEmptyFiles && size == 0) {
+                if (listingHideEmptyFiles
+                        && size == 0
+                        && PdfEntryDetails.mrc(p).isEmpty()) {
                     hiddenEmptyFiles++;
                     continue;
                 }
@@ -989,6 +1027,14 @@ public final class MediaService implements AutoCloseable {
 
     /** Classifies one file per the current {@link DetectionMode}. */
     private Optional<MediaKind> classify(Path file) {
+        Optional<MediaKind> epubKind = EpubEntryDetails.viewableKind(file);
+        if (epubKind.isPresent()) return epubKind;
+        Optional<MediaKind> pdfKind = PdfEntryDetails.viewableKind(file);
+        if (pdfKind.isPresent()) return pdfKind;
+        if (PhotoCdImagePack.hasPcdExtension(file)) {
+            return PhotoCdImagePack.isImagePack(file)
+                    ? Optional.of(MediaKind.IMAGE) : Optional.empty();
+        }
         return detectionMode == DetectionMode.FILE_EXTENSION
                 ? classifyByExtension(file, ImageSequences::isAnimatedImageSequence,
                         f -> facade.classify(decodable(f)))
@@ -1055,6 +1101,14 @@ public final class MediaService implements AutoCloseable {
             return facadeClassify.apply(file);
         }
         return byExtension;
+    }
+
+    /** Extension classification plus retained PDF raster descriptors. */
+    private static Optional<MediaKind> classifyFast(Path file) {
+        Optional<MediaKind> epubKind = EpubEntryDetails.viewableKind(file);
+        if (epubKind.isPresent()) return epubKind;
+        Optional<MediaKind> pdfKind = PdfEntryDetails.viewableKind(file);
+        return pdfKind.isPresent() ? pdfKind : ExtensionClassifier.classify(file);
     }
 
     /** Whether the file is a known non-media OS/sidecar file to skip sniffing for. */

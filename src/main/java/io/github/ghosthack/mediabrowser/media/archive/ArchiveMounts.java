@@ -150,7 +150,7 @@ public final class ArchiveMounts {
                 case ISO -> IsoFileSystemProvider.instance().newFileSystem(key, Map.of());
                 case CUE -> IsoFileSystemProvider.instance().newCueFileSystem(key);
                 case ZIP -> openZip(key);
-                case RAR, SEVEN_Z ->
+                case RAR, SEVEN_Z, PDF, EPUB ->
                         StreamFileSystemProvider.instance().newFileSystem(key, format);
             };
         } catch (FileSystemAlreadyExistsException e) {

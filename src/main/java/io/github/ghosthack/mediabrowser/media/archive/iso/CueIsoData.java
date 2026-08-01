@@ -2,13 +2,15 @@ package io.github.ghosthack.mediabrowser.media.archive.iso;
 
 import io.github.ghosthack.cue.CueArchive;
 import io.github.ghosthack.cue.CueTrackData;
+import io.github.ghosthack.iso9660.IsoDataSource;
+import io.github.ghosthack.iso9660.IsoImage;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 
 /** Owns a CUE/BIN set and exposes its sole ISO data track positionally. */
-final class CueIsoData implements IsoData {
+public final class CueIsoData implements IsoDataSource {
     private final CueArchive archive;
     private final CueTrackData track;
 
@@ -27,8 +29,15 @@ final class CueIsoData implements IsoData {
         }
     }
 
+    public static IsoImage openImage(Path cue) throws IOException {
+        String displayName = cue.getFileName() == null
+                ? cue.toString()
+                : cue.getFileName().toString();
+        return IsoImage.open(displayName, open(cue));
+    }
+
     @Override public long size() throws IOException { return track.size(); }
-    @Override public int read(ByteBuffer target, long position) throws IOException {
+    @Override public int read(long position, ByteBuffer target) throws IOException {
         return track.read(position, target);
     }
 
