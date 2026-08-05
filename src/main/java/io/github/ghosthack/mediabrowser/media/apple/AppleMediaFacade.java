@@ -2,6 +2,7 @@ package io.github.ghosthack.mediabrowser.media.apple;
 
 import io.github.ghosthack.mediabrowser.media.ImageSequences;
 import io.github.ghosthack.mediabrowser.media.MediaException;
+import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
 import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.Metadata;
@@ -156,6 +157,65 @@ public final class AppleMediaFacade implements MediaFacade {
     }
 
     @Override
+    public VisualResult loadVisual(Path file, MediaEngineTrace.Recorder trace) {
+        if (sniffImage(file)) {
+            if (ImageSequences.isAnimatedImageSequence(file)) {
+                long animated = trace.beginAttempt();
+                try {
+                    VisualResult result = avVideoVisual(file);
+                    trace.succeeded("AVFoundation animated image track", animated,
+                            visualDetail(result));
+                    return result;
+                } catch (MediaException e) {
+                    trace.failed("AVFoundation animated image track", animated, e);
+                }
+            }
+            long still = trace.beginAttempt();
+            try {
+                VisualResult result = imageIoVisual(file);
+                trace.succeeded("Apple ImageIO still", still, visualDetail(result));
+                return result;
+            } catch (RuntimeException | Error e) {
+                trace.failed("Apple ImageIO still", still, e);
+                throw e;
+            }
+        }
+        String ext = extension(file);
+        if (VIDEO_EXTENSIONS.contains(ext)) {
+            long video = trace.beginAttempt();
+            VideoInfo vi = videoInfo(file);
+            if (vi != null && vi.width() > 0 && vi.height() > 0) {
+                try (Arena arena = Arena.ofConfined()) {
+                    DecodedImage<PixelFormat> frame =
+                            AVFoundation.extractFrame(arena, file.toString(), 0);
+                    VisualResult result = new VisualResult(
+                            videoProbe(file, vi), Optional.of(toRaster(frame)));
+                    trace.succeeded("AVFoundation video poster", video, visualDetail(result));
+                    return result;
+                } catch (RuntimeException | Error e) {
+                    trace.failed("AVFoundation video poster", video, e);
+                    throw e;
+                }
+            } else {
+                trace.declined("AVFoundation video poster", video,
+                        "No playable video track");
+            }
+        }
+        if (VIDEO_EXTENSIONS.contains(ext) || AUDIO_EXTENSIONS.contains(ext)) {
+            AudioInfo ai = audioInfo(file);
+            if (ai != null && ai.hasAudio()) {
+                long audio = trace.beginAttempt();
+                trace.succeeded("AVFoundation audio probe", audio, "Audio-only; no cover art");
+                return new VisualResult(audioProbe(file, ai), Optional.empty());
+            }
+        }
+        long declined = trace.beginAttempt();
+        trace.declined("Apple native routes", declined, "No native route claimed the input");
+        if (fallback != null) return fallback.loadVisual(file, trace);
+        throw new MediaException("apple: cannot load visual of " + file.getFileName());
+    }
+
+    @Override
     public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
         // Stills: CGImageSourceCreateThumbnailAtIndex — reuses any embedded
         // EXIF/JPEG thumbnail, applies orientation, and reads straight from
@@ -183,6 +243,73 @@ public final class AppleMediaFacade implements MediaFacade {
         // Audio cover art (and any video the native path declined) fall back to
         // the interface default (full visual via AVFoundation + JVM scale/crop).
         return MediaFacade.super.loadThumbnail(file, maxEdge, mode);
+    }
+
+    @Override
+    public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode,
+                                   MediaEngineTrace.Recorder trace) {
+        if (sniffImage(file)) {
+            if (ImageSequences.isAnimatedImageSequence(file)) {
+                long animated = trace.beginAttempt();
+                try {
+                    Thumbnail result = avVideoThumbnail(file, maxEdge, mode);
+                    trace.succeeded("AVFoundation animated thumbnail", animated,
+                            thumbnailDetail(result, maxEdge, mode));
+                    return result;
+                } catch (MediaException e) {
+                    trace.failed("AVFoundation animated thumbnail", animated, e);
+                }
+            }
+            long still = trace.beginAttempt();
+            try {
+                Thumbnail result = imageIoThumbnail(file, maxEdge, mode);
+                trace.succeeded("Apple ImageIO thumbnail", still,
+                        thumbnailDetail(result, maxEdge, mode));
+                return result;
+            } catch (RuntimeException | Error e) {
+                trace.failed("Apple ImageIO thumbnail", still, e);
+                throw e;
+            }
+        }
+        String ext = extension(file);
+        if (VIDEO_EXTENSIONS.contains(ext)) {
+            VideoInfo vi = videoInfo(file);
+            if (vi != null && vi.width() > 0 && vi.height() > 0) {
+                long video = trace.beginAttempt();
+                try {
+                    Thumbnail result = videoThumbnail(file, vi, maxEdge, mode);
+                    trace.succeeded("AVFoundation maximum-size poster", video,
+                            thumbnailDetail(result, maxEdge, mode));
+                    return result;
+                } catch (RuntimeException e) {
+                    trace.failed("AVFoundation maximum-size poster", video, e);
+                }
+            }
+        }
+        long full = trace.beginAttempt();
+        try {
+            VisualResult visual = loadVisual(file, trace);
+            Thumbnail result = new Thumbnail(
+                    visual.frame().map(f -> Thumbnails.scale(f, maxEdge, mode)),
+                    visual.probe().kind());
+            trace.succeeded("Full visual + JVM thumbnail", full,
+                    thumbnailDetail(result, maxEdge, mode));
+            return result;
+        } catch (RuntimeException | Error e) {
+            trace.failed("Full visual + JVM thumbnail", full, e);
+            throw e;
+        }
+    }
+
+    private static String visualDetail(VisualResult result) {
+        return result.frame().map(f -> f.width() + "×" + f.height() + " BGRA")
+                .orElse("No visual frame");
+    }
+
+    private static String thumbnailDetail(Thumbnail result, int maxEdge, ThumbnailMode mode) {
+        return mode + ", requested ≤" + maxEdge + " px, produced "
+                + result.frame().map(f -> f.width() + "×" + f.height() + " BGRA")
+                        .orElse("no visual frame");
     }
 
     // -- still (ImageIO) vs animated AVIF/HEIC (AVFoundation) ----------------

@@ -1,5 +1,6 @@
 package io.github.ghosthack.mediabrowser;
 
+import io.github.ghosthack.mediabrowser.media.MediaBackend;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 
 import java.io.IOException;
@@ -59,8 +60,9 @@ public final class AppSettings {
     private static final String MOSAIC_FOLDER_PREVIEW_GRID_KEY = "mosaic.folderPreview.grid";
     private static final String MOSAIC_TILE_SET_KEY = "mosaic.tileSet";
     private static final String MOSAIC_FOLDER_PREVIEW_SNIFF_KEY = "mosaic.folderPreview.sniff";
-    // docs/empty-states.md. The three listing.* keys govern the browser list
+    // docs/empty-states.md. The listing.* keys govern the browser list
     // and the mosaic grid alike, which is why they are not mosaic-scoped.
+    private static final String LISTING_SHOW_HIDDEN_KEY = "listing.showHiddenFiles";
     private static final String LISTING_IGNORE_JUNK_KEY = "listing.ignoreJunkFiles";
     private static final String LISTING_HIDE_EMPTY_FILES_KEY = "listing.hideEmptyFiles";
     private static final String LISTING_HIDE_EMPTY_FOLDERS_KEY = "listing.hideEmptyFolders";
@@ -144,7 +146,7 @@ public final class AppSettings {
     /** Fresh-install visual defaults. Explicit persisted choices always win. */
     private static final Theme DEFAULT_THEME = Theme.CUPERTINO_DARK;
     private static final IconPack DEFAULT_ICON_PACK = IconPack.LUCID;
-    private static final String DEFAULT_MOSAIC_TILE_SET_ID = "xedge-additive";
+    private static final String DEFAULT_MOSAIC_TILE_SET_ID = "xedge-xs";
 
     /** Defaults for the mosaic grid layout. */
     private static final int DEFAULT_MOSAIC_TILE_SIZE = 100;
@@ -236,6 +238,7 @@ public final class AppSettings {
     private int mosaicFolderPreviewGrid;
     private String mosaicTileSetId;
     private boolean mosaicFolderPreviewSniff;
+    private boolean listingShowHiddenFiles;
     private boolean listingIgnoreJunkFiles;
     private boolean listingHideEmptyFiles;
     private boolean listingHideEmptyFolders;
@@ -316,7 +319,8 @@ public final class AppSettings {
                 props.getProperty(WINDOW_MODE_KEY), WindowMode.SINGLE);
         settings.startupLayout = StartupLayout.fromSettings(
                 props.getProperty(STARTUP_LAYOUT_KEY), legacyStartupLayout(props));
-        settings.mediaBackend = props.getProperty(BACKEND_KEY, "ffmpeg-ffm-turbojpeg");
+        settings.mediaBackend = props.getProperty(
+                BACKEND_KEY, MediaBackend.defaultBackend().settingsValue());
         settings.decodeDevice = props.getProperty(DECODE_DEVICE_KEY, "auto");
         settings.detectionMode = props.getProperty(DETECTION_KEY, "extension");
         settings.theme = Theme.fromSettings(props.getProperty(THEME_KEY), DEFAULT_THEME);
@@ -368,6 +372,8 @@ public final class AppSettings {
                 props.getProperty(MOSAIC_TILE_SET_KEY), DEFAULT_MOSAIC_TILE_SET_ID);
         settings.mosaicFolderPreviewSniff = Boolean.parseBoolean(
                 props.getProperty(MOSAIC_FOLDER_PREVIEW_SNIFF_KEY, "false"));
+        settings.listingShowHiddenFiles = Boolean.parseBoolean(
+                props.getProperty(LISTING_SHOW_HIDDEN_KEY, "true"));
         settings.listingIgnoreJunkFiles = Boolean.parseBoolean(
                 props.getProperty(LISTING_IGNORE_JUNK_KEY, "true"));
         settings.listingHideEmptyFiles = Boolean.parseBoolean(
@@ -594,6 +600,7 @@ public final class AppSettings {
         props.setProperty(MOSAIC_TILE_SET_KEY, mosaicTileSetId);
         props.setProperty(MOSAIC_FOLDER_PREVIEW_SNIFF_KEY,
                 Boolean.toString(mosaicFolderPreviewSniff));
+        props.setProperty(LISTING_SHOW_HIDDEN_KEY, Boolean.toString(listingShowHiddenFiles));
         props.setProperty(LISTING_IGNORE_JUNK_KEY, Boolean.toString(listingIgnoreJunkFiles));
         props.setProperty(LISTING_HIDE_EMPTY_FILES_KEY, Boolean.toString(listingHideEmptyFiles));
         props.setProperty(LISTING_HIDE_EMPTY_FOLDERS_KEY,
@@ -774,7 +781,7 @@ public final class AppSettings {
         this.startupLayout = startupLayout == null ? StartupLayout.MOSAIC_VIEWER : startupLayout;
     }
 
-    /** Native decode backend, e.g. {@code "ffmpeg-ffm-turbojpeg"} (default), {@code "ffmpeg-ffm"}, {@code "apple"}. */
+    /** Native decode backend, e.g. {@code "ffmpeg-ffm-turbojpeg-cm"} (default), {@code "ffmpeg-ffm"}, {@code "apple"}. */
     public String mediaBackend() {
         return mediaBackend;
     }
@@ -1006,7 +1013,7 @@ public final class AppSettings {
         this.mosaicFolderPreviewGrid = Math.max(0, Math.min(4, grid));
     }
 
-    /** ID of the generated-art tile set used by Mosaic; {@code xedge-additive} by default. */
+    /** ID of the generated-art tile set used by Mosaic; {@code xedge-xs} by default. */
     public String mosaicTileSetId() {
         return mosaicTileSetId;
     }
@@ -1027,6 +1034,15 @@ public final class AppSettings {
 
     public void setMosaicFolderPreviewSniff(boolean sniff) {
         this.mosaicFolderPreviewSniff = sniff;
+    }
+
+    /** Whether filesystem-hidden entries appear in listings. On by default. */
+    public boolean listingShowHiddenFiles() {
+        return listingShowHiddenFiles;
+    }
+
+    public void setListingShowHiddenFiles(boolean show) {
+        this.listingShowHiddenFiles = show;
     }
 
     /**

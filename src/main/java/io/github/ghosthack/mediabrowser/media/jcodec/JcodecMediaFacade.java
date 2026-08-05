@@ -2,6 +2,7 @@ package io.github.ghosthack.mediabrowser.media.jcodec;
 
 import io.github.ghosthack.mediabrowser.media.BufferedImageRaster;
 import io.github.ghosthack.mediabrowser.media.MediaException;
+import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
 import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
@@ -97,6 +98,21 @@ public final class JcodecMediaFacade implements MediaFacade {
     }
 
     @Override
+    public VisualResult loadVisual(Path file, MediaEngineTrace.Recorder trace) {
+        long started = trace.beginAttempt();
+        try {
+            VisualResult result = loadVisual(file);
+            trace.succeeded("JCodec first video track", started,
+                    result.probe().videoCodec() + "; first frame → BufferedImage → BGRA; "
+                            + result.probe().width() + "×" + result.probe().height());
+            return result;
+        } catch (RuntimeException | Error e) {
+            trace.failed("JCodec first video track", started, e);
+            throw e;
+        }
+    }
+
+    @Override
     public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
         return withGrab(file, g -> {
             if (!supportedVideo(g)) {
@@ -106,6 +122,23 @@ public final class JcodecMediaFacade implements MediaFacade {
             RasterFrame frame = Thumbnails.scale(decodePoster(g, file), maxEdge, mode);
             return new Thumbnail(Optional.of(frame), MediaKind.VIDEO);
         });
+    }
+
+    @Override
+    public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode,
+                                   MediaEngineTrace.Recorder trace) {
+        long started = trace.beginAttempt();
+        try {
+            Thumbnail result = loadThumbnail(file, maxEdge, mode);
+            trace.succeeded("JCodec poster + JVM scaling", started,
+                    mode + ", requested ≤" + maxEdge + " px, produced "
+                            + result.frame().map(f -> f.width() + "×" + f.height() + " BGRA")
+                                    .orElse("no visual frame"));
+            return result;
+        } catch (RuntimeException | Error e) {
+            trace.failed("JCodec poster + JVM scaling", started, e);
+            throw e;
+        }
     }
 
     @Override

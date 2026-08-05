@@ -66,23 +66,30 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
     private final Palette palette;
     private final double lineScale;
     private final boolean additiveLines;
+    private final boolean simplifiedStates;
+    private final boolean allFileDiamonds;
+    private final boolean fadingFolderFill;
 
     XedgeMosaicTileSet() {
-        this("xedge", "Xedge", MONOCHROME, 1.0, false);
+        this("xedge", "Xedge", MONOCHROME, 1.0, false, false, false, false);
     }
 
     private XedgeMosaicTileSet(String id, String label, Palette palette) {
-        this(id, label, palette, 1.0, false);
+        this(id, label, palette, 1.0, false, false, false, false);
     }
 
     private XedgeMosaicTileSet(
             String id, String label, Palette palette,
-            double lineScale, boolean additiveLines) {
+            double lineScale, boolean additiveLines, boolean simplifiedStates,
+            boolean allFileDiamonds, boolean fadingFolderFill) {
         this.id = id;
         this.label = label;
         this.palette = palette;
         this.lineScale = lineScale;
         this.additiveLines = additiveLines;
+        this.simplifiedStates = simplifiedStates;
+        this.allFileDiamonds = allFileDiamonds;
+        this.fadingFolderFill = fadingFolderFill;
     }
 
     static XedgeMosaicTileSet colorVariant() {
@@ -99,7 +106,20 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
 
     static XedgeMosaicTileSet additiveVariant() {
         return new XedgeMosaicTileSet(
-                "xedge-additive", "Xedge Additive", LITE, 0.5, true);
+                "xedge-additive", "Xedge Additive", LITE,
+                0.5, true, false, false, false);
+    }
+
+    static XedgeMosaicTileSet xsVariant() {
+        return new XedgeMosaicTileSet(
+                "xedge-xs", "Xedge XS", LITE,
+                0.5, true, true, true, true);
+    }
+
+    static XedgeMosaicTileSet xsSolidVariant() {
+        return new XedgeMosaicTileSet(
+                "xedge-xs-solid", "Xedge XS Solid", LITE,
+                0.5, true, true, true, false);
     }
 
     private static Palette sharpPalette(boolean vanillaDiamond) {
@@ -133,8 +153,35 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
                 && (palette.vanillaDiamond() || additiveLines);
     }
 
+    boolean fileDiamond(boolean hidden, boolean exceptional) {
+        if (!palette.backgroundCross()) return false;
+        if (allFileDiamonds) return true;
+        if (exceptional) return false;
+        return hidden ? hiddenDiamond() : palette.vanillaDiamond();
+    }
+
     boolean dottedHiddenLines() {
         return !additiveLines;
+    }
+
+    boolean emptyFolderCross() {
+        return !simplifiedStates;
+    }
+
+    boolean junkFolderCross() {
+        return !simplifiedStates;
+    }
+
+    boolean fileStateCross() {
+        return !simplifiedStates;
+    }
+
+    boolean junkDiamond() {
+        return !simplifiedStates;
+    }
+
+    boolean fadingFolderFill() {
+        return fadingFolderFill;
     }
 
     @Override public String id() { return id; }
@@ -226,7 +273,9 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
                                 graphics, context.x(), context.y(),
                                 context.size(), effectiveLineWidth(context.size()));
                     }
-                } else if (verdict != FolderVerdict.UNREADABLE) {
+                } else if (verdict != FolderVerdict.UNREADABLE
+                        && (verdict != FolderVerdict.EMPTY || emptyFolderCross())
+                        && (verdict != FolderVerdict.JUNK_ONLY || junkFolderCross())) {
                     drawBackgroundCross(
                             graphics, context.x(), context.y(),
                             context.size(), effectiveLineWidth(context.size()));
@@ -359,12 +408,10 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
                 || context.has(MosaicTileModifier.ZERO_BYTE);
         boolean blueAccent = !exceptional;
 
-        if (palette.backgroundCross()) {
-            if (exceptional) {
-                drawBackgroundCross(graphics, x, y, size, line);
-            } else if (hidden ? hiddenDiamond() : palette.vanillaDiamond()) {
-                drawBackgroundDiamond(graphics, x, y, size, line);
-            }
+        if (fileDiamond(hidden, exceptional)) {
+            drawBackgroundDiamond(graphics, x, y, size, line);
+        } else if (palette.backgroundCross() && exceptional && fileStateCross()) {
+            drawBackgroundCross(graphics, x, y, size, line);
         }
         if (blueAccent && palette.accentGradients()) {
             fillTopLeftGradient(
@@ -396,7 +443,7 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
             graphics.restore();
         }
 
-        if (context.has(MosaicTileModifier.JUNK)) {
+        if (context.has(MosaicTileModifier.JUNK) && junkDiamond()) {
             drawJunkCrosses(graphics, x, y, size, line);
         }
         if (context.has(MosaicTileModifier.ZERO_BYTE)
@@ -581,9 +628,17 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
     private Paint folderFill(
             MosaicTilePaintContext context, double x, double y, double size) {
         FolderVerdict verdict = context.folderVerdict();
+        Color currentFill = palette.folderFill();
         if (verdict == FolderVerdict.JUNK_ONLY
                 || verdict == FolderVerdict.UNREADABLE) {
-            return palette.exceptionFolderFill();
+            currentFill = palette.exceptionFolderFill();
+        }
+        if (fadingFolderFill) {
+            return fadingFolderPaint(currentFill, x, y, size);
+        }
+        if (verdict == FolderVerdict.JUNK_ONLY
+                || verdict == FolderVerdict.UNREADABLE) {
+            return currentFill;
         }
         boolean vanillaFolder = context.identity() == MosaicTileIdentity.FOLDER
                 && (verdict == null
@@ -599,7 +654,17 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
                     new Stop(0.0, palette.vanillaFolderGradientStart()),
                     new Stop(1.0, palette.folderFill()));
         }
-        return palette.folderFill();
+        return currentFill;
+    }
+
+    static LinearGradient fadingFolderPaint(
+            Color currentFill, double x, double y, double size) {
+        return new LinearGradient(
+                x + size * LEFT, y + size * TAB_TOP,
+                x + size * RIGHT, y + size * BOTTOM,
+                false, CycleMethod.NO_CYCLE,
+                new Stop(0.0, currentFill),
+                new Stop(1.0, withOpacity(currentFill, 0.0)));
     }
 
     private void drawTileBorder(
@@ -643,7 +708,9 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
             }
             drawTileBorder(graphics, x, y, size, line);
         } else if (verdict == FolderVerdict.JUNK_ONLY) {
-            drawJunkCrosses(graphics, x, y, size, line);
+            if (junkDiamond()) {
+                drawJunkCrosses(graphics, x, y, size, line);
+            }
             drawTileBorder(graphics, x, y, size, line);
         } else if (verdict == FolderVerdict.UNREADABLE) {
             graphics.save();

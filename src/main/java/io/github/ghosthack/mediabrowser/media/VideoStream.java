@@ -12,6 +12,14 @@ import java.lang.foreign.MemorySegment;
  */
 public interface VideoStream extends AutoCloseable {
 
+    /**
+     * Current decoder route for diagnostics. Implementations may refine this
+     * after the first frame establishes hardware/software and pixel format.
+     */
+    default String diagnostics() {
+        return getClass().getSimpleName();
+    }
+
     /** Frame width in pixels (fixed for the stream). */
     int width();
 

@@ -22,7 +22,28 @@ public record MediaProbe(
         String audioCodec,
         int sampleRate,
         int channels,
-        String pixelDescription) {
+        String pixelDescription,
+        ColorProfile colorProfile) {
+
+    /** Compatibility constructor for engines which do not inspect embedded color. */
+    public MediaProbe(Path path, MediaKind kind, String container, long fileSize,
+                      long durationMicros, long bitRate, int width, int height,
+                      String videoCodec, double frameRate, String audioCodec,
+                      int sampleRate, int channels, String pixelDescription) {
+        this(path, kind, container, fileSize, durationMicros, bitRate, width, height,
+                videoCodec, frameRate, audioCodec, sampleRate, channels,
+                pixelDescription, null);
+    }
+
+    /** Copy with the validated embedded ICC profile attached. */
+    public MediaProbe withColorProfile(ColorProfile profile) {
+        if (colorProfile == profile || (colorProfile != null && colorProfile.equals(profile))) {
+            return this;
+        }
+        return new MediaProbe(path, kind, container, fileSize, durationMicros, bitRate,
+                width, height, videoCodec, frameRate, audioCodec, sampleRate,
+                channels, pixelDescription, profile);
+    }
 
     /** Ordered display rows for the info panel; empty/unknown fields are skipped. */
     public Map<String, String> describe() {
@@ -40,6 +61,7 @@ public record MediaProbe(
         if (sampleRate > 0) rows.put("Sample rate", sampleRate + " Hz");
         if (channels > 0) rows.put("Channels", Integer.toString(channels));
         if (pixelDescription != null) rows.put("Pixels", pixelDescription);
+        if (colorProfile != null) rows.put("Color profile", colorProfile.name());
         rows.put("Path", path.toString());
         return rows;
     }

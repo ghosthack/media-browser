@@ -16,6 +16,9 @@ public final class MosaicTileSets {
     public static final MosaicTileSet XEDGE_LITE = XedgeMosaicTileSet.liteVariant();
     public static final MosaicTileSet XEDGE_ADDITIVE =
             XedgeMosaicTileSet.additiveVariant();
+    public static final MosaicTileSet XEDGE_XS = XedgeMosaicTileSet.xsVariant();
+    public static final MosaicTileSet XEDGE_XS_SOLID =
+            XedgeMosaicTileSet.xsSolidVariant();
     public static final MosaicTileSet DARKROOM = new DarkroomMosaicTileSet();
     public static final MosaicTileSet FACTORY = new FactoryMosaicTileSet();
     public static final MosaicTileSet BLACKLINE = new BlacklineMosaicTileSet();
@@ -36,7 +39,7 @@ public final class MosaicTileSets {
                 if (set.id().trim().toLowerCase(Locale.ROOT).equals(wanted)) return set;
             }
         }
-        return XEDGE_ADDITIVE;
+        return XEDGE_XS;
     }
 
     private static List<MosaicTileSet> discover() {
@@ -47,6 +50,8 @@ public final class MosaicTileSets {
         add(byId, XEDGE_SHARP);
         add(byId, XEDGE_LITE);
         add(byId, XEDGE_ADDITIVE);
+        add(byId, XEDGE_XS);
+        add(byId, XEDGE_XS_SOLID);
         add(byId, DARKROOM);
         add(byId, FACTORY);
         add(byId, BLACKLINE);

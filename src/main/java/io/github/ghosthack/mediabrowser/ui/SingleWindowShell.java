@@ -27,7 +27,7 @@ import java.util.EnumMap;
  * <p>Navigation is a small back-stack: {@link #showView} pushes the view it
  * replaces, {@link #back} pops (falling back to the browser). Escape unwinds
  * only from the viewer; leaving the mosaic goes through the menu bar
- * (Window ▸ Browser / Mosaic ▸ Close Mosaic). Switching
+ * (Window ▸ Browser / File ▸ Close Window). Switching
  * away from the viewer leaves full-screen first, mirroring the separate-window
  * behaviour where Escape exited full-screen before hiding the viewer stage.</p>
  *

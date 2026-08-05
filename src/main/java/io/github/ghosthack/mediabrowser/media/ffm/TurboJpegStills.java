@@ -1,9 +1,11 @@
 package io.github.ghosthack.mediabrowser.media.ffm;
 
+import io.github.ghosthack.mediabrowser.media.ColorProfile;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.ThumbnailMode;
 import io.github.ghosthack.mediabrowser.media.Thumbnails;
+import io.github.ghosthack.mediabrowser.media.color.EmbeddedProfileReader;
 import io.github.ghosthack.turbojpegffm.turbojpeg.TurboJpeg;
 import io.github.ghosthack.turbojpegffm.turbojpeg.tjscalingfactor;
 
@@ -81,6 +83,26 @@ final class TurboJpegStills {
         return decodeScaled(jpeg, maxEdge, mode)
                 .map(f -> RasterFrames.applyExifOrientation(f, orientation));
     }
+
+    /** Scaled decode plus ICC extracted from the same already-read JPEG bytes. */
+    static Optional<ProfiledFrame> profiledThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
+        if (!available() || maxEdge <= 0) {
+            return Optional.empty();
+        }
+        byte[] jpeg;
+        try {
+            jpeg = Files.readAllBytes(file);
+        } catch (IOException e) {
+            return Optional.empty();
+        }
+        int orientation = exifOrientation(jpeg);
+        ColorProfile profile = EmbeddedProfileReader.readJpeg(jpeg).orElse(null);
+        return decodeScaled(jpeg, maxEdge, mode)
+                .map(f -> new ProfiledFrame(
+                        RasterFrames.applyExifOrientation(f, orientation), profile));
+    }
+
+    record ProfiledFrame(RasterFrame frame, ColorProfile colorProfile) {}
 
     /**
      * The scaled-decode core on raw JPEG bytes, orientation NOT applied —

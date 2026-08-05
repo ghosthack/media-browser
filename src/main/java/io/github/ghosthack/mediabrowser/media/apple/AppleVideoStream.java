@@ -51,6 +51,12 @@ final class AppleVideoStream implements VideoStream {
     }
 
     @Override
+    public String diagnostics() {
+        return "AVFoundation AVAssetReader; BGRA output; " + width() + "×" + height()
+                + "; hardware acceleration not reported by this API";
+    }
+
+    @Override
     public void close() {
         stream.close();
     }

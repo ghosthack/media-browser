@@ -7,6 +7,7 @@ import io.github.ghosthack.ffmpegffm.ffmpeg.AVCodecParameters;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVDictionaryEntry;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVFormatContext;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVFrame;
+import io.github.ghosthack.ffmpegffm.ffmpeg.AVFrameSideData;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVInputFormat;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVPacket;
 import io.github.ghosthack.ffmpegffm.ffmpeg.AVRational;
@@ -466,6 +467,21 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     @Override
     public MemorySegment frameLinesize(MemorySegment frame) {
         return AVFrame.linesize(frame);
+    }
+
+    @Override
+    public byte[] frameIccProfile(MemorySegment frame) {
+        MemorySegment side = FFmpeg.av_frame_get_side_data(
+                frame, FFmpeg.AV_FRAME_DATA_ICC_PROFILE());
+        if (side.equals(MemorySegment.NULL)) {
+            return null;
+        }
+        MemorySegment sized = side.reinterpret(AVFrameSideData.layout().byteSize());
+        long size = AVFrameSideData.size(sized);
+        if (size <= 0 || size > Integer.MAX_VALUE) {
+            return null;
+        }
+        return AVFrameSideData.data(sized).reinterpret(size).toArray(ValueLayout.JAVA_BYTE);
     }
 
     @Override

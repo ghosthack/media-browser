@@ -52,7 +52,16 @@ public final class VideoPlayer implements AutoCloseable {
 
     VideoPlayer(MediaFacade facade, Path file, FrameSink sink,
                 Runnable onEnded, Consumer<Throwable> onError) {
-        thread = new Thread(() -> run(facade, file, sink, onEnded, onError),
+        this(facade, facade.getClass().getSimpleName(), file, file, System.nanoTime(),
+                0L, sink, onEnded, onError, ignored -> {});
+    }
+
+    VideoPlayer(MediaFacade facade, String engine, Path sourceFile, Path decoderFile,
+                long requestedNanos, long inputElapsedNanos,
+                FrameSink sink, Runnable onEnded,
+                Consumer<Throwable> onError, Consumer<MediaEngineTrace> onDiagnostics) {
+        thread = new Thread(() -> run(facade, engine, sourceFile, decoderFile,
+                        requestedNanos, inputElapsedNanos, sink, onEnded, onError, onDiagnostics),
                 "video-playback");
         thread.setDaemon(true);
     }
@@ -98,27 +107,53 @@ public final class VideoPlayer implements AutoCloseable {
         }
     }
 
-    private void run(MediaFacade facade, Path file, FrameSink sink,
-                     Runnable onEnded, Consumer<Throwable> onError) {
+    private void run(MediaFacade facade, String engine, Path sourceFile, Path file,
+                     long requestedNanos, long inputElapsedNanos,
+                     FrameSink sink, Runnable onEnded,
+                     Consumer<Throwable> onError,
+                     Consumer<MediaEngineTrace> onDiagnostics) {
         boolean ended = false;
+        MediaEngineTrace.Recorder trace = MediaEngineTrace.Recorder.recording(
+                engine, sourceFile, "Playback session", requestedNanos);
         try (FrameSink s = sink) {
             // A zero-byte file has no stream to open; reject it here (before the
             // native open) so playback of a truncated/failed copy surfaces the
             // same plain "Empty file" note as the info/viewer paths, not a
             // confusing decoder failure.
             MediaService.rejectIfEmpty(file);
-            try (VideoStream stream = facade.openVideo(file)) {
+            trace.record(sourceFile.equals(file)
+                            ? "Direct filesystem input" : "Archive materialization",
+                    MediaEngineTrace.Outcome.SUCCEEDED, inputElapsedNanos,
+                    sourceFile.equals(file)
+                            ? "No materialization required" : "Materialized archive entry");
+            long engineStarted = System.nanoTime();
+            VideoStream opened;
+            try {
+                opened = facade.openVideo(file, trace);
+            } catch (Throwable failure) {
+                trace.engineWork(System.nanoTime() - engineStarted);
+                throw failure;
+            }
+            trace.engineWork(System.nanoTime() - engineStarted);
+            try (VideoStream stream = opened) {
+                onDiagnostics.accept(trace.finish(null));
                 s.begin(stream.width(), stream.height(), stream.durationMicros());
                 long startNanos = -1;
                 long firstPts = 0;
+                boolean diagnosticsReported = false;
                 while (!stopped) {
                     long pausedNanos = awaitResume();
                     if (stopped) break;
                     if (startNanos >= 0) startNanos += pausedNanos;
 
+                    long firstFrameStarted = !diagnosticsReported ? trace.beginAttempt() : 0L;
                     if (!stream.next()) {
                         ended = true;
                         break;
+                    }
+                    if (!diagnosticsReported) {
+                        trace.succeeded("First decoded frame", firstFrameStarted,
+                                stream.diagnostics());
                     }
                     long pts = stream.ptsMicros();
                     if (startNanos < 0) {
@@ -131,15 +166,29 @@ public final class VideoPlayer implements AutoCloseable {
                     // sink that can bind it; otherwise (or when the sink
                     // declines) the stream converts to BGRA on demand.
                     VideoStream.GpuFrame gpu = stream.gpuFrame();
-                    if (gpu == null || !s.gpuFrame(gpu, position)) {
+                    long presentationStarted = !diagnosticsReported ? trace.beginAttempt() : 0L;
+                    boolean zeroCopy = gpu != null && s.gpuFrame(gpu, position);
+                    if (!zeroCopy) {
                         s.frame(stream.bgra(), stream.width(), stream.height(), position);
+                    }
+                    if (!diagnosticsReported) {
+                        trace.succeeded("Presentation path", presentationStarted,
+                                zeroCopy ? "GPU zero-copy" : gpu == null
+                                        ? "CPU BGRA" : "GPU frame declined; CPU readback/BGRA");
+                        onDiagnostics.accept(trace.finish(null));
+                        diagnosticsReported = true;
                     }
                 }
             }
         } catch (Throwable t) {
+            trace.failed("Playback session", trace.beginAttempt(), t);
+            onDiagnostics.accept(trace.finish(t));
             if (!stopped) onError.accept(t);
             return;
         }
+        trace.succeeded("Playback session", trace.beginAttempt(),
+                ended ? "Reached end of stream" : "Stopped");
+        onDiagnostics.accept(trace.finish(null));
         if (ended && !stopped) onEnded.run();
     }
 

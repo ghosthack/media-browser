@@ -175,6 +175,12 @@ public final class JcodecVideoStream implements VideoStream {
     }
 
     @Override
+    public String diagnostics() {
+        return "JCodec first video track; pure-Java decode; Picture → BufferedImage → BGRA; "
+                + width + "×" + height;
+    }
+
+    @Override
     public void close() {
         if (closed) {
             return;

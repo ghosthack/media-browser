@@ -123,7 +123,7 @@ import java.util.function.Supplier;
  * paint), so scrolling back is cheap. Double-clicking or pressing Enter opens a
  * media tile in the shared viewer, or navigates into a folder / {@code ..} tile
  * (mirrored into the main window through the host's navigator). The Mosaic ▸
- * Close Mosaic menu action (or Window ▸ Browser) unwinds the {@link AppShell}
+ * File ▸ Close Window (or Window ▸ Browser) unwinds the {@link AppShell}
  * back-stack, usually to the browser view; Escape is deliberately not bound.</p>
  *
  * <p>Borders and margins are configured in Settings ▸ Mosaic (persisted to
@@ -137,8 +137,8 @@ import java.util.function.Supplier;
  * (built by {@link MainWindow} and installed here through {@link #installMenuBar})
  * is shared with the main window and carries a Mosaic menu mirroring these
  * actions (Open, Seamless, tile sizing). The toolbar is shown by
- * default; Mosaic ▸ Show Toolbar ({@code Shortcut+T}) toggles it. The
- * location bar below it (Mosaic ▸ Show Location Bar, also shown by default; Go ▸
+ * default; Show ▸ Toolbar ({@code Shortcut+T}) toggles it. The
+ * location bar below it (Show ▸ Location Bar, also shown by default; Go ▸
  * Go to Location reveals and focuses it) mirrors the current directory into an
  * editable field whose Enter key navigates the shared location, like the main
  * window's address bar.</p>
@@ -292,7 +292,7 @@ public final class MosaicWindow
      * Location bar (its own strip under the toolbar, shown by default):
      * mirrors the mosaic's current directory into an editable field whose
      * Enter key navigates the shared location, exactly like the main window's
-     * address bar. Toggled via Mosaic ▸ Show Location Bar / Settings ▸ Mosaic.
+     * address bar. Toggled via Show ▸ Location Bar / Settings ▸ Mosaic.
      */
     private final TextField locationField = new TextField();
     /** The location strip itself; assembled in the constructor. */
@@ -301,7 +301,7 @@ public final class MosaicWindow
     private final InfoPanel infoPanel = new InfoPanel();
     /** On-demand full-metadata panel (right edge, below Info); reuses the viewer's MetadataPanel. */
     private final MetadataPanel metadataPanel = new MetadataPanel();
-    /** Thumbnail-pipeline diagnostics snapshot (right edge, bottom); reuses the shared DiagnosticsPanel. */
+    /** Media-engine/thumbnail diagnostics snapshot; reuses the shared panel. */
     private final DiagnosticsPanel diagnosticsPanel;
     /** Right-edge vertical split: Info, Metadata, Diagnostics (membership follows the toggles). */
     private final SplitPane rightPanels = new SplitPane();
@@ -326,7 +326,7 @@ public final class MosaicWindow
 
     /** On-screen tile size control (nudged by the Mosaic menu). */
     private Slider sizeSlider;
-    /** Toolbar visibility, shown by default; the Mosaic ▸ Show Toolbar item binds here. */
+    /** Toolbar visibility, shown by default; Show ▸ Toolbar binds here. */
     private final BooleanProperty toolbarVisible = new SimpleBooleanProperty(true);
     /** Status-bar visibility (the mosaic bar's Show ▸ Status Bar binds here); hidden by default. */
     private final BooleanProperty statusBarVisible = new SimpleBooleanProperty(false);
@@ -338,7 +338,7 @@ public final class MosaicWindow
     private final BooleanProperty diagnosticsPanelVisible = new SimpleBooleanProperty(false);
     /** Menu-bar visibility (the mosaic bar's Show ▸ Menu Bar binds here); shown by default. */
     private final BooleanProperty menuBarVisible = new SimpleBooleanProperty(true);
-    /** Location-bar visibility (Mosaic ▸ Show Location Bar binds here); shown by default. */
+    /** Location-bar visibility (Show ▸ Location Bar binds here); shown by default. */
     private final BooleanProperty locationBarVisible = new SimpleBooleanProperty(true);
     /** Action-log panel visibility (the mosaic bar's Show ▸ Action Log binds here); hidden by default. */
     private final BooleanProperty actionLogVisible = new SimpleBooleanProperty(false);
@@ -644,7 +644,7 @@ public final class MosaicWindow
                         BooleanProperty sortDescending) {
         this.shell = shell;
         this.service = service;
-        this.diagnosticsPanel = new DiagnosticsPanel(service::thumbnailStats);
+        this.diagnosticsPanel = new DiagnosticsPanel(service);
         this.viewer = viewer;
         this.settings = settings;
         this.rotationStore = rotationStore;
@@ -744,7 +744,7 @@ public final class MosaicWindow
         filterAudio.addListener((o, was, v) -> rebuildWithPreservedSelection());
         filterOther.addListener((o, was, v) -> rebuildWithPreservedSelection());
 
-        // --- toolbar (shown by default; toggled via Mosaic ▸ Show Toolbar) ----
+        // --- toolbar (shown by default; toggled via Show ▸ Toolbar) -----------
         sizeSlider = new Slider(64, 512, tileSize);
         sizeSlider.setPrefWidth(180);
         sizeSlider.setTooltip(new Tooltip("Tile size"));
@@ -812,7 +812,7 @@ public final class MosaicWindow
         toolBar.managedProperty().bind(toolbarVisible);
 
         // --- location bar (its own strip under the toolbar, shown by default;
-        // Mosaic ▸ Show Location Bar toggles it) — mirrors the main window's
+        // Show ▸ Location Bar toggles it) — mirrors the main window's
         // address bar: Enter navigates the shared location, so the change
         // flows back through the host and rebuilds the grid.
         locationField.setOnAction(e -> navigateFromLocation());
@@ -1101,7 +1101,7 @@ public final class MosaicWindow
 
     /**
      * Builds one sort-key radio item backed by the browser's shared listing
-     * state, keeping this toolbar dropdown and every Order menu copy in sync.
+     * state, keeping this toolbar dropdown and every Sort menu copy in sync.
      */
     private static RadioMenuItem sortKeyItem(
             String text,
@@ -1218,7 +1218,7 @@ public final class MosaicWindow
                 !settings.inWindowMenu());
     }
 
-    /** Toolbar visibility (Mosaic ▸ Show Toolbar binds here); shown by default. */
+    /** Toolbar visibility (Show ▸ Toolbar binds here); shown by default. */
     public BooleanProperty toolbarVisibleProperty() {
         return toolbarVisible;
     }
@@ -1247,7 +1247,7 @@ public final class MosaicWindow
         return menuBarVisible;
     }
 
-    /** Location-bar visibility (Mosaic ▸ Show Location Bar binds here); shown by default. */
+    /** Location-bar visibility (Show ▸ Location Bar binds here); shown by default. */
     public BooleanProperty locationBarVisibleProperty() {
         return locationBarVisible;
     }
@@ -1986,7 +1986,7 @@ public final class MosaicWindow
                 sizeSlider.getMin(), sizeSlider.getMax()));
     }
 
-    /** Returns focus to the main window and hides the mosaic (Mosaic ▸ Close Mosaic). */
+    /** Returns focus to the main window and hides the mosaic. */
     public void closeWindow() {
         backToMain();
     }
@@ -2222,7 +2222,7 @@ public final class MosaicWindow
             }
         }
         if (hidden != null && hidden.anyOptIn()) {
-            return "Empty folder (" + hiddenSuffixBody(hidden) + " hidden)";
+            return "Empty folder (" + hiddenSuffixBody(hidden) + ")";
         }
         return "Empty folder";
     }
@@ -2256,15 +2256,22 @@ public final class MosaicWindow
         // every folder on the disk is noise.
         var hidden = mosaicDir == null ? null : service.hiddenIn(mosaicDir);
         if (hidden != null && hidden.anyOptIn()) {
-            text += " · " + hiddenSuffixBody(hidden) + " hidden";
+            text += " · " + hiddenSuffixBody(hidden);
         }
         return text;
     }
 
-    /** "3 empty, 1 empty folder" — the opt-in filters' tallies, in order. */
+    /** "3 hidden items, 2 empty files" — opt-in filter tallies, in order. */
     private static String hiddenSuffixBody(MediaService.ListingHidden hidden) {
-        var parts = new ArrayList<String>(2);
-        if (hidden.emptyFiles() > 0) parts.add(hidden.emptyFiles() + " empty");
+        var parts = new ArrayList<String>(3);
+        if (hidden.hiddenEntries() > 0) {
+            parts.add(hidden.hiddenEntries()
+                    + (hidden.hiddenEntries() == 1 ? " hidden item" : " hidden items"));
+        }
+        if (hidden.emptyFiles() > 0) {
+            parts.add(hidden.emptyFiles()
+                    + (hidden.emptyFiles() == 1 ? " empty file" : " empty files"));
+        }
         if (hidden.emptyFolders() > 0) {
             parts.add(hidden.emptyFolders()
                     + (hidden.emptyFolders() == 1 ? " empty folder" : " empty folders"));
@@ -2558,6 +2565,8 @@ public final class MosaicWindow
                 || painter == MosaicTileSets.XEDGE_SHARP
                 || painter == MosaicTileSets.XEDGE_LITE
                 || painter == MosaicTileSets.XEDGE_ADDITIVE
+                || painter == MosaicTileSets.XEDGE_XS
+                || painter == MosaicTileSets.XEDGE_XS_SOLID
                 || painter == MosaicTileSets.DARKROOM
                 || painter == MosaicTileSets.FACTORY
                 || painter == MosaicTileSets.BLACKLINE) {
@@ -3415,7 +3424,7 @@ public final class MosaicWindow
             // Down=Enter (open), Left/Right=history back/forward. Bare arrows
             // still move the grid selection. Escape deliberately does nothing:
             // leaving the mosaic is Window ▸ Browser (Shortcut+Shift+B) or
-            // Mosaic ▸ Close Mosaic.
+            // File ▸ Close Window.
             case ENTER -> { activateSelected(); e.consume(); }
             // Quick-move the selection to moveHistory[0..3] when the transient
             // quick-move toggle is on; otherwise the key passes through.

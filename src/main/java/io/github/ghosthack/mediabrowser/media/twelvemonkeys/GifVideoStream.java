@@ -160,6 +160,12 @@ public final class GifVideoStream implements VideoStream {
     }
 
     @Override
+    public String diagnostics() {
+        return "TwelveMonkeys animated GIF; ImageIO frame composition → BGRA; "
+                + width + "×" + height;
+    }
+
+    @Override
     public void close() {
         if (closed) {
             return;

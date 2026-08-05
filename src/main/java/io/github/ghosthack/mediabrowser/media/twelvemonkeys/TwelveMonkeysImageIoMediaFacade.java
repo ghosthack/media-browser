@@ -3,6 +3,7 @@ package io.github.ghosthack.mediabrowser.media.twelvemonkeys;
 import io.github.ghosthack.mediabrowser.media.BufferedImageRaster;
 import io.github.ghosthack.mediabrowser.media.ImageSequences;
 import io.github.ghosthack.mediabrowser.media.MediaException;
+import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
 import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
@@ -116,6 +117,28 @@ public final class TwelveMonkeysImageIoMediaFacade implements MediaFacade {
     }
 
     @Override
+    public VisualResult loadVisual(Path file, MediaEngineTrace.Recorder trace) {
+        if (isAnimatedGif(file)) {
+            long started = trace.beginAttempt();
+            try {
+                VisualResult result = gifVisual(file);
+                trace.succeeded("TwelveMonkeys animated GIF", started,
+                        result.frame().map(f -> f.width() + "×" + f.height()
+                                + " frame 0 poster").orElse("No poster frame"));
+                return result;
+            } catch (RuntimeException | Error e) {
+                trace.failed("TwelveMonkeys animated GIF", started, e);
+                throw e;
+            }
+        }
+        Optional<VisualResult> still = tryReaders(file, trace,
+                r -> stillVisual(file, r), (r, result) -> "full still decode");
+        if (still.isPresent()) return still.get();
+        if (fallback != null) return fallback.loadVisual(file, trace);
+        throw new MediaException("twelvemonkeys: cannot load visual of " + file.getFileName());
+    }
+
+    @Override
     public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
         if (isAnimatedGif(file)) {
             return gifThumbnail(file, maxEdge, mode);
@@ -128,6 +151,38 @@ public final class TwelveMonkeysImageIoMediaFacade implements MediaFacade {
             return fallback.loadThumbnail(file, maxEdge, mode);
         }
         return MediaFacade.super.loadThumbnail(file, maxEdge, mode);
+    }
+
+    @Override
+    public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode,
+                                   MediaEngineTrace.Recorder trace) {
+        if (isAnimatedGif(file)) {
+            long started = trace.beginAttempt();
+            try {
+                Thumbnail result = gifThumbnail(file, maxEdge, mode);
+                trace.succeeded("TwelveMonkeys animated GIF poster", started,
+                        thumbnailDetail(result, maxEdge, mode, "frame 0"));
+                return result;
+            } catch (RuntimeException | Error e) {
+                trace.failed("TwelveMonkeys animated GIF poster", started, e);
+                throw e;
+            }
+        }
+        Optional<Thumbnail> still = tryReaders(file, trace,
+                r -> stillThumbnail(file, r, maxEdge, mode),
+                (r, result) -> "source subsampling "
+                        + subsampling(r.getWidth(0), r.getHeight(0), maxEdge) + "×; "
+                        + thumbnailDetail(result, maxEdge, mode, "ImageIO"));
+        if (still.isPresent()) return still.get();
+        if (fallback != null) return fallback.loadThumbnail(file, maxEdge, mode, trace);
+        return MediaFacade.super.loadThumbnail(file, maxEdge, mode, trace);
+    }
+
+    private static String thumbnailDetail(Thumbnail result, int maxEdge,
+                                          ThumbnailMode mode, String route) {
+        return route + "; " + mode + ", requested ≤" + maxEdge + " px, produced "
+                + result.frame().map(f -> f.width() + "×" + f.height() + " BGRA")
+                        .orElse("no visual frame");
     }
 
     @Override
@@ -155,6 +210,29 @@ public final class TwelveMonkeysImageIoMediaFacade implements MediaFacade {
         if (fallback != null) {
             return fallback.openVideo(file);
         }
+        throw new MediaException("twelvemonkeys: video playback is not supported "
+                + "(only animated GIF, no fallback) for " + file.getFileName());
+    }
+
+    @Override
+    public VideoStream openVideo(Path file, MediaEngineTrace.Recorder trace) {
+        if (isAnimatedGif(file)) {
+            long started = trace.beginAttempt();
+            try {
+                VideoStream stream = new GifVideoStream(GifFrames.open(file));
+                trace.succeeded("TwelveMonkeys animated GIF playback", started,
+                        stream.diagnostics());
+                return stream;
+            } catch (IOException | RuntimeException e) {
+                trace.failed("TwelveMonkeys animated GIF playback", started, e);
+                throw new MediaException("twelvemonkeys: cannot open GIF "
+                        + file.getFileName() + ": " + e.getMessage(), e);
+            }
+        }
+        long declined = trace.beginAttempt();
+        trace.declined("TwelveMonkeys playback", declined,
+                "Input is not an animated GIF");
+        if (fallback != null) return fallback.openVideo(file, trace);
         throw new MediaException("twelvemonkeys: video playback is not supported "
                 + "(only animated GIF, no fallback) for " + file.getFileName());
     }
@@ -315,6 +393,11 @@ public final class TwelveMonkeysImageIoMediaFacade implements MediaFacade {
         T run(ImageReader reader) throws IOException;
     }
 
+    @FunctionalInterface
+    private interface ReaderDetail<T> {
+        String describe(ImageReader reader, T result) throws IOException;
+    }
+
     /** Whether any ImageIO reader can actually parse {@code file} as a still. */
     private boolean canReadStill(Path file) {
         return tryReaders(file, r -> {
@@ -355,6 +438,63 @@ public final class TwelveMonkeysImageIoMediaFacade implements MediaFacade {
             }
             return Optional.empty();
         } catch (RuntimeException e) {
+            return Optional.empty();
+        } finally {
+            try {
+                iis.close();
+            } catch (IOException ignore) {
+                // best effort
+            }
+        }
+    }
+
+    /** Diagnostic variant preserving every rejected reader before selection. */
+    private <T> Optional<T> tryReaders(Path file, MediaEngineTrace.Recorder trace,
+                                       ReaderTask<T> task, ReaderDetail<T> detail) {
+        ImageInputStream iis;
+        try {
+            iis = ImageIO.createImageInputStream(file.toFile());
+        } catch (IOException e) {
+            long started = trace.beginAttempt();
+            trace.failed("ImageIO input", started, e);
+            return Optional.empty();
+        }
+        if (iis == null) {
+            long started = trace.beginAttempt();
+            trace.declined("TwelveMonkeys ImageIO", started,
+                    "No ImageInputStream provider accepted the input");
+            return Optional.empty();
+        }
+        boolean candidate = false;
+        try {
+            Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
+            while (readers.hasNext()) {
+                candidate = true;
+                ImageReader reader = readers.next();
+                String strategy = reader.getClass().getName();
+                long started = trace.beginAttempt();
+                try {
+                    iis.seek(0);
+                    reader.setInput(iis, false, false);
+                    T result = task.run(reader);
+                    trace.succeeded(strategy, started,
+                            formatLabel(reader, file) + "; " + detail.describe(reader, result));
+                    return Optional.of(result);
+                } catch (IOException | RuntimeException e) {
+                    trace.failed(strategy, started, e);
+                } finally {
+                    reader.dispose();
+                }
+            }
+            if (!candidate) {
+                long started = trace.beginAttempt();
+                trace.declined("TwelveMonkeys ImageIO", started,
+                        "No registered ImageReader claimed the input");
+            }
+            return Optional.empty();
+        } catch (RuntimeException e) {
+            long started = trace.beginAttempt();
+            trace.failed("TwelveMonkeys ImageIO routing", started, e);
             return Optional.empty();
         } finally {
             try {

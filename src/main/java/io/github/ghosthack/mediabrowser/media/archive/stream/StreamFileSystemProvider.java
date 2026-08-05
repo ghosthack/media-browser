@@ -49,6 +49,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.zip.InflaterInputStream;
 
 /**
  * Consumer-owned NIO adapter over robust-unrar, robust-seven, pdf-media, and epub-media.
@@ -178,10 +179,15 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
             for (PdfEntry entry : reader.entries()) {
                 String name = uniquePdfName(entry, usedNames);
                 boolean decodedJbig2 = rasterEncodedAs(entry, PdfFilter.Decoder.JBIG2);
+                String wrappedRasterExtension = flateWrappedRasterExtension(entry);
                 archive.add(name, false, entry.declaredSize().orElse(-1), null, entry,
                         () -> reader.openStream(entry),
-                        decodedJbig2 ? "png" : null,
-                        decodedJbig2 ? () -> PdfJbig2Images.openPng(reader, entry) : null,
+                        decodedJbig2 ? "png" : wrappedRasterExtension,
+                        decodedJbig2
+                                ? () -> PdfJbig2Images.openPng(reader, entry)
+                                : wrappedRasterExtension == null
+                                        ? null
+                                        : () -> new InflaterInputStream(reader.openStream(entry)),
                         decodedJbig2 ? () -> PdfJbig2Images.decode(reader, entry) : null);
             }
             for (PdfMrcComposite composite : reader.mrcComposites()) {
@@ -328,6 +334,27 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
         List<PdfFilter.Decoder> decoders =
                 entry.raster().orElseThrow().decoderStack();
         return decoders.equals(List.of(decoder));
+    }
+
+    /**
+     * A few PDF producers zlib-wrap an otherwise standalone JPEG or JPEG 2000
+     * stream. Keep the physical bytes mounted as {@code .pdfimg}, but offer a
+     * private decoder rendition with only that outer storage filter removed.
+     */
+    private static String flateWrappedRasterExtension(PdfEntry entry) {
+        if (!entry.isRaster()) return null;
+        var raster = entry.raster().orElseThrow();
+        List<PdfFilter.Decoder> decoders = raster.decoderStack();
+        if (decoders.size() != 2 || decoders.getFirst() != PdfFilter.Decoder.FLATE) {
+            return null;
+        }
+        Object predictor = raster.filters().getFirst().parameters().get("Predictor");
+        if (predictor instanceof Number number && number.intValue() != 1) return null;
+        return switch (decoders.getLast()) {
+            case JPEG -> "jpg";
+            case JPEG_2000 -> "jp2";
+            default -> null;
+        };
     }
 
     private static boolean supportsMrc(PdfArchive archive, PdfMrcComposite composite) {

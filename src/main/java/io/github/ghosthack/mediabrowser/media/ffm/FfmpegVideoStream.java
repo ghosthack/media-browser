@@ -64,6 +64,9 @@ final class FfmpegVideoStream implements VideoStream {
     private MemorySegment swFrame = MemorySegment.NULL, swFramePtr = MemorySegment.NULL;
     private Arena stubArena;
     private boolean firstFrameSeen;
+    private String codecName = "unknown codec";
+    private String decodedPixelFormat = "not decoded yet";
+    private boolean hardwareActive;
     /** False until {@link #bgra()} converts the current frame — the zero-copy
      *  GPU path never pays the readback+swscale, so conversion is on demand. */
     private boolean cpuReady;
@@ -113,6 +116,7 @@ final class FfmpegVideoStream implements VideoStream {
             framePtr = Ffm.pointerTo(arena, frame);
 
             MemorySegment par = ff.codecpar(vs);
+            codecName = ff.codecName(ff.parCodecId(par));
             width = ff.parWidth(par);
             height = ff.parHeight(par);
             if (width <= 0 || height <= 0) {
@@ -234,6 +238,20 @@ final class FfmpegVideoStream implements VideoStream {
     }
 
     @Override
+    public String diagnostics() {
+        String route = hardwareActive
+                ? "hardware " + (hwDeviceType == HwDecode.DEVICE_VIDEOTOOLBOX
+                        ? "VideoToolbox" : hwDeviceType == HwDecode.DEVICE_D3D11VA
+                                ? "D3D11VA" : "device " + hwDeviceType)
+                : "software";
+        String presentation = hardwareActive
+                ? (cpuReady ? "GPU frame read back to BGRA" : "GPU frame available for zero-copy")
+                : "CPU BGRA conversion";
+        return codecName + "; " + route + "; " + decodedPixelFormat
+                + "; " + presentation;
+    }
+
+    @Override
     public VideoStream.GpuFrame gpuFrame() {
         if (hwPixFmt < 0 || hwDeviceType != HwDecode.DEVICE_VIDEOTOOLBOX
                 || ff.frameFormat(frame) != hwPixFmt) {
@@ -300,6 +318,8 @@ final class FfmpegVideoStream implements VideoStream {
         if (!firstFrameSeen) {
             firstFrameSeen = true;
             boolean hwActive = hwPixFmt >= 0 && ff.frameFormat(frame) == hwPixFmt;
+            hardwareActive = hwActive;
+            decodedPixelFormat = ff.pixFmtName(ff.frameFormat(frame));
             if (hwRequired && !hwActive) {
                 throw new MediaException("ffmpeg: hardware decode required but the decoder"
                         + " fell back to software (" + ff.pixFmtName(ff.frameFormat(frame)) + ")");

@@ -32,6 +32,23 @@ public interface MediaFacade extends AutoCloseable {
     VisualResult loadVisual(Path file);
 
     /**
+     * Diagnostic-aware foreground decode. Implementations with multiple
+     * internal strategies override this and append each attempt in order; a
+     * single-strategy engine inherits the facade-class attempt below.
+     */
+    default VisualResult loadVisual(Path file, MediaEngineTrace.Recorder trace) {
+        long started = trace.beginAttempt();
+        try {
+            VisualResult result = loadVisual(file);
+            trace.succeeded(getClass().getSimpleName(), started, "Foreground visual");
+            return result;
+        } catch (RuntimeException | Error failure) {
+            trace.failed(getClass().getSimpleName(), started, failure);
+            throw failure;
+        }
+    }
+
+    /**
      * Decode a small preview rendition of the file in the requested
      * {@link ThumbnailMode}: {@code FIT} fits the whole image within a
      * {@code maxEdge} box (aspect-preserved), {@code FILL} centre-crops it to a
@@ -53,6 +70,24 @@ public interface MediaFacade extends AutoCloseable {
         VisualResult visual = loadVisual(file);
         return new Thumbnail(visual.frame().map(f -> Thumbnails.scale(f, maxEdge, mode)),
                 visual.probe().kind());
+    }
+
+    /** Diagnostic-aware thumbnail generation, including the actual output size. */
+    default Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode,
+                                    MediaEngineTrace.Recorder trace) {
+        long started = trace.beginAttempt();
+        try {
+            Thumbnail result = loadThumbnail(file, maxEdge, mode);
+            String size = result.frame()
+                    .map(f -> f.width() + "×" + f.height())
+                    .orElse("no visual frame");
+            trace.succeeded(getClass().getSimpleName(), started,
+                    mode + ", requested ≤" + maxEdge + " px, produced " + size);
+            return result;
+        } catch (RuntimeException | Error failure) {
+            trace.failed(getClass().getSimpleName(), started, failure);
+            throw failure;
+        }
     }
 
     /** {@link #loadThumbnail(Path, int, ThumbnailMode)} in {@link ThumbnailMode#FIT}. */
@@ -88,6 +123,19 @@ public interface MediaFacade extends AutoCloseable {
      * stream is confined to the calling thread.</p>
      */
     VideoStream openVideo(Path file);
+
+    /** Diagnostic-aware playback open; concrete streams expose actual routing. */
+    default VideoStream openVideo(Path file, MediaEngineTrace.Recorder trace) {
+        long started = trace.beginAttempt();
+        try {
+            VideoStream stream = openVideo(file);
+            trace.succeeded(getClass().getSimpleName(), started, stream.diagnostics());
+            return stream;
+        } catch (RuntimeException | Error failure) {
+            trace.failed(getClass().getSimpleName(), started, failure);
+            throw failure;
+        }
+    }
 
     /** Human-readable native library versions, for the About dialog. */
     String nativeVersions();

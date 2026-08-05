@@ -22,20 +22,29 @@ import java.util.List;
  *
  * <p>Facades are constructed reflectively from class names so this file
  * compiles unchanged in source trees that omit some backends (the public
- * source distribution drops the pure-Java and FFmpeg/libvips stacks). A
+ * source distribution drops the pure-Java and libvips stacks and hides some
+ * full-build-only selectors). A
  * constant whose implementation classes are absent reports
  * {@link #isAvailable()} {@code false} and drops out of {@link #available()};
  * a persisted selection naming it makes {@link #fromSettings(String)} throw —
  * an explicit selection is honored or errors, never silently substituted.</p>
  */
 public enum MediaBackend {
+    // Private mixed-native engine. The package is intentionally named only
+    // through this reflective spec: the OSS export prunes media/vips and the
+    // same enum then reports this recognized backend unavailable.
+    MIXED_NATIVE("mixed-native", "Libvips + FFmpeg + LibRaw + TurboJPEG",
+            noArg("vips.MixedNativeMediaFacade")
+                    .withResources(vipsNativesManifest(), ffmpegNativesManifest(),
+                            turbojpegNativesManifest(), librawNativesManifest())),
     // Bundled FFmpeg solo, pure: stills AND video through the ffmpeg-ffm
     // artifact and nothing else — nothing user-installed. Stills refine from
     // FFmpeg's one-frame-video shape heuristically (see FfmpegFfmMediaFacade).
     FFMPEG_FFM("ffmpeg-ffm", "Bundled FFmpeg (images + video)",
             noArg("ffm.FfmpegFfmMediaFacade")
-                    .withResources(ffmpegNativesManifest())),
-    // The same facade with the explicit TurboJPEG addition (the default):
+                    .withResources(fullBuildBackendMarker("ffmpeg-ffm"),
+                            ffmpegNativesManifest())),
+    // The same facade with the explicit TurboJPEG addition:
     // baseline-JPEG thumbnails decode through libjpeg-turbo's scaled decode
     // (turbojpeg-ffm artifact) — ~1.6x faster than FFmpeg's full decode on
     // real camera JPEGs; progressive/CMYK/lossless still decode via FFmpeg
@@ -44,6 +53,16 @@ public enum MediaBackend {
     FFMPEG_FFM_TURBOJPEG("ffmpeg-ffm-turbojpeg",
             "Bundled FFmpeg + TurboJPEG thumbnails",
             staticFactory("ffm.FfmpegFfmMediaFacade", "withTurboJpeg")
+                    .withResources(fullBuildBackendMarker("ffmpeg-ffm-turbojpeg"),
+                            ffmpegNativesManifest(), turbojpegNativesManifest())),
+    // The default: the TurboJPEG variant decorated with a pure-Java
+    // embedded-ICC pass and metadata-extractor enrichment. Playback remains
+    // on the wrapped FFmpeg facade and the native artifact set is deliberately
+    // identical.
+    FFMPEG_FFM_TURBOJPEG_CM("ffmpeg-ffm-turbojpeg-cm",
+            "Bundled FFmpeg + TurboJPEG + color management",
+            staticFactory("color.ColorManagedMediaFacade", "withTurboJpeg")
+                    .withClasses("ffm.FfmpegFfmMediaFacade")
                     .withResources(ffmpegNativesManifest(), turbojpegNativesManifest())),
     // 100% Apple: no FFmpeg/libvips fallback. Pass a fallback facade to
     // AppleMediaFacade instead if coverage for e.g. WebM/VP9 is wanted.
@@ -59,7 +78,8 @@ public enum MediaBackend {
     // (TWELVEMONKEYS solo); the 12M+ffm/jcodec backends pass a video
     // fallback. Anything non-still/non-GIF throws.
     TWELVEMONKEYS("twelvemonkeys", "TwelveMonkeys ImageIO (images + GIF)",
-            nullFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade")),
+            nullFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade")
+                    .withResources(fullBuildBackendMarker("twelvemonkeys"))),
     // TwelveMonkeys stills/GIF + bundled FFmpeg (ffmpeg-ffm artifact) for
     // video/audio. Was the default 2026-07-21..22; FFMPEG_FFM's faster JPEG
     // decode won the benchmarks, but this pairing keeps
@@ -67,7 +87,8 @@ public enum MediaBackend {
     TWELVEMONKEYS_FFMPEG_FFM("twelvemonkeys-ffmpeg-ffm", "TwelveMonkeys ImageIO + bundled FFmpeg video",
             videoFallback("twelvemonkeys.TwelveMonkeysImageIoMediaFacade",
                     "ffm.FfmpegFfmMediaFacade")
-                    .withResources(ffmpegNativesManifest())),
+                    .withResources(fullBuildBackendMarker("twelvemonkeys-ffmpeg-ffm"),
+                            ffmpegNativesManifest())),
     // TwelveMonkeys stills/GIF + jcodec (pure-Java H.264/MPEG/ProRes)
     // for video. jcodec declines other codecs (classify → empty), which
     // the 12M wrapper surfaces as unsupported.
@@ -108,6 +129,11 @@ public enum MediaBackend {
         Spec withResources(String... resources) {
             return new Spec(requiredClasses, List.of(resources), platformSupported, factory);
         }
+        Spec withClasses(String... relativeClasses) {
+            var classes = new java.util.ArrayList<>(requiredClasses);
+            for (String relativeClass : relativeClasses) classes.add(PKG + relativeClass);
+            return new Spec(List.copyOf(classes), requiredResources, platformSupported, factory);
+        }
         Spec onPlatform(boolean supported) {
             return new Spec(requiredClasses, requiredResources, supported, factory);
         }
@@ -139,6 +165,22 @@ public enum MediaBackend {
     /** The turbojpeg-ffm natives manifest for this platform. */
     private static String turbojpegNativesManifest() {
         return "turbojpeg-natives/" + nativeClassifier() + "/manifest.txt";
+    }
+
+    /** The LibRaw natives manifest for this platform. */
+    private static String librawNativesManifest() {
+        return "libraw-natives/" + nativeClassifier() + "/manifest.txt";
+    }
+
+    /** The libvips-ffm natives manifest for this platform. */
+    private static String vipsNativesManifest() {
+        return "libvips-natives/" + nativeClassifier() + "/manifest.txt";
+    }
+
+    /** Marker removed by the OSS export for selectors available only in the full build. */
+    private static String fullBuildBackendMarker(String settingsValue) {
+        return "io/github/ghosthack/mediabrowser/media/full-build-backends/"
+                + settingsValue + ".marker";
     }
 
     /** Facade built by a public static no-arg factory method on {@code facadeClass}. */
@@ -237,11 +279,11 @@ public enum MediaBackend {
     }
 
     /**
-     * The default backend: {@link #FFMPEG_FFM_TURBOJPEG} — stills and video
+     * The default backend: {@link #FFMPEG_FFM_TURBOJPEG_CM} — stills and video
      * through the bundled-FFmpeg (ffmpeg-ffm artifact) path plus the explicit
-     * TurboJPEG thumbnail fast path, the fastest measured JPEG option
-     * (formats FFmpeg doesn't
-     * claim, e.g. PSD/ICO, need an explicit TwelveMonkeys-paired backend).
+     * TurboJPEG thumbnail fast path, embedded-ICC conversion to sRGB, and
+     * metadata enrichment. Formats FFmpeg doesn't claim, e.g. PSD/ICO, need
+     * an explicit TwelveMonkeys-paired backend.
      * Unconditional — deliberately no availability probe: in a tree or on a
      * platform where this backend cannot run, {@link #create()} fails loudly
      * at startup ({@code App}'s startup check then visibly replaces the
@@ -251,7 +293,7 @@ public enum MediaBackend {
      * determinism won.)
      */
     public static MediaBackend defaultBackend() {
-        return FFMPEG_FFM_TURBOJPEG;
+        return FFMPEG_FFM_TURBOJPEG_CM;
     }
 
     /**

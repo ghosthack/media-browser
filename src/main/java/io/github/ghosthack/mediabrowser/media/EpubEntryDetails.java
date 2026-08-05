@@ -48,7 +48,8 @@ final class EpubEntryDetails {
                 decoded.audioCodec(),
                 decoded.sampleRate(),
                 decoded.channels(),
-                decoded.pixelDescription());
+                decoded.pixelDescription(),
+                decoded.colorProfile());
     }
 
     static Metadata preserveMetadata(Path source, Metadata decoded) {
@@ -103,7 +104,8 @@ final class EpubEntryDetails {
                 decoded.audioCodec(),
                 decoded.sampleRate(),
                 decoded.channels(),
-                decoded.pixelDescription());
+                decoded.pixelDescription(),
+                decoded.colorProfile());
     }
 
     private static Metadata remapPath(Path source, Metadata decoded) {

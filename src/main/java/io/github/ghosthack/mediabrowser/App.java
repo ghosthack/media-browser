@@ -55,7 +55,7 @@ public final class App extends Application {
             // fromSettings throws for a recognized-but-unavailable selection
             // (never a silent substitute), so it sits inside the check too.
             var backend = MediaBackend.fromSettings(configured);
-            service = new MediaService(backend.create(),
+            service = new MediaService(backend.label(), backend.create(),
                     settings.thumbnailMemoryBudgetBytes());
         } catch (Throwable t) {
             // Startup backend check: the backend binds only at startup, so a
@@ -77,13 +77,13 @@ public final class App extends Application {
                 System.err.println("[App] could not persist the replacement backend: " + e);
             }
             try {
-                service = new MediaService(fallback.create(),
+                service = new MediaService(fallback.label(), fallback.create(),
                         settings.thumbnailMemoryBudgetBytes());
             } catch (Throwable t2) {
                 t2.printStackTrace();
                 var fatal = new Alert(Alert.AlertType.ERROR);
                 fatal.setTitle("Media Browser");
-                fatal.setHeaderText("The pure-Java fallback backend failed too");
+                fatal.setHeaderText("The pure-Java fallback engine failed too");
                 fatal.setContentText(String.valueOf(t2));
                 fatal.showAndWait();
                 Platform.exit();
@@ -91,12 +91,12 @@ public final class App extends Application {
             }
             var alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Media Browser");
-            alert.setHeaderText("Decode backend replaced");
-            alert.setContentText("The '" + configured + "' backend could not be"
+            alert.setHeaderText("Media engine replaced");
+            alert.setContentText("The '" + configured + "' media engine could not be"
                     + " initialized, so the setting was changed to the pure-Java '"
-                    + fallback.settingsValue() + "' backend."
+                    + fallback.settingsValue() + "' engine."
                     + "\nSee the console log for details."
-                    + "\nPick a different backend in Preferences \u25b8 Media decode backend.");
+                    + "\nPick a different engine in Preferences \u25b8 Media engine.");
             alert.showAndWait();
         }
 

@@ -327,7 +327,7 @@ public final class ViewerWindow implements AppShell.ShellView {
     private final ToggleButton metadataPin = new ToggleButton("📌");
     private final MetadataPanel metadataPanel = new MetadataPanel();
     private final ToggleButton diagnosticsToggle = new ToggleButton("Diagnostics");
-    /** Thumbnail-pipeline diagnostics snapshot; reuses the shared DiagnosticsPanel. */
+    /** Media-engine/thumbnail diagnostics snapshot; reuses the shared panel. */
     private final DiagnosticsPanel diagnosticsPanel;
     /** The right-edge panels share a vertical split: Info, Metadata, Diagnostics. */
     private final SplitPane rightPanels = new SplitPane();
@@ -418,7 +418,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                         RotationStore rotationStore, AaeStore aaeStore) {
         this.shell = shell;
         this.service = service;
-        this.diagnosticsPanel = new DiagnosticsPanel(service::thumbnailStats);
+        this.diagnosticsPanel = new DiagnosticsPanel(service);
         this.settings = settings;
         this.rotationStore = rotationStore;
         this.aaeStore = aaeStore;
@@ -552,7 +552,7 @@ public final class ViewerWindow implements AppShell.ShellView {
             if (metadataToggle.isSelected() && metadataPanel.isAutoLoad()) fireMetadataRead();
         });
         diagnosticsToggle.setTooltip(new Tooltip(
-                "Show/hide the thumbnail-pipeline diagnostics panel ("
+                "Show/hide media-engine strategy and thumbnail diagnostics ("
                         + shortcutChord(KeyCode.G) + ")"));
 
         // Right-edge panels live in a vertical SplitPane; membership follows each
@@ -1020,7 +1020,7 @@ public final class ViewerWindow implements AppShell.ShellView {
     }
 
     // --- menu hooks: observable state + actions for the shared Viewer menu ---
-    // (MainWindow.buildViewerMenu binds to these so every bar stays in sync;
+    // (MainWindow.buildViewerMenu binds to these in the viewer's menu bar;
     // the actions mirror the toolbar buttons and the scene key filter.)
 
     /**
@@ -1168,7 +1168,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         goBack();
     }
 
-    /** Leaves the viewer for the previous view (Viewer ▸ Close Viewer). */
+    /** Leaves the viewer for the previous view (File ▸ Close Window). */
     public void closeViewer() {
         goBack();
     }
@@ -1647,7 +1647,10 @@ public final class ViewerWindow implements AppShell.ShellView {
         service.loadVisual(item.path(), () -> seq == loadSequence).whenComplete((result, error) ->
                 Platform.runLater(() -> {
                     // a superseded request completes null (decode skipped)
-                    if (result == null && error == null) return;
+                    if (result == null && error == null) {
+                        diagnosticsPanel.refresh();
+                        return;
+                    }
                     // advance past any frame newer than what's shown (monotonic),
                     // not only the single latest: at a moderate repeat rate the
                     // in-flight decode always lands one behind loadSequence, so a
@@ -1667,7 +1670,9 @@ public final class ViewerWindow implements AppShell.ShellView {
                             placeholder.setText("Cannot display " + item.fileName()
                                     + "\n" + rootMessage(error));
                             statusLabel.setText(item.fileName() + " — error");
+                            service.markVisualPresented(item.path());
                         }
+                        diagnosticsPanel.refresh();
                         return;
                     }
                     // The info panel and probe hand-off track the loaded item even
@@ -1677,7 +1682,10 @@ public final class ViewerWindow implements AppShell.ShellView {
                     infoPanel.show(result.probe());
                     onItemProbed.accept(result.probe());
                     // live playback owns the viewport; never paint a still over it
-                    if (player != null) return;
+                    if (player != null) {
+                        diagnosticsPanel.refresh();
+                        return;
+                    }
                     var visual = result.frame();
                     if (visual.isPresent()) {
                         // Retain the upright (and AAE-edited) frame and bake the
@@ -1708,6 +1716,8 @@ public final class ViewerWindow implements AppShell.ShellView {
                                 + "\n(audio — no visual)");
                         statusLabel.setText(item.fileName() + " — " + item.kind());
                     }
+                    service.markVisualPresented(item.path());
+                    diagnosticsPanel.refresh();
                     // Both branches are an error-free open (the error return is
                     // above): a still decoded to a frame, or an audio file whose
                     // probe succeeded. The decode holds no handle afterwards, so

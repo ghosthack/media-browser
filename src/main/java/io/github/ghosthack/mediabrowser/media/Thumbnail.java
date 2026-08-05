@@ -9,7 +9,11 @@ import java.util.Optional;
  * without cover art). The frame, when present, preserves the source aspect
  * ratio and fits within the requested {@code maxEdge} box.
  */
-public record Thumbnail(Optional<RasterFrame> frame, MediaKind kind) {
+public record Thumbnail(Optional<RasterFrame> frame, MediaKind kind, ColorProfile colorProfile) {
+
+    public Thumbnail(Optional<RasterFrame> frame, MediaKind kind) {
+        this(frame, kind, null);
+    }
 
     public Thumbnail {
         if (frame == null) throw new IllegalArgumentException("frame is null");

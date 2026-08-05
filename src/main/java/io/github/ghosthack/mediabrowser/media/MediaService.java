@@ -77,9 +77,18 @@ public final class MediaService implements AutoCloseable {
     public static final long DEFAULT_THUMBNAIL_BUDGET_BYTES = 256L * 1024 * 1024;
 
     private final MediaFacade facade;
+    private final String mediaEngine;
+    /** Last foreground visual request; thumbnails/probes never overwrite it. */
+    private volatile MediaEngineTrace latestVisualTrace;
+    private volatile long latestVisualRequestedNanos;
+    /** Last generated thumbnail and playback route have independent lifetimes. */
+    private volatile MediaEngineTrace latestThumbnailTrace;
+    private volatile MediaEngineTrace latestPlaybackTrace;
+    private final LongAdder staleVisualRequests = new LongAdder();
     private volatile DetectionMode detectionMode = DetectionMode.FILE_EXTENSION;
     private volatile boolean folderPreviewSniff;
-    /** Listing filters; see the setters for why the first defaults on. */
+    /** Listing filters; hidden files are shown and junk is ignored by default. */
+    private volatile boolean listingShowHidden = true;
     private volatile boolean listingIgnoreJunk = true;
     /**
      * Direct-child counts learned as a by-product of listings already requested
@@ -145,6 +154,8 @@ public final class MediaService implements AutoCloseable {
     private final long thumbnailBudgetBytes;
     /** Renditions actually generated (decoded) so far; cache hits don't count. */
     private final LongAdder thumbnailsProcessed = new LongAdder();
+    private final LongAdder thumbnailCacheHits = new LongAdder();
+    private final LongAdder thumbnailInFlightJoins = new LongAdder();
     /** De-duplicates concurrent generation of the same rendition (thundering herd). */
     private final ConcurrentMap<ThumbnailKey, CompletableFuture<Thumbnail>> inFlight =
             new ConcurrentHashMap<>();
@@ -154,6 +165,11 @@ public final class MediaService implements AutoCloseable {
     }
 
     public MediaService(MediaFacade facade, long thumbnailBudgetBytes) {
+        this(facade.getClass().getSimpleName(), facade, thumbnailBudgetBytes);
+    }
+
+    public MediaService(String mediaEngine, MediaFacade facade, long thumbnailBudgetBytes) {
+        this.mediaEngine = mediaEngine;
         this.facade = facade;
         this.thumbnailBudgetBytes = thumbnailBudgetBytes;
         this.thumbnailCache = new LruThumbnailCache(thumbnailBudgetBytes);
@@ -283,14 +299,9 @@ public final class MediaService implements AutoCloseable {
     }
 
     public CompletableFuture<VisualResult> loadVisual(Path file) {
-        return CompletableFuture.supplyAsync(() -> {
-            Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
-            if (mrc.isPresent()) {
-                return PdfMrcMedia.load(file, mrc.get(), facade, MediaService::decodable);
-            }
-            rejectIfEmpty(file);
-            return preserveVisual(file, facade.loadVisual(decodable(file)));
-        }, executor);
+        long requestedNanos = System.nanoTime();
+        return CompletableFuture.supplyAsync(
+                () -> loadVisualNow(file, requestedNanos), executor);
     }
 
     private static VisualResult preserveVisual(Path source, VisualResult decoded) {
@@ -339,15 +350,97 @@ public final class MediaService implements AutoCloseable {
      * sequence counter).</p>
      */
     public CompletableFuture<VisualResult> loadVisual(Path file, BooleanSupplier stillWanted) {
+        long requestedNanos = System.nanoTime();
         return CompletableFuture.supplyAsync(() -> {
-            if (!stillWanted.getAsBoolean()) return null;
+            if (!stillWanted.getAsBoolean()) {
+                staleVisualRequests.increment();
+                return null;
+            }
+            return loadVisualNow(file, requestedNanos);
+        }, executor);
+    }
+
+    private VisualResult loadVisualNow(Path file, long requestedNanos) {
+        MediaEngineTrace.Recorder trace = MediaEngineTrace.Recorder.recording(
+                mediaEngine, file, "Foreground visual", requestedNanos);
+        Throwable failure = null;
+        long dispatchStarted = trace.beginAttempt();
+        try {
             Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
             if (mrc.isPresent()) {
-                return PdfMrcMedia.load(file, mrc.get(), facade, MediaService::decodable);
+                long engineStarted = System.nanoTime();
+                try {
+                    VisualResult result = PdfMrcMedia.load(
+                            file, mrc.get(), facade, MediaService::decodable);
+                    trace.engineWork(System.nanoTime() - engineStarted);
+                    trace.succeeded("PDF MRC composite", dispatchStarted, "Foreground visual");
+                    return result;
+                } catch (RuntimeException | Error e) {
+                    trace.engineWork(System.nanoTime() - engineStarted);
+                    trace.failed("PDF MRC composite", dispatchStarted, e);
+                    throw e;
+                }
             }
             rejectIfEmpty(file);
-            return preserveVisual(file, facade.loadVisual(decodable(file)));
-        }, executor);
+            long inputStarted = trace.beginAttempt();
+            Path input = decodable(file);
+            trace.succeeded(ArchivePaths.inArchive(file)
+                            ? "Archive materialization" : "Direct filesystem input",
+                    inputStarted, ArchivePaths.inArchive(file)
+                            ? "Materialized an archive entry for the media engine"
+                            : "No materialization required");
+            long engineStarted = System.nanoTime();
+            VisualResult decoded;
+            try {
+                decoded = facade.loadVisual(input, trace);
+            } finally {
+                trace.engineWork(System.nanoTime() - engineStarted);
+            }
+            long postStarted = System.nanoTime();
+            VisualResult result = preserveVisual(file, decoded);
+            trace.postProcess(System.nanoTime() - postStarted);
+            return result;
+        } catch (RuntimeException | Error e) {
+            failure = e;
+            if (!trace.hasAttempts()) {
+                trace.failed("Prepare media input", dispatchStarted, e);
+            }
+            throw e;
+        } finally {
+            latestVisualRequestedNanos = requestedNanos;
+            latestVisualTrace = trace.finish(failure);
+        }
+    }
+
+    /** User-facing name of the selected media engine for diagnostics. */
+    public String mediaEngine() {
+        return mediaEngine;
+    }
+
+    /** Latest foreground decode trace; background work never replaces it. */
+    public Optional<MediaEngineTrace> latestVisualTrace() {
+        return Optional.ofNullable(latestVisualTrace);
+    }
+
+    /** Marks the latest matching visual as presented by the UI. */
+    public void markVisualPresented(Path file) {
+        MediaEngineTrace trace = latestVisualTrace;
+        long requested = latestVisualRequestedNanos;
+        if (trace != null && trace.path().equals(file) && requested > 0) {
+            latestVisualTrace = trace.withTimeToDisplay(System.nanoTime() - requested);
+        }
+    }
+
+    public long staleVisualRequests() {
+        return staleVisualRequests.sum();
+    }
+
+    public Optional<MediaEngineTrace> latestThumbnailTrace() {
+        return Optional.ofNullable(latestThumbnailTrace);
+    }
+
+    public Optional<MediaEngineTrace> latestPlaybackTrace() {
+        return Optional.ofNullable(latestPlaybackTrace);
     }
 
     /**
@@ -402,6 +495,7 @@ public final class MediaService implements AutoCloseable {
      */
     public CompletableFuture<Thumbnail> thumbnail(Path file, int maxEdge, ThumbnailMode mode) {
         long queuedAt = MosaicTelemetry.now();
+        long requestedNanos = System.nanoTime();
         return CompletableFuture.supplyAsync(() -> {
             MosaicTelemetry.recordThumbnailKeyQueue(MosaicTelemetry.elapsedSince(queuedAt));
 
@@ -412,6 +506,7 @@ public final class MediaService implements AutoCloseable {
             Thumbnail hit = thumbnailCache.peek(key);
             if (hit != null) {
                 MosaicTelemetry.recordThumbnailCacheHit();
+                thumbnailCacheHits.increment();
                 return CompletableFuture.completedFuture(hit);
             }
 
@@ -419,21 +514,52 @@ public final class MediaService implements AutoCloseable {
             CompletableFuture<Thumbnail> future = inFlight.computeIfAbsent(key, k -> {
                 created.set(true);
                 CompletableFuture<Thumbnail> generated = CompletableFuture.supplyAsync(() -> {
+                    MediaEngineTrace.Recorder trace = MediaEngineTrace.Recorder.recording(
+                            mediaEngine, file, "Thumbnail " + mode, requestedNanos);
+                    Throwable failure = null;
                     long loadStart = MosaicTelemetry.now();
                     try {
                         Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
                         if (mrc.isPresent()) {
-                            return thumbnailCache.get(k,
-                                    () -> PdfMrcMedia.thumbnail(
-                                            mrc.get(), facade, MediaService::decodable,
-                                            maxEdge, mode));
+                            long engineStarted = trace.beginAttempt();
+                            try {
+                                Thumbnail result = thumbnailCache.get(k,
+                                        () -> PdfMrcMedia.thumbnail(
+                                                mrc.get(), facade, MediaService::decodable,
+                                                maxEdge, mode));
+                                trace.succeeded("PDF MRC composite", engineStarted,
+                                        thumbnailDetail(result, maxEdge, mode));
+                                trace.engineWork(MosaicTelemetry.elapsedSince(loadStart));
+                                return result;
+                            } catch (RuntimeException | Error e) {
+                                trace.failed("PDF MRC composite", engineStarted, e);
+                                throw e;
+                            }
                         }
                         rejectIfEmpty(file);
-                        return thumbnailCache.get(k,
-                                () -> facade.loadThumbnail(decodable(file), maxEdge, mode));
+                        long inputStarted = trace.beginAttempt();
+                        Path input = decodable(file);
+                        trace.succeeded(ArchivePaths.inArchive(file)
+                                        ? "Archive materialization" : "Direct filesystem input",
+                                inputStarted, ArchivePaths.inArchive(file)
+                                        ? "Materialized archive entry" : "No materialization required");
+                        long engineStarted = System.nanoTime();
+                        try {
+                            return thumbnailCache.get(k,
+                                    () -> facade.loadThumbnail(input, maxEdge, mode, trace));
+                        } finally {
+                            trace.engineWork(System.nanoTime() - engineStarted);
+                        }
+                    } catch (RuntimeException | Error e) {
+                        failure = e;
+                        if (!trace.hasAttempts()) {
+                            trace.failed("Prepare media input", trace.beginAttempt(), e);
+                        }
+                        throw e;
                     } finally {
                         MosaicTelemetry.recordThumbnailLoad(
                                 MosaicTelemetry.elapsedSince(loadStart));
+                        latestThumbnailTrace = trace.finish(failure);
                     }
                 }, thumbnailExecutor);
                 generated.whenComplete((r, e) -> {
@@ -442,7 +568,10 @@ public final class MediaService implements AutoCloseable {
                 });
                 return generated;
             });
-            if (!created.get()) MosaicTelemetry.recordThumbnailInFlightJoin();
+            if (!created.get()) {
+                MosaicTelemetry.recordThumbnailInFlightJoin();
+                thumbnailInFlightJoins.increment();
+            }
             return future;
         }, thumbnailExecutor).thenCompose(Function.identity());
     }
@@ -455,9 +584,16 @@ public final class MediaService implements AutoCloseable {
      * are sampled independently (not atomic across fields), which is fine for
      * a display refreshed on a timer.
      */
-    public record ThumbnailStats(long processed, int queuedTasks, int activeThreads,
+    public record ThumbnailStats(long processed, long cacheHits, long inFlightJoins,
+                                 int queuedTasks, int activeThreads,
                                  int poolThreads, int cachedItems, long cachedBytes,
                                  long budgetBytes) {
+        public ThumbnailStats(long processed, int queuedTasks, int activeThreads,
+                              int poolThreads, int cachedItems, long cachedBytes,
+                              long budgetBytes) {
+            this(processed, 0, 0, queuedTasks, activeThreads, poolThreads,
+                    cachedItems, cachedBytes, budgetBytes);
+        }
     }
 
     /**
@@ -469,12 +605,20 @@ public final class MediaService implements AutoCloseable {
     public ThumbnailStats thumbnailStats() {
         return new ThumbnailStats(
                 thumbnailsProcessed.sum(),
+                thumbnailCacheHits.sum(),
+                thumbnailInFlightJoins.sum(),
                 thumbnailExecutor.getQueue().size(),
                 thumbnailExecutor.getActiveCount(),
                 thumbnailExecutor.getMaximumPoolSize(),
                 thumbnailCache.entryCount(),
                 thumbnailCache.usedBytes(),
                 thumbnailBudgetBytes);
+    }
+
+    private static String thumbnailDetail(Thumbnail result, int maxEdge, ThumbnailMode mode) {
+        String size = result.frame().map(f -> f.width() + "×" + f.height())
+                .orElse("no visual frame");
+        return mode + ", requested ≤" + maxEdge + " px, produced " + size;
     }
 
     /**
@@ -615,6 +759,15 @@ public final class MediaService implements AutoCloseable {
     }
 
     /**
+     * Whether dot-prefixed or platform-hidden entries appear in listings. On
+     * by default and independent of the junk filter: showing hidden files does
+     * not bring internal sidecars or ignored system files back.
+     */
+    public void setListingShowHidden(boolean show) {
+        this.listingShowHidden = show;
+    }
+
+    /**
      * What the last listing scan filtered out, for the status-bar disclosure.
      * Only the opt-in filters are worth reporting everywhere; a dropped
      * {@code .DS_Store} changes nothing about a folder and is disclosed only
@@ -622,12 +775,13 @@ public final class MediaService implements AutoCloseable {
      *
      * @param dir the directory this tally belongs to
      */
-    public record ListingHidden(Path dir, int junkFiles, int emptyFiles, int emptyFolders) {
-        static final ListingHidden NONE = new ListingHidden(null, 0, 0, 0);
+    public record ListingHidden(
+            Path dir, int junkFiles, int hiddenEntries, int emptyFiles, int emptyFolders) {
+        static final ListingHidden NONE = new ListingHidden(null, 0, 0, 0, 0);
 
         /** Whether anything the user opted to hide was hidden. */
         public boolean anyOptIn() {
-            return emptyFiles > 0 || emptyFolders > 0;
+            return hiddenEntries > 0 || emptyFiles > 0 || emptyFolders > 0;
         }
     }
 
@@ -842,7 +996,13 @@ public final class MediaService implements AutoCloseable {
      */
     public VideoPlayer newVideoPlayer(Path file, VideoPlayer.FrameSink sink,
                                       Runnable onEnded, Consumer<Throwable> onError) {
-        return new VideoPlayer(facade, decodable(file), sink, onEnded, onError);
+        long requestedNanos = System.nanoTime();
+        long inputStarted = System.nanoTime();
+        Path input = decodable(file);
+        long inputElapsedNanos = System.nanoTime() - inputStarted;
+        return new VideoPlayer(facade, mediaEngine, file, input, requestedNanos,
+                inputElapsedNanos, sink, onEnded, onError,
+                trace -> latestPlaybackTrace = trace);
     }
 
     /**
@@ -946,7 +1106,7 @@ public final class MediaService implements AutoCloseable {
         }
         var dirs = new ArrayList<DirEntry>();
         var files = new ArrayList<DirEntry>();
-        int hiddenJunk = 0, hiddenEmptyFiles = 0, hiddenEmptyFolders = 0;
+        int hiddenJunk = 0, hiddenEntries = 0, hiddenEmptyFiles = 0, hiddenEmptyFolders = 0;
         for (Path p : children) {
             // Junk is an entry-name rule. Test it before isDirectory so
             // __MACOSX, .Spotlight-V100 and their peers obey the same toggle
@@ -955,6 +1115,11 @@ public final class MediaService implements AutoCloseable {
                 hiddenJunk++;
                 continue;
             } else if (Files.isDirectory(p)) {
+                FileTraits traits = FileTraits.read(p, false);
+                if (!listingShowHidden && traits.hidden()) {
+                    hiddenEntries++;
+                    continue;
+                }
                 // The one filter that costs I/O — one listing per subfolder,
                 // and only when the user turned it on. UNREADABLE is not a
                 // dead end here: it is a folder we could not judge.
@@ -965,8 +1130,7 @@ public final class MediaService implements AutoCloseable {
                         continue;
                     }
                 }
-                dirs.add(new DirEntry(p, DirEntry.Type.DIRECTORY, null, 0, 0,
-                        FileTraits.read(p, false)));
+                dirs.add(new DirEntry(p, DirEntry.Type.DIRECTORY, null, 0, 0, traits));
             } else if (Sidecars.isRotationSidecar(p)
                     || Sidecars.isMatchedAaeSidecar(p, fileStems)) {
                 // Internal bookkeeping (the rotation sidecar) and matched Apple
@@ -978,6 +1142,10 @@ public final class MediaService implements AutoCloseable {
                 long mtime = mtimeOf(p);
                 boolean junk = isJunk(p);
                 FileTraits traits = FileTraits.read(p, junk);
+                if (!listingShowHidden && traits.hidden()) {
+                    hiddenEntries++;
+                    continue;
+                }
                 if (listingHideEmptyFiles
                         && size == 0
                         && PdfEntryDetails.mrc(p).isEmpty()) {
@@ -1013,7 +1181,8 @@ public final class MediaService implements AutoCloseable {
         if (parent != null) entries.add(new DirEntry(parent, DirEntry.Type.PARENT, null, 0, 0));
         entries.addAll(dirs);
         entries.addAll(files);
-        lastHidden = new ListingHidden(dir, hiddenJunk, hiddenEmptyFiles, hiddenEmptyFolders);
+        lastHidden = new ListingHidden(
+                dir, hiddenJunk, hiddenEntries, hiddenEmptyFiles, hiddenEmptyFolders);
         return entries;
     }
 

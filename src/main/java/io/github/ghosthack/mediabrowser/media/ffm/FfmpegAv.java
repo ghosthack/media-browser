@@ -1,5 +1,6 @@
 package io.github.ghosthack.mediabrowser.media.ffm;
 
+import io.github.ghosthack.mediabrowser.media.ColorProfile;
 import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
@@ -35,10 +36,29 @@ import java.util.Set;
 final class FfmpegAv {
 
     private final FfmpegBindings ff;
+    private final boolean captureIccProfiles;
+    /** Latest still decode's embedded ICC on this thread; read via {@link #takeCapturedIccProfile}. */
+    private final ThreadLocal<ColorProfile> capturedIcc = new ThreadLocal<>();
 
     FfmpegAv(FfmpegBindings ff) {
+        this(ff, false);
+    }
+
+    FfmpegAv(FfmpegBindings ff, boolean captureIccProfiles) {
         this.ff = ff;
+        this.captureIccProfiles = captureIccProfiles;
         ff.init();
+    }
+
+    /**
+     * Get-and-clear the ICC profile the most recent decode on this thread
+     * captured from frame side data (PNG/JPEG/TIFF/WebP decoders attach it).
+     * Always null unless constructed with {@code captureIccProfiles}.
+     */
+    ColorProfile takeCapturedIccProfile() {
+        ColorProfile profile = capturedIcc.get();
+        capturedIcc.remove();
+        return profile;
     }
 
     String version() {
@@ -174,7 +194,8 @@ final class FfmpegAv {
                 MemorySegment ctx = ff.derefFormatContext(ctxPtr);
                 MediaProbe probe = describe(ctx, file, -1);
                 RasterFrame poster = decodeFirstFrame(arena, ctx, maxEdge, mode, lowres);
-                return new Thumbnail(Optional.ofNullable(poster), probe.kind());
+                return new Thumbnail(Optional.ofNullable(poster), probe.kind(),
+                        takeCapturedIccProfile());
             } finally {
                 ff.closeInput(ctxPtr);
             }
@@ -728,6 +749,12 @@ final class FfmpegAv {
         int h = ff.frameHeight(frame);
         int fmt = ff.frameFormat(frame);
         if (w <= 0 || h <= 0 || fmt < 0) return null;
+        if (captureIccProfiles) {
+            // Overwrites (or clears) per frame so a previous file's profile
+            // never leaks across decodes on the same worker thread.
+            byte[] icc = ff.frameIccProfile(frame);
+            capturedIcc.set(icc == null ? null : ColorProfile.parse(icc).orElse(null));
+        }
 
         int dstW, dstH, flags;
         int cropSide = 0;   // > 0 means centre-crop the cover-scaled output (FILL)

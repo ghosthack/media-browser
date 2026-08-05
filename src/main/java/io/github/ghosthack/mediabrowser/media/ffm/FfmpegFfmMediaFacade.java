@@ -1,6 +1,8 @@
 package io.github.ghosthack.mediabrowser.media.ffm;
 
+import io.github.ghosthack.mediabrowser.media.ColorProfile;
 import io.github.ghosthack.mediabrowser.media.MediaException;
+import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
 import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
@@ -84,6 +86,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     private final FfmpegAv av;
     private final FfmpegMetadata metadata;
     private final boolean turboJpeg;
+    private final boolean captureColorProfiles;
 
     /** No-arg for the reflective {@code MediaBackend} factories: pure FFmpeg. */
     public FfmpegFfmMediaFacade() {
@@ -91,14 +94,16 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     }
 
     public FfmpegFfmMediaFacade(FfmpegBindings ffmpeg) {
-        this(ffmpeg, false);
+        this(ffmpeg, false, false);
     }
 
-    private FfmpegFfmMediaFacade(FfmpegBindings ffmpeg, boolean turboJpeg) {
+    private FfmpegFfmMediaFacade(FfmpegBindings ffmpeg, boolean turboJpeg,
+                                 boolean captureColorProfiles) {
         this.ffmpeg = ffmpeg;
-        this.av = new FfmpegAv(ffmpeg);   // also quiets libav logging
+        this.av = new FfmpegAv(ffmpeg, captureColorProfiles);   // also quiets libav logging
         this.metadata = new FfmpegMetadata(ffmpeg);
         this.turboJpeg = turboJpeg;
+        this.captureColorProfiles = captureColorProfiles;
     }
 
     /**
@@ -114,7 +119,17 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                     "turbojpeg-ffm natives unavailable on this platform; "
                     + "use the ffmpeg-ffm backend instead");
         }
-        return new FfmpegFfmMediaFacade(new BundledFfmpegBindings(), true);
+        return new FfmpegFfmMediaFacade(new BundledFfmpegBindings(), true, false);
+    }
+
+    /** TurboJPEG plus a same-read ICC handoff for the color-managed decorator. */
+    public static FfmpegFfmMediaFacade withTurboJpegColorProfiles() {
+        if (!TurboJpegStills.available()) {
+            throw new MediaException(
+                    "turbojpeg-ffm natives unavailable on this platform; "
+                    + "use the ffmpeg-ffm backend instead");
+        }
+        return new FfmpegFfmMediaFacade(new BundledFfmpegBindings(), true, true);
     }
 
     @Override
@@ -178,9 +193,57 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         }
         VisualResult result = firstFrameSteppingDownPcd(file);
         MediaProbe refined = refineKind(result.probe(), file);
+        if (captureColorProfiles) {
+            ColorProfile captured = av.takeCapturedIccProfile();
+            if (captured != null) {
+                refined = refined.withColorProfile(captured);
+            }
+        }
         VisualResult out = refined == result.probe() ? result
                 : new VisualResult(refined, result.frame());
         return bakePcdRotation(file, bakeJpegExif(file, out));
+    }
+
+    @Override
+    public VisualResult loadVisual(Path file, MediaEngineTrace.Recorder trace) {
+        if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
+            long jxlStarted = trace.beginAttempt();
+            try {
+                Optional<RasterFrame> jxlDng = DngJxlStills.fullDecode(ffmpeg, file);
+                if (jxlDng.isPresent()) {
+                    trace.succeeded("JXL-compressed DNG render", jxlStarted,
+                            rasterDetail(jxlDng.get(), "pure DNG render"));
+                    return new VisualResult(rawProbe(file), jxlDng);
+                }
+                trace.declined("JXL-compressed DNG render", jxlStarted,
+                        "Input is not a JXL-compressed DNG");
+            } catch (MediaException e) {
+                trace.failed("JXL-compressed DNG render", jxlStarted, e);
+            }
+            long rawStarted = trace.beginAttempt();
+            try {
+                RasterFrame frame = LibRawStills.fullDecode(file)
+                        .orElseThrow(() -> new MediaException(
+                                "LibRaw produced no full decode or embedded preview"));
+                trace.succeeded("LibRaw / embedded preview", rawStarted,
+                        rasterDetail(frame, "camera RAW"));
+                return new VisualResult(rawProbe(file), Optional.of(frame));
+            } catch (RuntimeException | Error e) {
+                trace.failed("LibRaw / embedded preview", rawStarted, e);
+                throw e;
+            }
+        }
+        long started = trace.beginAttempt();
+        try {
+            VisualResult result = loadVisual(file);
+            trace.succeeded("Bundled FFmpeg", started, result.frame()
+                    .map(f -> rasterDetail(f, "decoded first visual frame"))
+                    .orElse("No visual frame"));
+            return result;
+        } catch (RuntimeException | Error e) {
+            trace.failed("Bundled FFmpeg", started, e);
+            throw e;
+        }
     }
 
     @Override
@@ -198,9 +261,16 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             // TurboJPEG handles worse or not at all — fall through to the
             // ordinary FFmpeg decode below: capability routing, not a
             // failure fallback.
-            var fast = TurboJpegStills.thumbnail(file, maxEdge, mode);
-            if (fast.isPresent()) {
-                return new Thumbnail(fast, MediaKind.IMAGE);
+            if (captureColorProfiles) {
+                var fast = TurboJpegStills.profiledThumbnail(file, maxEdge, mode);
+                if (fast.isPresent()) {
+                    var decoded = fast.orElseThrow();
+                    return new Thumbnail(Optional.of(decoded.frame()), MediaKind.IMAGE,
+                            decoded.colorProfile());
+                }
+            } else {
+                var fast = TurboJpegStills.thumbnail(file, maxEdge, mode);
+                if (fast.isPresent()) return new Thumbnail(fast, MediaKind.IMAGE);
             }
         }
         Thumbnail thumb = thumbnailSteppingDownPcd(file, maxEdge, mode);
@@ -208,14 +278,16 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             int orientation = TurboJpegStills.exifOrientation(file);
             if (orientation != 1) {
                 thumb = new Thumbnail(thumb.frame()
-                        .map(f -> RasterFrames.applyExifOrientation(f, orientation)), thumb.kind());
+                        .map(f -> RasterFrames.applyExifOrientation(f, orientation)),
+                        thumb.kind(), thumb.colorProfile());
             }
         }
         if (thumb.frame().isPresent() && PcdOrientation.isPcd(extension(file))) {
             int turns = PcdOrientation.quarterTurnsCw(file);
             if (turns != 0) {
                 thumb = new Thumbnail(
-                        thumb.frame().map(f -> RasterFrames.rotateCw(f, turns)), thumb.kind());
+                        thumb.frame().map(f -> RasterFrames.rotateCw(f, turns)),
+                        thumb.kind(), thumb.colorProfile());
             }
         }
         if (thumb.kind() == MediaKind.VIDEO && STILL_EXTENSIONS.contains(extension(file))) {
@@ -223,9 +295,77 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             // refine still-extension files with one cheap header probe — an
             // animated GIF/AVIF keeps VIDEO via its duration, a plain still
             // becomes IMAGE. AV-extension files never pay the second open.
-            return new Thumbnail(thumb.frame(), refineKind(av.probe(file, -1), file).kind());
+            return new Thumbnail(thumb.frame(), refineKind(av.probe(file, -1), file).kind(),
+                    thumb.colorProfile());
         }
         return thumb;
+    }
+
+    @Override
+    public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode,
+                                   MediaEngineTrace.Recorder trace) {
+        if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
+            long started = trace.beginAttempt();
+            try {
+                Thumbnail result = new Thumbnail(
+                        LibRawStills.thumbnail(file, maxEdge, mode, turboJpeg),
+                        MediaKind.IMAGE);
+                trace.succeeded("LibRaw thumbnail", started,
+                        thumbnailDetail(result, maxEdge, mode));
+                return result;
+            } catch (RuntimeException | Error e) {
+                trace.failed("LibRaw thumbnail", started, e);
+                throw e;
+            }
+        }
+        if (isJpeg(file) && turboJpeg) {
+            long turboStarted = trace.beginAttempt();
+            try {
+                Thumbnail result = null;
+                if (captureColorProfiles) {
+                    Optional<TurboJpegStills.ProfiledFrame> fast =
+                            TurboJpegStills.profiledThumbnail(file, maxEdge, mode);
+                    if (fast.isPresent()) {
+                        var decoded = fast.orElseThrow();
+                        result = new Thumbnail(Optional.of(decoded.frame()),
+                                MediaKind.IMAGE, decoded.colorProfile());
+                    }
+                } else {
+                    Optional<RasterFrame> fast = TurboJpegStills.thumbnail(file, maxEdge, mode);
+                    if (fast.isPresent()) result = new Thumbnail(fast, MediaKind.IMAGE);
+                }
+                if (result != null) {
+                    trace.succeeded("TurboJPEG scaled decode", turboStarted,
+                            thumbnailDetail(result, maxEdge, mode));
+                    return result;
+                }
+                trace.declined("TurboJPEG scaled decode", turboStarted,
+                        "JPEG is outside the fast path (for example progressive, CMYK, or lossless)");
+            } catch (RuntimeException | Error e) {
+                trace.failed("TurboJPEG scaled decode", turboStarted, e);
+                throw e;
+            }
+        }
+        long started = trace.beginAttempt();
+        try {
+            Thumbnail result = loadThumbnail(file, maxEdge, mode);
+            trace.succeeded("Bundled FFmpeg thumbnail", started,
+                    thumbnailDetail(result, maxEdge, mode));
+            return result;
+        } catch (RuntimeException | Error e) {
+            trace.failed("Bundled FFmpeg thumbnail", started, e);
+            throw e;
+        }
+    }
+
+    private static String rasterDetail(RasterFrame frame, String route) {
+        return route + "; " + frame.width() + "×" + frame.height() + " BGRA";
+    }
+
+    private static String thumbnailDetail(Thumbnail result, int maxEdge, ThumbnailMode mode) {
+        return mode + ", requested ≤" + maxEdge + " px, produced "
+                + result.frame().map(f -> f.width() + "×" + f.height() + " BGRA")
+                        .orElse("no visual frame");
     }
 
     @Override
@@ -289,7 +429,8 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         return new MediaProbe(probe.path(), MediaKind.IMAGE, probe.container(),
                 probe.fileSize(), -1, probe.bitRate(),
                 probe.width(), probe.height(),
-                probe.videoCodec(), -1, null, -1, -1, probe.pixelDescription());
+                probe.videoCodec(), -1, null, -1, -1, probe.pixelDescription(),
+                probe.colorProfile());
     }
 
     /**

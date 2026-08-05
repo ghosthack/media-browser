@@ -10,7 +10,7 @@
   <packaging>jar</packaging>
 
   <name>Media Browser</name>
-  <description>Pure-Java desktop media browser: JavaFX UI with selectable decode backends.</description>
+  <description>Pure-Java desktop media browser: JavaFX UI with selectable media engines.</description>
 
   <properties>
     <!-- CI-friendly version: release builds override with
@@ -21,6 +21,7 @@
     <javafx.version>26</javafx.version>
     <lwjgl.version>3.4.1</lwjgl.version>
     <twelvemonkeys.version>3.13.1</twelvemonkeys.version>
+    <metadata-extractor.version>2.19.0</metadata-extractor.version>
     <!-- JavaCV (bundled FFmpeg), test scope only: mints video fixtures via
          FFmpegFrameRecorder (BackendEvaluationTest, JcodecMediaFacadeTest).
          The JAVACV / TWELVEMONKEYS_JAVACV runtime backends were retired
@@ -52,7 +53,7 @@
     <!-- Bundled-FFmpeg backend (FFMPEG_FFM): FFM stubs + self-extracting
          from-source LGPL natives, built in ../ffmpeg-ffm, on Maven Central.
          Classifier jars exist for macos-arm64, windows-x64, and linux-x64. -->
-    <ffmpegffm.version>8.1.2-0.3.1</ffmpegffm.version>
+    <ffmpegffm.version>8.1.2-0.3.3</ffmpegffm.version>
     <ffmpegffm.natives>macos-arm64</ffmpegffm.natives>
     <!-- libjpeg-turbo JPEG-thumbnail fast path (TurboJpegStills): FFM stubs +
          self-extracting natives, built in ../turbojpeg-ffm. Same platform
@@ -66,6 +67,11 @@
     <librawffm.version>0.22.2-0.2.0</librawffm.version>
     <media-inspection.version>0.2.0</media-inspection.version>
     <librawffm.natives>macos-arm64</librawffm.natives>
+    <!-- Private mixed-native engine. Dependencies live in the file-activated
+         profile below so the byte-identical OSS pom stops resolving them as
+         soon as oss-export.sh prunes media/vips. -->
+    <libvipsffm.version>8.18.3-0.1.3</libvipsffm.version>
+    <libvipsffm.natives>macos-arm64</libvipsffm.natives>
     <junit.version>5.11.4</junit.version>
     <app.mainClass>io.github.ghosthack.mediabrowser.App</app.mainClass>
     <app.launcherClass>io.github.ghosthack.mediabrowser.Launcher</app.launcherClass>
@@ -241,6 +247,13 @@
       <artifactId>imageio-hdr</artifactId>
       <version>${twelvemonkeys.version}</version>
     </dependency>
+    <!-- Pure-Java EXIF/XMP/IPTC/ICC enrichment for the opt-in color-managed
+         bundled-FFmpeg engine. Pixel decode remains in FFmpeg/TurboJPEG. -->
+    <dependency>
+      <groupId>com.drewnoakes</groupId>
+      <artifactId>metadata-extractor</artifactId>
+      <version>${metadata-extractor.version}</version>
+    </dependency>
     <dependency>
       <groupId>com.twelvemonkeys.imageio</groupId>
       <artifactId>imageio-thumbsdb</artifactId>
@@ -371,6 +384,7 @@
         <ffmpegffm.natives>windows-x64</ffmpegffm.natives>
         <turbojpegffm.natives>windows-x64</turbojpegffm.natives>
         <librawffm.natives>windows-x64</librawffm.natives>
+        <libvipsffm.natives>windows-x64</libvipsffm.natives>
       </properties>
     </profile>
     <profile>
@@ -398,7 +412,30 @@
         <ffmpegffm.natives>linux-x64</ffmpegffm.natives>
         <turbojpegffm.natives>linux-x64</turbojpegffm.natives>
         <librawffm.natives>linux-x64</librawffm.natives>
+        <libvipsffm.natives>linux-x64</libvipsffm.natives>
       </properties>
+    </profile>
+    <profile>
+      <id>private-mixed-native-engine</id>
+      <activation>
+        <file>
+          <exists>src/main/java/io/github/ghosthack/mediabrowser/media/vips</exists>
+        </file>
+      </activation>
+      <dependencies>
+        <dependency>
+          <groupId>io.github.ghosthack</groupId>
+          <artifactId>libvips-ffm</artifactId>
+          <version>${libvipsffm.version}</version>
+        </dependency>
+        <dependency>
+          <groupId>io.github.ghosthack</groupId>
+          <artifactId>libvips-ffm-natives</artifactId>
+          <version>${libvipsffm.version}</version>
+          <classifier>${libvipsffm.natives}</classifier>
+          <scope>runtime</scope>
+        </dependency>
+      </dependencies>
     </profile>
     <!-- Stage the application and runtime-scope dependencies exactly as
          jpackage expects them. The native profile above ensures this directory
@@ -514,7 +551,7 @@
         <configuration>
           <!-- Same runtime module the app needs: the pure decoders' DSP
                kernels (AvcDsp & co.) use the incubating Vector API. -->
-          <argLine>--add-modules jdk.incubator.vector</argLine>
+          <argLine>--add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED</argLine>
         </configuration>
         <!--
           The bytedeco fixture-minting tests must not share a JVM with anything

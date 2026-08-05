@@ -2,6 +2,7 @@ package io.github.ghosthack.mediabrowser.media.windows;
 
 import io.github.ghosthack.mediabrowser.media.ImageSequences;
 import io.github.ghosthack.mediabrowser.media.MediaException;
+import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
 import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.Metadata;
@@ -34,6 +35,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.Supplier;
 
 /**
  * {@link MediaFacade} backed entirely by Windows 11 native media frameworks,
@@ -156,15 +158,23 @@ public final class WindowsMediaFacade implements MediaFacade {
 
     @Override
     public VisualResult loadVisual(Path file) {
+        return loadVisual(file, MediaEngineTrace.Recorder.disabled());
+    }
+
+    @Override
+    public VisualResult loadVisual(Path file, MediaEngineTrace.Recorder trace) {
         if (sniffImage(file)) {
             return ImageSequences.decodeStillOrAnimation(file,
-                    () -> mfVideoVisual(file),
-                    () -> wicVisual(file));
+                    () -> mfVideoVisual(file, trace),
+                    () -> traced(trace, "WIC still decode", () -> wicVisual(file)));
         }
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
+            long probeStarted = trace.beginAttempt();
             VideoInfo vi = videoInfo(file);
             if (vi != null && vi.width() > 0 && vi.height() > 0) {
+                trace.succeeded("Media Foundation video probe", probeStarted,
+                        vi.width() + "×" + vi.height());
                 // Poster ~10% in skips a black/fade-in opening frame. Keep the
                 // confined Arena open until toRaster copies the pixels out, and
                 // wrap any DecodeException so it never leaks past the facade.
@@ -172,20 +182,30 @@ public final class WindowsMediaFacade implements MediaFacade {
                 long posterMs = durationMs > 0 ? (long) (durationMs * 0.1) : 0;
                 try (Arena arena = Arena.ofConfined()) {
                     DecodedImage<PixelFormat> frame =
-                            MediaFoundation.extractFrame(arena, file.toString(), posterMs);
+                            MediaFoundation.extractFrame(
+                                    arena, file.toString(), posterMs, 0,
+                                    attempt -> recordMfAttempt(trace, attempt));
                     return new VisualResult(videoProbe(file, vi), Optional.of(toRaster(frame)));
                 } catch (RuntimeException e) {
                     throw new MediaException("windows-native: cannot decode video frame "
                             + file.getFileName() + ": " + e.getMessage(), e);
                 }
+            } else {
+                trace.failed("Media Foundation video probe", probeStarted,
+                        "No playable video stream");
             }
         }
         // Audio: no cover art in v1 (matches AppleMediaFacade) -> empty visual.
         if (VIDEO_EXTENSIONS.contains(ext) || AUDIO_EXTENSIONS.contains(ext)) {
+            long audioStarted = trace.beginAttempt();
             AudioInfo ai = audioInfo(file);
             if (ai != null && ai.hasAudio()) {
+                trace.succeeded("Media Foundation audio probe", audioStarted,
+                        "Audio-only visual (no cover art)");
                 return new VisualResult(audioProbe(file, ai), Optional.empty());
             }
+            trace.failed("Media Foundation audio probe", audioStarted,
+                    "No playable audio stream");
         }
         throw new MediaException("windows-native: cannot load visual of " + file.getFileName());
     }
@@ -235,6 +255,28 @@ public final class WindowsMediaFacade implements MediaFacade {
         throw new MediaException("windows-native: cannot thumbnail " + file.getFileName());
     }
 
+    @Override
+    public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode,
+                                   MediaEngineTrace.Recorder trace) {
+        String strategy = sniffImage(file)
+                ? (ImageSequences.isAnimatedImageSequence(file)
+                        ? "Media Foundation animated poster / WIC still recovery"
+                        : "WIC source-scaled thumbnail")
+                : "Media Foundation native-downscaled poster";
+        long started = trace.beginAttempt();
+        try {
+            Thumbnail result = loadThumbnail(file, maxEdge, mode);
+            trace.succeeded(strategy, started,
+                    mode + ", requested ≤" + maxEdge + " px, produced "
+                            + result.frame().map(f -> f.width() + "×" + f.height() + " BGRA")
+                                    .orElse("no visual frame"));
+            return result;
+        } catch (RuntimeException | Error e) {
+            trace.failed(strategy, started, e);
+            throw e;
+        }
+    }
+
     // -- still (WIC) vs animated AVIF/HEIC (Media Foundation) ----------------
     //
     // For an animated AVIF/HEIC the WIC still sniff matches but only the moov
@@ -272,18 +314,56 @@ public final class WindowsMediaFacade implements MediaFacade {
         return videoProbe(file, vi, audioInfo(file));
     }
 
-    private VisualResult mfVideoVisual(Path file) {
-        VideoInfo vi = requireAnimationTrack(file);
+    private VisualResult mfVideoVisual(Path file, MediaEngineTrace.Recorder trace) {
+        long probeStarted = trace.beginAttempt();
+        VideoInfo vi;
+        try {
+            vi = requireAnimationTrack(file);
+        } catch (RuntimeException | Error failure) {
+            trace.failed("Media Foundation animation probe", probeStarted, failure);
+            throw failure;
+        }
+        trace.succeeded("Media Foundation animation probe", probeStarted,
+                vi.width() + "×" + vi.height());
         long durationMs = vi.durationMillis();
         long posterMs = durationMs > 0 ? (long) (durationMs * 0.1) : 0;
         try (Arena arena = Arena.ofConfined()) {
             DecodedImage<PixelFormat> frame =
-                    MediaFoundation.extractFrame(arena, file.toString(), posterMs);
+                    MediaFoundation.extractFrame(
+                            arena, file.toString(), posterMs, 0,
+                            attempt -> recordMfAttempt(trace, attempt));
             return new VisualResult(videoProbe(file, vi, audioInfo(file)),
                     Optional.of(toRaster(frame)));
         } catch (RuntimeException e) {
             throw new MediaException("windows-native: cannot decode animation frame "
                     + file.getFileName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    private static void recordMfAttempt(
+            MediaEngineTrace.Recorder trace,
+            MediaFoundation.FrameDecodeAttempt attempt) {
+        trace.record(
+                attempt.strategy(),
+                attempt.succeeded()
+                        ? MediaEngineTrace.Outcome.SUCCEEDED
+                        : MediaEngineTrace.Outcome.FAILED,
+                attempt.elapsedNanos(),
+                attempt.detail());
+    }
+
+    private static <T> T traced(
+            MediaEngineTrace.Recorder trace,
+            String strategy,
+            Supplier<T> action) {
+        long started = trace.beginAttempt();
+        try {
+            T result = action.get();
+            trace.succeeded(strategy, started, "Foreground visual");
+            return result;
+        } catch (RuntimeException | Error failure) {
+            trace.failed(strategy, started, failure);
+            throw failure;
         }
     }
 

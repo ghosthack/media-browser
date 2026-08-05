@@ -51,6 +51,12 @@ final class WindowsVideoStream implements VideoStream {
     }
 
     @Override
+    public String diagnostics() {
+        return "Media Foundation SourceReader/MFT; BGRA output; "
+                + width() + "×" + height();
+    }
+
+    @Override
     public void close() {
         stream.close();
     }

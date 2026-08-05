@@ -33,6 +33,21 @@ public final class MediaFoundation {
 
     private MediaFoundation() {}
 
+    /** One poster extraction decision or strategy, reported for diagnostics. */
+    public record FrameDecodeAttempt(
+            String strategy,
+            boolean succeeded,
+            long elapsedNanos,
+            String detail) {}
+
+    /** Observer for the ordered Source Reader/manual-MFT attempt chain. */
+    @FunctionalInterface
+    public interface FrameDecodeObserver {
+        void attempted(FrameDecodeAttempt attempt);
+    }
+
+    private static final FrameDecodeObserver NO_FRAME_DECODE_OBSERVER = attempt -> { };
+
     // -- OS guard / debug -----------------------------------------------------
 
     private static final boolean IS_WINDOWS = Platform.IS_WINDOWS;
@@ -828,7 +843,7 @@ public final class MediaFoundation {
      */
     public static DecodedImage<PixelFormat> extractFrame(Arena arena, String path,
                                                                    long timeMillis) {
-        return extractFrame(arena, path, timeMillis, 0);
+        return extractFrame(arena, path, timeMillis, 0, NO_FRAME_DECODE_OBSERVER);
     }
 
     /**
@@ -856,6 +871,21 @@ public final class MediaFoundation {
      */
     public static DecodedImage<PixelFormat> extractFrame(Arena arena, String path,
                                                                    long timeMillis, int maxEdge) {
+        return extractFrame(
+                arena, path, timeMillis, maxEdge, NO_FRAME_DECODE_OBSERVER);
+    }
+
+    /**
+     * Diagnostic-aware poster extraction. The observer receives output-format,
+     * downscale, Source Reader, and manual-MFT attempts in execution order and
+     * cannot affect decode behavior.
+     */
+    public static DecodedImage<PixelFormat> extractFrame(
+            Arena arena,
+            String path,
+            long timeMillis,
+            int maxEdge,
+            FrameDecodeObserver observer) {
         ensureAvailable();
         // Source Reader first: lets Windows choose the right decoder for any
         // codec (H.264, HEVC, VP8/VP9, AV1, etc.).  Falls back to the manual
@@ -863,15 +893,42 @@ public final class MediaFoundation {
         // Set system property "panama.media.manualMFTOnly=true" to skip the
         // Source Reader and use the manual H.264 pipeline exclusively.
         if (Boolean.getBoolean("panama.media.manualMFTOnly")) {
-            return extractFrameManualMFTPipeline(arena, path, timeMillis, maxEdge);
-        }
-        try {
-            return extractFrameImpl(arena, path, timeMillis, maxEdge);
-        } catch (Exception e) {
-            if (DEBUG) System.err.println("[MF] SourceReader failed for " + path + ": " + e.getMessage());
+            long started = System.nanoTime();
             try {
-                return extractFrameManualMFTPipeline(arena, path, timeMillis, maxEdge);
+                DecodedImage<PixelFormat> frame =
+                        extractFrameManualMFTPipeline(
+                                arena, path, timeMillis, maxEdge, observer);
+                reportFrameDecodeAttempt(observer, "Manual MFT pipeline", true,
+                        started, "Forced by panama.media.manualMFTOnly");
+                return frame;
+            } catch (RuntimeException failure) {
+                reportFrameDecodeAttempt(observer, "Manual MFT pipeline", false,
+                        started, failureSummary(failure));
+                throw failure;
+            }
+        }
+        long sourceReaderStarted = System.nanoTime();
+        try {
+            DecodedImage<PixelFormat> frame =
+                    extractFrameImpl(arena, path, timeMillis, maxEdge, observer);
+            reportFrameDecodeAttempt(observer, "Source Reader", true,
+                    sourceReaderStarted, "RGB32 or NV12 output");
+            return frame;
+        } catch (Exception e) {
+            reportFrameDecodeAttempt(observer, "Source Reader", false,
+                    sourceReaderStarted, failureSummary(e));
+            if (DEBUG) System.err.println("[MF] SourceReader failed for " + path + ": " + e.getMessage());
+            long manualStarted = System.nanoTime();
+            try {
+                DecodedImage<PixelFormat> frame =
+                        extractFrameManualMFTPipeline(
+                                arena, path, timeMillis, maxEdge, observer);
+                reportFrameDecodeAttempt(observer, "Manual MFT pipeline", true,
+                        manualStarted, "Source Reader demux + decoder MFT + NV12 conversion");
+                return frame;
             } catch (Exception manualEx) {
+                reportFrameDecodeAttempt(observer, "Manual MFT pipeline", false,
+                        manualStarted, failureSummary(manualEx));
                 RuntimeException ex = new RuntimeException(
                         "extractFrame failed (SourceReader + manual MFT): " + path, manualEx);
                 ex.addSuppressed(e);
@@ -880,15 +937,50 @@ public final class MediaFoundation {
         }
     }
 
-    private static DecodedImage<PixelFormat> extractFrameImpl(Arena arena, String path,
-                                                                   long timeMillis, int maxEdge) {
+    private static void reportFrameDecodeAttempt(
+            FrameDecodeObserver observer,
+            String strategy,
+            boolean succeeded,
+            long startedNanos,
+            String detail) {
+        if (observer == null) return;
+        try {
+            observer.attempted(new FrameDecodeAttempt(
+                    strategy,
+                    succeeded,
+                    Math.max(0L, System.nanoTime() - startedNanos),
+                    detail));
+        } catch (Throwable ignored) {
+            // Diagnostics must never change media behavior.
+        }
+    }
+
+    private static String failureSummary(Throwable failure) {
+        Throwable root = failure;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        String message = root.getMessage();
+        String text = root.getClass().getSimpleName()
+                + (message == null || message.isBlank() ? "" : ": " + message);
+        text = text.replace('\n', ' ').replace('\r', ' ').trim();
+        return text.length() <= 180 ? text : text.substring(0, 179) + "…";
+    }
+
+    private static DecodedImage<PixelFormat> extractFrameImpl(
+            Arena arena,
+            String path,
+            long timeMillis,
+            int maxEdge,
+            FrameDecodeObserver observer) {
         ensureAvailable();
         try (Arena temp = Arena.ofConfined()) {
             ensureComReady();
             ensurePlatformStarted();
             SourceReaderHandles srh = createSourceReader(temp, path);
             try {
-                return decodeFrame(arena, temp, srh.reader(), timeMillis, maxEdge);
+                return decodeFrame(
+                        arena, temp, srh.reader(), timeMillis, maxEdge, observer);
             } finally {
                 releaseSourceReader(srh);
             }
@@ -1944,7 +2036,9 @@ public final class MediaFoundation {
     private static DecodedImage<PixelFormat> decodeFrame(Arena arena, Arena temp,
                                                                    MemorySegment reader,
                                                                    long timeMillis,
-                                                                   int maxEdge) throws Throwable {
+                                                                   int maxEdge,
+                                                                   FrameDecodeObserver observer)
+            throws Throwable {
         // Container display rotation, baked into the returned poster so Windows
         // tiles are upright (matching playback / the other backends). Best-effort.
         int qcw = readRotationCw(temp, reader);
@@ -1969,32 +2063,53 @@ public final class MediaFoundation {
                     MF_MT_MAJOR_TYPE, MFMediaType_Video);
             check(hr, "SetGUID(MF_MT_MAJOR_TYPE)");
 
-            // Try RGB32 first; fall back to NV12 if the codec rejects it
-            hr = (int) IMFAttributes_SetGUID.invokeExact(
-                    vtable(mediaType, 24), mediaType,
-                    MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-            check(hr, "SetGUID(MF_MT_SUBTYPE=RGB32)");
-
-            hr = (int) IMFSourceReader_SetCurrentMediaType.invokeExact(
-                    vtable(reader, 7), reader,
-                    MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                    MemorySegment.NULL,
-                    mediaType);
-            if (hr == E_INVALIDARG) {
-                // Codec doesn't support RGB32 — retry with NV12
+            // Try RGB32 first; fall back to NV12 if the codec rejects it. Both
+            // decisions are exposed because this is the inner compatibility
+            // chain hidden beneath the Source Reader strategy.
+            String outputStrategy = "Source Reader RGB32 output";
+            long outputStarted = System.nanoTime();
+            try {
                 hr = (int) IMFAttributes_SetGUID.invokeExact(
                         vtable(mediaType, 24), mediaType,
-                        MF_MT_SUBTYPE, MFVideoFormat_NV12);
-                check(hr, "SetGUID(MF_MT_SUBTYPE=NV12)");
+                        MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+                check(hr, "SetGUID(MF_MT_SUBTYPE=RGB32)");
+
                 hr = (int) IMFSourceReader_SetCurrentMediaType.invokeExact(
                         vtable(reader, 7), reader,
                         MF_SOURCE_READER_FIRST_VIDEO_STREAM,
                         MemorySegment.NULL,
                         mediaType);
-                check(hr, "SetCurrentMediaType(NV12)");
-                useNV12 = true;
-            } else {
-                check(hr, "SetCurrentMediaType(RGB32)");
+                if (hr == E_INVALIDARG) {
+                    reportFrameDecodeAttempt(
+                            observer, outputStrategy, false, outputStarted,
+                            "E_INVALIDARG; retrying NV12 output");
+                    outputStrategy = "Source Reader NV12 output";
+                    outputStarted = System.nanoTime();
+                    hr = (int) IMFAttributes_SetGUID.invokeExact(
+                            vtable(mediaType, 24), mediaType,
+                            MF_MT_SUBTYPE, MFVideoFormat_NV12);
+                    check(hr, "SetGUID(MF_MT_SUBTYPE=NV12)");
+                    hr = (int) IMFSourceReader_SetCurrentMediaType.invokeExact(
+                            vtable(reader, 7), reader,
+                            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                            MemorySegment.NULL,
+                            mediaType);
+                    check(hr, "SetCurrentMediaType(NV12)");
+                    useNV12 = true;
+                    reportFrameDecodeAttempt(
+                            observer, outputStrategy, true, outputStarted,
+                            "Selected; converted to BGRA in Java");
+                } else {
+                    check(hr, "SetCurrentMediaType(RGB32)");
+                    reportFrameDecodeAttempt(
+                            observer, outputStrategy, true, outputStarted,
+                            "Selected");
+                }
+            } catch (Throwable failure) {
+                reportFrameDecodeAttempt(
+                        observer, outputStrategy, false, outputStarted,
+                        failureSummary(failure));
+                throw failure;
             }
 
             // Native poster downscale (Source Reader path): the reader has video
@@ -2004,6 +2119,7 @@ public final class MediaFoundation {
             // the working poster path never regresses. GetCurrentMediaType below
             // reads whatever size actually took effect.
             if (reductionRequested) {
+                long downscaleStarted = System.nanoTime();
                 int shr = (int) IMFAttributes_SetUINT64.invokeExact(
                         vtable(mediaType, 22), mediaType,
                         MF_MT_FRAME_SIZE, reducedDisplay.packed());
@@ -2013,12 +2129,27 @@ public final class MediaFoundation {
                             MF_SOURCE_READER_FIRST_VIDEO_STREAM,
                             MemorySegment.NULL, mediaType);
                     reductionAccepted = !failed(rhr);
+                    reportFrameDecodeAttempt(
+                            observer,
+                            "Source Reader native downscale",
+                            reductionAccepted,
+                            downscaleStarted,
+                            reductionAccepted
+                                    ? reducedDisplay.width() + "×" + reducedDisplay.height()
+                                    : "Rejected; decoding full size");
                     if (failed(rhr) && DEBUG) {
                         System.err.println(
                                 "[MF] SR downscale hint rejected (0x"
                                         + Integer.toHexString(rhr)
                                         + "); full size");
                     }
+                } else {
+                    reportFrameDecodeAttempt(
+                            observer,
+                            "Source Reader native downscale",
+                            false,
+                            downscaleStarted,
+                            "Frame-size attribute rejected; decoding full size");
                 }
             }
         } finally {
@@ -2688,7 +2819,11 @@ public final class MediaFoundation {
     * H.264 decoder MFT → NV12 → BGRA.
      */
     private static DecodedImage<PixelFormat> extractFrameManualMFTPipeline(
-            Arena arena, String path, long timeMillis, int maxEdge) {
+            Arena arena,
+            String path,
+            long timeMillis,
+            int maxEdge,
+            FrameDecodeObserver observer) {
         try (Arena temp = Arena.ofConfined()) {
             Ole32.coInitializeEx();
             try {
@@ -2766,14 +2901,55 @@ public final class MediaFoundation {
                             // Find a decoder for the stream's native subtype via MFTEnumEx.
                             // This handles H.264, VP9, HEVC, AV1, etc. — whatever codec
                             // is installed, including Store-distributed (field-of-use) MFTs.
-                            decoder = activateDecoderForType(temp, nativeType);
+                            long decoderStarted = System.nanoTime();
+                            try {
+                                decoder = activateDecoderForType(temp, nativeType);
+                            } catch (Throwable failure) {
+                                reportFrameDecodeAttempt(
+                                        observer,
+                                        "MFT decoder discovery",
+                                        false,
+                                        decoderStarted,
+                                        failureSummary(failure));
+                                throw failure;
+                            }
                             if (MemorySegment.NULL.equals(decoder)) {
+                                reportFrameDecodeAttempt(
+                                        observer,
+                                        "MFT decoder discovery",
+                                        false,
+                                        decoderStarted,
+                                        "No matching installed decoder; trying Microsoft H.264 MFT");
                                 // Fall back to hardcoded H.264 decoder
+                                long h264Started = System.nanoTime();
                                 MemorySegment ppDec = temp.allocate(ValueLayout.ADDRESS);
-                                hr = (int) Ole32.coCreateInstance(
-                                        CLSID_CMSH264DecoderMFT, 1, IID_IMFTransform, ppDec);
-                                check(hr, "CoCreateInstance(H.264 decoder)");
-                                decoder = ppDec.get(ValueLayout.ADDRESS, 0);
+                                try {
+                                    hr = (int) Ole32.coCreateInstance(
+                                            CLSID_CMSH264DecoderMFT, 1, IID_IMFTransform, ppDec);
+                                    check(hr, "CoCreateInstance(H.264 decoder)");
+                                    decoder = ppDec.get(ValueLayout.ADDRESS, 0);
+                                    reportFrameDecodeAttempt(
+                                            observer,
+                                            "Microsoft H.264 decoder MFT",
+                                            true,
+                                            h264Started,
+                                            "Created directly");
+                                } catch (Throwable failure) {
+                                    reportFrameDecodeAttempt(
+                                            observer,
+                                            "Microsoft H.264 decoder MFT",
+                                            false,
+                                            h264Started,
+                                            failureSummary(failure));
+                                    throw failure;
+                                }
+                            } else {
+                                reportFrameDecodeAttempt(
+                                        observer,
+                                        "MFT decoder discovery",
+                                        true,
+                                        decoderStarted,
+                                        "Matched installed decoder for stream subtype");
                             }
 
                             hr = (int) IMFTransform_ProcessMessage.invokeExact(
@@ -2798,6 +2974,7 @@ public final class MediaFoundation {
                             // SetOutputType MUST fall back to a fresh full-size
                             // type — the working poster path never regresses.
                             boolean hinted = false;
+                            long downscaleStarted = System.nanoTime();
                             if (reductionRequested) {
                                 int shr = (int) IMFAttributes_SetUINT64.invokeExact(
                                         vtable(decoderOutputType, 22),
@@ -2821,7 +2998,17 @@ public final class MediaFoundation {
                                 check(hr, "Decoder GetOutputAvailableType (full-size fallback)");
                                 decoderOutputType = ppFull.get(ValueLayout.ADDRESS, 0);
                                 hr = (int) IMFTransform_SetOutputType.invokeExact(
-                                        vtable(decoder, 16), decoder, 0, decoderOutputType, 0);
+                                    vtable(decoder, 16), decoder, 0, decoderOutputType, 0);
+                            }
+                            if (reductionRequested) {
+                                reportFrameDecodeAttempt(
+                                        observer,
+                                        "Manual MFT native downscale",
+                                        reductionAccepted,
+                                        downscaleStarted,
+                                        reductionAccepted
+                                                ? reducedDisplay.width() + "×" + reducedDisplay.height()
+                                                : "Rejected; decoding full size");
                             }
                             check(hr, "Decoder SetOutputType");
 

@@ -265,6 +265,9 @@ public interface FfmpegBindings {
     /** The {@code int linesize[]} stride array, for {@code sws_scale}. */
     MemorySegment frameLinesize(MemorySegment frame);
 
+    /** Embedded ICC profile attached to the decoded frame as side data, or null. */
+    byte[] frameIccProfile(MemorySegment frame);
+
     long frameBestEffortTimestamp(MemorySegment frame);
 
     long framePts(MemorySegment frame);

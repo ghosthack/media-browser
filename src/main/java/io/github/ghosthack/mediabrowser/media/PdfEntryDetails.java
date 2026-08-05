@@ -52,13 +52,23 @@ final class PdfEntryDetails {
         return entry(path)
                 .filter(PdfEntry::isRaster)
                 .filter(pdf -> {
-                    List<PdfFilter.Decoder> stack =
-                            pdf.raster().orElseThrow().decoderStack();
+                    PdfRasterDescriptor raster = pdf.raster().orElseThrow();
+                    List<PdfFilter.Decoder> stack = raster.decoderStack();
                     return stack.equals(List.of(PdfFilter.Decoder.JPEG))
                             || stack.equals(List.of(PdfFilter.Decoder.JPEG_2000))
-                            || stack.equals(List.of(PdfFilter.Decoder.JBIG2));
+                            || stack.equals(List.of(PdfFilter.Decoder.JBIG2))
+                            || isFlateWrappedStandaloneRaster(raster);
                 })
                 .map(pdf -> MediaKind.IMAGE);
+    }
+
+    private static boolean isFlateWrappedStandaloneRaster(PdfRasterDescriptor raster) {
+        List<PdfFilter.Decoder> stack = raster.decoderStack();
+        if (stack.size() != 2 || stack.getFirst() != PdfFilter.Decoder.FLATE) return false;
+        Object predictor = raster.filters().getFirst().parameters().get("Predictor");
+        if (predictor instanceof Number number && number.intValue() != 1) return false;
+        return stack.getLast() == PdfFilter.Decoder.JPEG
+                || stack.getLast() == PdfFilter.Decoder.JPEG_2000;
     }
 
     static MediaProbe preserveProbe(Path source, MediaProbe decoded) {
@@ -82,7 +92,8 @@ final class PdfEntryDetails {
                 decoded.audioCodec(),
                 decoded.sampleRate(),
                 decoded.channels(),
-                pixelDescription(raster));
+                pixelDescription(raster),
+                decoded.colorProfile());
     }
 
     static Metadata preserveMetadata(Path source, Metadata decoded) {
@@ -153,7 +164,8 @@ final class PdfEntryDetails {
         return new MediaProbe(source, decoded.kind(), decoded.container(), decoded.fileSize(),
                 decoded.durationMicros(), decoded.bitRate(), decoded.width(), decoded.height(),
                 decoded.videoCodec(), decoded.frameRate(), decoded.audioCodec(),
-                decoded.sampleRate(), decoded.channels(), decoded.pixelDescription());
+                decoded.sampleRate(), decoded.channels(), decoded.pixelDescription(),
+                decoded.colorProfile());
     }
 
     private static Metadata remapPath(Path source, Metadata decoded) {

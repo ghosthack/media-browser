@@ -27,8 +27,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * to native code). An entry inside any mounted container has no OS path, so the one
  * honest way to decode it is to write the bytes somewhere real first. A mounted
  * entry may also offer a presentation stream when its physical bytes are a
- * container-native encoding (currently PDF/JBIG2); that private rendition is
- * materialized here without changing the entry's NIO bytes or identity. Doing
+ * container-native encoding (for example PDF/JBIG2 or a zlib-wrapped JPEG);
+ * that private rendition is materialized here without changing the entry's NIO
+ * bytes or identity. Doing
  * it at this single choke point keeps all six backends free of archive awareness
  * and keeps behaviour identical inside and outside a container.</p>
  *

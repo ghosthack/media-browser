@@ -218,6 +218,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final ObjectProperty<DetectionMode> detectionProp = new SimpleObjectProperty<>();
     // docs/empty-states.md listing filters. Shared by this window and the
     // mosaic, since both draw from the same MediaService listing.
+    private final BooleanProperty showHiddenFilesProp = new SimpleBooleanProperty(true);
     private final BooleanProperty ignoreJunkProp = new SimpleBooleanProperty(true);
     private final BooleanProperty hideEmptyFilesProp = new SimpleBooleanProperty();
     private final BooleanProperty hideEmptyFoldersProp = new SimpleBooleanProperty();
@@ -258,7 +259,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         this.rotationStore = rotationStore;
         this.aaeStore = aaeStore;
         this.keys = KeyScheme.fromSettings(settings);
-        this.diagnosticsPanel = new DiagnosticsPanel(service::thumbnailStats);
+        this.diagnosticsPanel = new DiagnosticsPanel(service);
         this.mosaic = new MosaicWindow(shell, service, viewer, settings, rotationStore, aaeStore,
                 sortKeyProp, sortDescendingProp);
         // Navigating a folder / .. tile in the mosaic drives the shared location
@@ -525,13 +526,20 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         detectionProp.set(detection);
         detectionProp.addListener((o, a, v) -> { if (v != null) setDetectionMode(v); });
 
+        service.setListingShowHidden(settings.listingShowHiddenFiles());
         service.setListingIgnoreJunk(settings.listingIgnoreJunkFiles());
         service.setListingHideEmptyFiles(settings.listingHideEmptyFiles());
         service.setListingHideEmptyFolders(settings.listingHideEmptyFolders());
+        showHiddenFilesProp.set(settings.listingShowHiddenFiles());
         ignoreJunkProp.set(settings.listingIgnoreJunkFiles());
         hideEmptyFilesProp.set(settings.listingHideEmptyFiles());
         hideEmptyFoldersProp.set(settings.listingHideEmptyFolders());
         collapseChainsProp.set(settings.listingCollapseFolderChains());
+        showHiddenFilesProp.addListener((o, a, v) -> {
+            service.setListingShowHidden(v);
+            settings.setListingShowHiddenFiles(v);
+            relist();
+        });
         ignoreJunkProp.addListener((o, a, v) -> {
             service.setListingIgnoreJunk(v);
             settings.setListingIgnoreJunkFiles(v);
@@ -1131,13 +1139,20 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // folder on the disk is noise rather than honesty.
         var hidden = currentDir == null ? null : service.hiddenIn(currentDir);
         if (hidden != null && hidden.anyOptIn()) {
-            var parts = new ArrayList<String>(2);
-            if (hidden.emptyFiles() > 0) parts.add(hidden.emptyFiles() + " empty");
+            var parts = new ArrayList<String>(3);
+            if (hidden.hiddenEntries() > 0) {
+                parts.add(hidden.hiddenEntries()
+                        + (hidden.hiddenEntries() == 1 ? " hidden item" : " hidden items"));
+            }
+            if (hidden.emptyFiles() > 0) {
+                parts.add(hidden.emptyFiles()
+                        + (hidden.emptyFiles() == 1 ? " empty file" : " empty files"));
+            }
             if (hidden.emptyFolders() > 0) {
                 parts.add(hidden.emptyFolders()
                         + (hidden.emptyFolders() == 1 ? " empty folder" : " empty folders"));
             }
-            text += " · " + String.join(", ", parts) + " hidden";
+            text += " · " + String.join(", ", parts);
         }
         countLabel.setText(text);
         updateEmptyState();
@@ -1169,7 +1184,22 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             return;
         }
         var hidden = currentDir == null ? null : service.hiddenIn(currentDir);
-        if (hidden != null && hidden.junkFiles() > 0) {
+        if (hidden != null && hidden.anyOptIn()) {
+            var parts = new ArrayList<String>(3);
+            if (hidden.hiddenEntries() > 0) {
+                parts.add(hidden.hiddenEntries()
+                        + (hidden.hiddenEntries() == 1 ? " hidden item" : " hidden items"));
+            }
+            if (hidden.emptyFiles() > 0) {
+                parts.add(hidden.emptyFiles()
+                        + (hidden.emptyFiles() == 1 ? " empty file" : " empty files"));
+            }
+            if (hidden.emptyFolders() > 0) {
+                parts.add(hidden.emptyFolders()
+                        + (hidden.emptyFolders() == 1 ? " empty folder" : " empty folders"));
+            }
+            emptyStateLabel.setText("Empty folder (" + String.join(", ", parts) + ")");
+        } else if (hidden != null && hidden.junkFiles() > 0) {
             // Never a bare "Empty" that a Finder window would contradict.
             emptyStateLabel.setText("Empty folder (" + hidden.junkFiles()
                     + (hidden.junkFiles() == 1 ? " system file)" : " system files)"));
@@ -1206,10 +1236,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * the mosaic and the viewer each install one (each its own instance, so
      * macOS scopes the accelerators to the focused window); every stateful item
      * binds to the shared {@code *Prop} fields and the satellite windows'
-     * properties, keeping all three bars in lock-step. {@code owner} only
-     * changes the Mosaic and Viewer menus — their items get accelerators and
-     * stay enabled in their own window's bar, while the other bars leave them
-     * shortcut-free and disabled until that window is open.
+     * properties, keeping all three bars in lock-step. {@code owner} selects
+     * the location chrome shown in Show and adds only that view's contextual
+     * command menu (Mosaic or Viewer).
      */
     private MenuBar buildMenuBar(MenuOwner owner) {
         // Accelerators use the logical modifier scheme (Settings ▸ Keys): modifier 1
@@ -1219,13 +1248,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // accelerators to whichever window is focused.
         var fileMenu = new Menu("_File", null,
                 action("_Open Folder\u2026", keys.mod1(KeyCode.O), this::chooseDirectory),
-                new SeparatorMenuItem(),
                 buildMoveItem(owner),
                 new SeparatorMenuItem(),
                 action("_Settings\u2026", keys.mod1(KeyCode.COMMA), this::showSettings),
                 new SeparatorMenuItem(),
                 buildCloseWindowItem(owner),
-                new SeparatorMenuItem(),
                 action("E_xit", keys.mod1(KeyCode.Q), Platform::exit));
 
         var back = action("_Back", keys.mod1(KeyCode.LEFT), this::goBack);
@@ -1289,43 +1316,40 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             case MOSAIC -> mosaic.menuBarVisibleProperty();
             case VIEWER -> viewer.menuBarVisibleProperty();
         };
-        // The mosaic's address bar is its own location strip; the viewer has
-        // none, so its bar's item acts on the browser's (like Action Log).
-        BooleanProperty showAddressProp = switch (owner) {
-            case MAIN, VIEWER -> addressVisibleProp;
-            case MOSAIC -> mosaic.locationBarVisibleProperty();
-        };
-        // The nav tree is browser-only chrome the mosaic never shows, so its
-        // item is greyed out there (the viewer keeps it, acting on the
-        // browser's, like Address Bar).
-        var navTreeItem = boundCheck("_Nav Tree Panel", treeVisibleProp,
-                keys.mod1(KeyCode.E));
-        navTreeItem.setDisable(owner == MenuOwner.MOSAIC);
         var detectGroup = new ToggleGroup();
-        var showMenu = new Menu("_Show", null,
+        var showMenu = new Menu("_Show");
+        showMenu.getItems().addAll(
                 boundCheck("_Toolbar", showToolbarProp, keys.mod1(KeyCode.T)),
                 boundCheck("_Status Bar", showStatusProp, keys.mod1(KeyCode.S)),
                 boundCheck("_Info Panel", showInfoProp, keys.mod1(KeyCode.I)),
                 boundCheck("_Metadata", showMetadataProp, keys.mod1(KeyCode.D)),
                 boundCheck("Menu _Bar", showMenuBarProp, keys.mod1(KeyCode.BACK_SLASH)),
-                new SeparatorMenuItem(),
-                // modifier1+Shift+L toggles the bar that Go to Location
-                // (modifier1+L) focuses — the mosaic's own location strip in
-                // the mosaic bar, the browser's address bar everywhere else.
-                boundCheck("_Address Bar", showAddressProp, keys.mod1Shift(KeyCode.L)),
-                navTreeItem,
+                new SeparatorMenuItem());
+        // Expose only location chrome the current view actually owns. The
+        // viewer has neither a location field nor a navigation tree.
+        switch (owner) {
+            case MAIN -> showMenu.getItems().addAll(
+                    boundCheck("_Address Bar", addressVisibleProp, keys.mod1Shift(KeyCode.L)),
+                    boundCheck("_Nav Tree Panel", treeVisibleProp, keys.mod1(KeyCode.E)));
+            case MOSAIC -> showMenu.getItems().add(
+                    boundCheck("_Location Bar", mosaic.locationBarVisibleProperty(),
+                            keys.mod1Shift(KeyCode.L)));
+            case VIEWER -> { }
+        }
+        showMenu.getItems().addAll(
                 boundCheck("Action _Log", showActionLogProp, keys.mod1(KeyCode.J)),
                 boundCheck("Dia_gnostics", showDiagnosticsProp, keys.mod1(KeyCode.G)),
                 new SeparatorMenuItem(),
                 header("Listing filter"),
-                boundCheck("_Viewable Media", showViewableProp),
-                boundCheck("Non-viewable _Files", showNonViewableProp),
-                boundCheck("Fol_ders", showDirsProp),
+                boundCheck("Show _Viewable Media", showViewableProp),
+                boundCheck("Show _Non-viewable Media", showNonViewableProp),
+                boundCheck("Show _Folders", showDirsProp),
+                boundCheck("Show _Hidden Files", showHiddenFilesProp),
                 // docs/empty-states.md. "System files" on screen, "junk" in the
                 // code: a menu item should not call a user's disk junk.
-                boundCheck("Hide S_ystem Files", ignoreJunkProp),
-                boundCheck("Hide _Empty Files", hideEmptyFilesProp),
-                boundCheck("Hide Empty F_olders", hideEmptyFoldersProp),
+                inverseBoundCheck("Show S_ystem Files", ignoreJunkProp),
+                inverseBoundCheck("Show _Empty Files", hideEmptyFilesProp),
+                inverseBoundCheck("Show Empty F_olders", hideEmptyFoldersProp),
                 boundCheck("_Collapse Folder Chains", collapseChainsProp),
                 new SeparatorMenuItem(),
                 header("Detection"),
@@ -1336,12 +1360,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 new SeparatorMenuItem(),
                 boundCheck("_Keep Focus on Open", keepFocusProp));
 
-        // Order: the sort key and direction (folder placement — Top/Bottom/Natural —
+        // Sort key and direction (folder placement — Top/Bottom/Natural —
         // is not yet modelled here).
         var keyGroup = new ToggleGroup();
         var dirGroup = new ToggleGroup();
-        var orderMenu = new Menu("_Order", null,
-                header("Sort"),
+        var sortMenu = new Menu("S_ort", null,
                 objRadio("By _Name", SortKey.NAME, sortKeyProp, keyGroup),
                 objRadio("By E_xtension", SortKey.EXTENSION, sortKeyProp, keyGroup),
                 objRadio("By Si_ze", SortKey.SIZE, sortKeyProp, keyGroup),
@@ -1353,10 +1376,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var helpMenu = new Menu("_Help", null,
                 action("_About Media Browser", null, this::showAbout));
 
-        return new MenuBar(fileMenu, goMenu, showMenu, orderMenu,
-                buildMosaicMenu(owner == MenuOwner.MOSAIC),
-                buildViewerMenu(owner == MenuOwner.VIEWER),
-                buildWindowMenu(owner), helpMenu);
+        var bar = new MenuBar(fileMenu, goMenu, showMenu, sortMenu);
+        // View-specific commands belong only to the view that can execute them;
+        // Window remains the shared place for switching views.
+        if (owner == MenuOwner.MOSAIC) bar.getMenus().add(buildMosaicMenu());
+        if (owner == MenuOwner.VIEWER) bar.getMenus().add(buildViewerMenu());
+        bar.getMenus().addAll(buildWindowMenu(owner), helpMenu);
+        return bar;
     }
 
     /**
@@ -1445,14 +1471,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     }
 
     /** The Mosaic menu, mirroring the mosaic's actions; see {@link #buildMenuBar}. */
-    private Menu buildMosaicMenu(boolean forMosaic) {
-        // No accelerators here: mod1+T lives on Show ▸ Toolbar and mod1+Shift+L
-        // on Show ▸ Address Bar, which bind per-window (to the mosaic's toolbar
-        // and location strip in the mosaic bar), so each chord is owned in one
-        // place and never double-binds. These items stay as click-access
-        // duplicates bound to the same properties.
-        var showToolbar = boundCheck("Show _Toolbar", mosaic.toolbarVisibleProperty());
-        var showLocationBar = boundCheck("Show Location _Bar", mosaic.locationBarVisibleProperty());
+    private Menu buildMosaicMenu() {
         var fpGroup = new ToggleGroup();
         var folderPreviews = new Menu("_Folder Previews", null,
                 objRadio("None", 0, folderPreviewGridProp, fpGroup),
@@ -1495,33 +1514,26 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 action("Open _Selected", null, mosaic::openSelectedItem),
                 new SeparatorMenuItem(),
                 boundCheck("S_eamless", mosaic.seamlessProperty(),
-                        forMosaic ? keys.mod1(KeyCode.B) : null),
+                        keys.mod1(KeyCode.B)),
                 action("_Larger Tiles",
-                        forMosaic ? keys.mod1(KeyCode.EQUALS) : null,
+                        keys.mod1(KeyCode.EQUALS),
                         () -> mosaic.nudgeTileSize(32)),
                 action("S_maller Tiles",
-                        forMosaic ? keys.mod1(KeyCode.MINUS) : null,
+                        keys.mod1(KeyCode.MINUS),
                         () -> mosaic.nudgeTileSize(-32)),
+                new SeparatorMenuItem(),
                 folderPreviews,
                 folderGlyph,
-                boundCheck("Mark _Dead Ends", mosaic.emptyReticuleProperty()),
-                boundCheck("Check Whole Su_btree", mosaic.barrenCheckProperty()),
                 showThumbnails,
                 fillTiles,
                 tileLabels,
-                autoOpen,
-                keepFocus,
                 selectionAnimation,
                 new SeparatorMenuItem(),
-                showToolbar,
-                showLocationBar,
+                boundCheck("Mark _Dead Ends", mosaic.emptyReticuleProperty()),
+                boundCheck("Check Whole Su_btree", mosaic.barrenCheckProperty()),
                 new SeparatorMenuItem(),
-                action("_Close Mosaic", null, mosaic::closeWindow));
-        // In the other views' bars the mosaic actions only apply while it is on
-        // screen.
-        if (!forMosaic) {
-            menu.disableProperty().bind(shell.isShowing(AppShell.AppView.MOSAIC).not());
-        }
+                autoOpen,
+                keepFocus);
         return menu;
     }
 
@@ -1531,9 +1543,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * (Escape/Enter/arrows/Space/T/S/I/P/F) in a scene event filter that
      * consumes them before any menu accelerator could fire, so these items carry
      * no accelerators and exist for click-access (notably in the macOS system
-     * bar) and cross-window state sync.
+     * bar).
      */
-    private Menu buildViewerMenu(boolean forViewer) {
+    private Menu buildViewerMenu() {
         var playPause = action("Pla_y / Pause", null, viewer::togglePlayback);
         playPause.disableProperty().bind(viewer.playDisabledProperty());
         var scaleGroup = new ToggleGroup();
@@ -1552,12 +1564,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                         loadingProp, loadingGroup),
                 objRadio("_Now Loading", LoadingIndicator.NOW_LOADING,
                         loadingProp, loadingGroup));
-        var panelsMenu = new Menu("_Panels", null,
-                boundCheck("_Info Panel", viewer.infoPanelVisibleProperty()),
-                boundCheck("_Metadata", viewer.metadataPanelVisibleProperty()),
-                boundCheck("_Status Bar", viewer.statusBarVisibleProperty()),
-                boundCheck("_Toolbar", viewer.toolbarVisibleProperty()),
-                boundCheck("P_ins", viewer.pinsVisibleProperty()));
         var menu = new Menu("_Viewer", null,
                 playPause,
                 boundCheck("_Repeat", viewer.repeatProperty()),
@@ -1573,13 +1579,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 objRadio("_1:1", ViewerWindow.ScaleMode.ONE_TO_ONE, scaleProp, scaleGroup),
                 objRadio("_Crop to Fill", ViewerWindow.ScaleMode.CROP_TO_FILL, scaleProp, scaleGroup),
                 new SeparatorMenuItem(),
-                panelsMenu,
+                boundCheck("Show P_ins", viewer.pinsVisibleProperty()),
                 loadingMenu,
                 new SeparatorMenuItem(),
                 boundCheck("F_ull Screen", viewer.fullScreenProperty()));
-        // In the other views' bars the viewer actions only apply once it has
-        // content to act on.
-        if (!forViewer) menu.disableProperty().bind(viewer.hasContentProperty().not());
         return menu;
     }
 
@@ -1593,8 +1596,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      */
     /**
      * The {@code Close Window} item (Cmd/Ctrl+W): hides the bar's own window,
-     * mirroring Escape in the viewer and the {@code Close Mosaic} /
-     * {@code Close Viewer} actions. Each window installs its own menu-bar
+     * mirroring Escape in the viewer. Each window installs its own menu-bar
      * instance, so macOS scopes the accelerator to whichever window is focused
      * and the three copies never double-bind. Hiding the main (primary) window
      * with nothing else showing lets the platform exit, matching its window
@@ -1642,6 +1644,19 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var item = new CheckMenuItem(text);
         if (accel != null) item.setAccelerator(accel);
         item.selectedProperty().bindBidirectional(prop);
+        return item;
+    }
+
+    /**
+     * A positive "Show" check item backed by an existing negative hide/ignore
+     * property. The inverse binding keeps persisted settings and filter
+     * behavior unchanged while making the menu labels read consistently.
+     */
+    private static CheckMenuItem inverseBoundCheck(String text, BooleanProperty hiddenProp) {
+        var item = new CheckMenuItem(text);
+        item.setSelected(!hiddenProp.get());
+        item.selectedProperty().addListener((o, was, selected) -> hiddenProp.set(!selected));
+        hiddenProp.addListener((o, was, hidden) -> item.setSelected(!hidden));
         return item;
     }
 
@@ -2258,7 +2273,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             }
         });
         backendCombo.setValue(MediaBackend.fromSettings(settings.mediaBackend()));
-        var backendRow = new HBox(8, new Label("Media decode backend:"), backendCombo);
+        var backendRow = new HBox(8, new Label("Media engine:"), backendCombo);
         backendRow.setAlignment(Pos.CENTER_LEFT);
 
         // Playback decode policy for the bundled-FFmpeg backends (HwDecode):
