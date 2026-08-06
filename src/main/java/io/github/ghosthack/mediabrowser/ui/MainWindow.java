@@ -126,6 +126,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
+    static final String COMPUTER_LOCATION_NAME = "Computer";
+
     /** The single-window shell hosting this view. */
     private final AppShell shell;
     private final MediaService service;
@@ -137,6 +139,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     /** Shared Apple Photos {@code .AAE} edit store, passed on to the mosaic window. */
     private final AaeStore aaeStore;
     private final MoveController moveController;
+    private final MetadataStripController metadataStripController;
     /** Shared album store (numbered {@code album-NNN.csv} files in the app dir). */
     private final AlbumStore albumStore = new AlbumStore();
 
@@ -173,8 +176,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final ActionLogPanel actionLogPanel;
     private final VBox treePanel;
 
-    private final Deque<Path> backStack = new ArrayDeque<>();
-    private final Deque<Path> forwardStack = new ArrayDeque<>();
+    private final Deque<BrowserLocation> backStack = new ArrayDeque<>();
+    private final Deque<BrowserLocation> forwardStack = new ArrayDeque<>();
     private boolean traversingHistory;
     private Path pendingSelection;
     /** True for one event tick after a click in a focus-bouncing panel; see armFocusBounce(). */
@@ -183,6 +186,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final Typeahead typeahead = new Typeahead();
 
     private Path currentDir;
+    /** Windows-only virtual location above the independent drive roots. */
+    private boolean atComputerLocation;
     /** The current directory-listing failure, shown without removing its {@code ..} escape. */
     private String listingFailureMessage;
     /**
@@ -219,7 +224,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     // docs/empty-states.md listing filters. Shared by this window and the
     // mosaic, since both draw from the same MediaService listing.
     private final BooleanProperty showHiddenFilesProp = new SimpleBooleanProperty(true);
-    private final BooleanProperty ignoreJunkProp = new SimpleBooleanProperty(true);
+    private final BooleanProperty ignoreJunkProp = new SimpleBooleanProperty(false);
     private final BooleanProperty hideEmptyFilesProp = new SimpleBooleanProperty();
     private final BooleanProperty hideEmptyFoldersProp = new SimpleBooleanProperty();
     private final BooleanProperty collapseChainsProp = new SimpleBooleanProperty(true);
@@ -265,6 +270,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // Navigating a folder / .. tile in the mosaic drives the shared location
         // here; the new listing then flows back into the mosaic's grid.
         mosaic.setNavigator(this::navigateAndSync);
+        if (supportsComputerLocation(System.getProperty("os.name"))) {
+            mosaic.setVirtualParentHandler(this::navigateToParent);
+        }
         // Cmd+Left / Cmd+Right in the mosaic step the shared history.
         mosaic.setHistoryHandlers(this::goBack, this::goForward);
 
@@ -280,22 +288,39 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             @Override public void showStatus(String message) { statusLabel.setText(message); }
             @Override public void releaseBeforeMove(List<Path> moving) { viewer.releaseBeforeMove(moving); }
         });
+        this.metadataStripController = new MetadataStripController(service,
+                new MetadataStripController.Host() {
+                    @Override public Stage owner() { return stage(); }
+                    @Override public MoveController.Selection currentSelection() {
+                        return currentMoveSelection();
+                    }
+                    @Override public void refreshAfterStrip(Path firstOutput) {
+                        refreshAfterMove(firstOutput);
+                    }
+                    @Override public void showStatus(String message) { statusLabel.setText(message); }
+                });
 
         // --- navigation tree -------------------------------------------------
         Path fsRoot = Path.of(System.getProperty("user.home")).getRoot();
-        var rootItem = new DirTreeItem(fsRoot);
+        TreeItem<Path> rootItem = navigationTreeRoot(fsRoot);
         rootItem.setExpanded(true);
         tree = new TreeView<>(rootItem);
         tree.setCellFactory(tv -> new TreeCell<>() {
             @Override
             protected void updateItem(Path path, boolean empty) {
                 super.updateItem(path, empty);
-                setText(empty || path == null ? null : displayName(path));
+                setText(empty ? null : path == null ? COMPUTER_LOCATION_NAME : displayName(path));
             }
         });
         tree.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             // skip when mirroring list-driven navigation back into the tree
-            if (sel != null && !sel.getValue().equals(currentDir)) navigate(sel.getValue());
+            if (sel == null) return;
+            Path selected = sel.getValue();
+            if (selected == null) {
+                if (!atComputerLocation) navigateToComputer();
+            } else if (!selected.equals(currentDir)) {
+                navigate(selected);
+            }
         });
         // Committing to a folder (click on a node, or Enter after arrow-key
         // browsing) hands focus to the file list; the disclosure arrow and
@@ -349,6 +374,20 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     targetThisCell();
                     openMove();
                 });
+                var trashItem = new MenuItem(MoveController.trashActionText());
+                trashItem.setAccelerator(keys.moveToTrash());
+                trashItem.setOnAction(e -> {
+                    targetThisCell();
+                    // Let the popup finish hiding before showing confirmation.
+                    Platform.runLater(MainWindow.this::moveToTrash);
+                });
+                var zeroMetadata = new MenuItem("Export as Zero-Metadata Copy\u2026");
+                zeroMetadata.setOnAction(e -> {
+                    targetThisCell();
+                    Platform.runLater(MainWindow.this::exportZeroMetadataCopies);
+                });
+                var exportMenu = new Menu("Export");
+                exportMenu.getItems().add(zeroMetadata);
                 var albumMenu = new AlbumMenu(albumStore, settings,
                         () -> currentMoveSelection().sources(), stage(),
                         statusLabel::setText);
@@ -359,7 +398,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     targetThisCell();
                     albumMenu.refresh();
                 });
-                menu.getItems().addAll(copyPath, moveItem, albumMenu.menu());
+                menu.getItems().addAll(copyPath, moveItem, trashItem, exportMenu, albumMenu.menu());
             }
             /**
              * Make this cell's entry the (sole) selection unless it already
@@ -604,12 +643,17 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var browserCss = MainWindow.class.getResource("browser.css");
         if (browserCss != null) root.getStylesheets().add(browserCss.toExternalForm());
 
-        // Backspace anywhere (except text inputs, which consume it first)
-        // goes to the parent folder. On the view root, so it only sees events
-        // while the browser is the shell's active view.
+        // Bare Backspace goes to the parent folder. On macOS, modifier1+Backspace
+        // is the native Command+Delete move-to-Trash chord; elsewhere bare Delete
+        // performs the same operation. Text inputs retain all editing keys.
         root.addEventHandler(KeyEvent.KEY_PRESSED, e -> {
-            if (e.getCode() == KeyCode.BACK_SPACE
-                    && !(e.getTarget() instanceof TextInputControl)) {
+            if (e.getTarget() instanceof TextInputControl) return;
+            if (keys.isMoveToTrash(e)) {
+                moveToTrash();
+                e.consume();
+            } else if (e.getCode() == KeyCode.BACK_SPACE
+                    && !e.isAltDown() && !e.isControlDown() && !e.isMetaDown()
+                    && !e.isShiftDown()) {
                 navigateToParent();
                 e.consume();
             }
@@ -852,6 +896,24 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     // --- navigation ------------------------------------------------------
 
+    /** A history entry is either a real directory or Windows' virtual Computer view. */
+    private record BrowserLocation(Path directory) {
+        private static final BrowserLocation COMPUTER = new BrowserLocation(null);
+
+        static BrowserLocation directory(Path directory) {
+            return new BrowserLocation(Objects.requireNonNull(directory));
+        }
+
+        boolean isComputer() {
+            return directory == null;
+        }
+    }
+
+    private BrowserLocation currentLocation() {
+        if (atComputerLocation) return BrowserLocation.COMPUTER;
+        return currentDir == null ? null : BrowserLocation.directory(currentDir);
+    }
+
     /** @return whether the target was accepted (the listing itself is async) */
     private boolean navigate(Path dir) {
         // An archive browsed earlier may have been evicted under the mount cap;
@@ -864,12 +926,15 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         Path select = pendingSelection; // entry to re-select once listed
         pendingSelection = null;
         typeahead.reset();
-        if (!traversingHistory && currentDir != null && !target.equals(currentDir)) {
-            backStack.push(currentDir);
+        BrowserLocation previous = currentLocation();
+        BrowserLocation destination = BrowserLocation.directory(target);
+        if (!traversingHistory && previous != null && !destination.equals(previous)) {
+            backStack.push(previous);
             forwardStack.clear();
         }
         updateHistoryItems();
         currentDir = target;
+        atComputerLocation = false;
         listingFailureMessage = null;
         addressField.setText(ArchivePaths.format(target));
         statusLabel.setText("Scanning " + ArchivePaths.format(target) + "…");
@@ -899,7 +964,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                             showListingFailure(target, select, error);
                             return;
                         }
-                        showListing(fast, select);
+                        showListing(withComputerParent(target, fast), select);
                         statusLabel.setText("Scanning " + target + "…"); // sniff still streaming
                         streamReclassification(target, fast, seq);
                     }));
@@ -911,11 +976,42 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                             showListingFailure(target, select, error);
                             return;
                         }
-                        showListing(listing, select);
+                        showListing(withComputerParent(target, listing), select);
                         statusLabel.setText(target.toString());
                     }));
         }
         return true;
+    }
+
+    /**
+     * Shows the Windows-only virtual location above all drive roots. It has no
+     * backing {@link Path}; its rows are the real roots users can enter.
+     */
+    private void navigateToComputer() {
+        if (!supportsComputerLocation(System.getProperty("os.name"))) return;
+
+        BrowserLocation previous = currentLocation();
+        if (!traversingHistory && previous != null && !previous.isComputer()) {
+            backStack.push(previous);
+            forwardStack.clear();
+        }
+        updateHistoryItems();
+
+        Path select = pendingSelection;
+        pendingSelection = null;
+        typeahead.reset();
+        ++scanSequence;             // discard any real-directory scan still in flight
+        reclassQueue.clear();
+        currentDir = null;
+        atComputerLocation = true;
+        listingFailureMessage = null;
+        addressField.setText(COMPUTER_LOCATION_NAME);
+        statusLabel.setText(COMPUTER_LOCATION_NAME);
+        countLabel.setText("");
+        List<Path> roots = FileSystemRoots.discover();
+        refreshComputerTreeRoots(roots);
+        showListing(computerListing(roots), select);
+        selectComputerInTree();
     }
 
     /**
@@ -929,12 +1025,34 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         statusLabel.setText(listingFailureMessage);
     }
 
-    /** A listing containing only {@code ..}, or empty at a filesystem/archive root. */
+    /** A listing containing only {@code ..}, or empty at a non-Windows root. */
     static List<DirEntry> navigationOnlyListing(Path dir) {
         Path parent = ArchivePaths.parentOf(dir);
-        return parent == null
-                ? List.of()
-                : List.of(new DirEntry(parent, DirEntry.Type.PARENT, null, 0, 0));
+        if (parent != null) {
+            return List.of(new DirEntry(parent, DirEntry.Type.PARENT, null, 0, 0));
+        }
+        return withComputerParent(dir, List.of());
+    }
+
+    /** Adds the synthetic {@code ..} row that leads from a Windows drive to Computer. */
+    private static List<DirEntry> withComputerParent(Path dir, List<DirEntry> listing) {
+        return withComputerParent(dir, listing,
+                supportsComputerLocation(System.getProperty("os.name")));
+    }
+
+    static List<DirEntry> withComputerParent(Path dir, List<DirEntry> listing,
+                                              boolean computerSupported) {
+        if (!computerSupported || dir == null || dir.getRoot() == null
+                || !dir.equals(dir.getRoot()) || ArchivePaths.parentOf(dir) != null
+                || listing.stream().anyMatch(entry -> entry.type() == DirEntry.Type.PARENT)) {
+            return listing;
+        }
+        var result = new ArrayList<DirEntry>(listing.size() + 1);
+        // The PARENT action is semantic; its path remains the real drive root
+        // because Computer deliberately has no fake filesystem Path.
+        result.add(new DirEntry(dir, DirEntry.Type.PARENT, null, 0, 0));
+        result.addAll(listing);
+        return List.copyOf(result);
     }
 
     /**
@@ -1033,6 +1151,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * the file list; an invalid path leaves the field focused for fixing.
      */
     private void navigateFromAddress() {
+        if (supportsComputerLocation(System.getProperty("os.name"))
+                && COMPUTER_LOCATION_NAME.equalsIgnoreCase(addressField.getText().trim())) {
+            navigateToComputer();
+            listView.requestFocus();
+            return;
+        }
         // Accepts both a plain path and an archive locator
         // (/discs/photos.iso!/DCIM), mounting the container when needed.
         Path target = ArchivePaths.parse(addressField.getText()).orElse(null);
@@ -1065,10 +1189,19 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * navigates the listing to the current folder's parent. */
     @Override
     public void navigateToParent() {
+        if (atComputerLocation || currentDir == null) return;
         // From an archive root this steps back out to the folder holding the
         // container, rather than dead-ending at a filesystem root.
         Path parent = ArchivePaths.parentOf(currentDir);
-        if (parent == null) return;
+        if (parent == null) {
+            if (supportsComputerLocation(System.getProperty("os.name"))
+                    && currentDir.getRoot() != null
+                    && currentDir.equals(currentDir.getRoot())) {
+                pendingSelection = currentDir;
+                navigateToComputer();
+            }
+            return;
+        }
         pendingSelection = ArchivePaths.hostArchive(currentDir)
                 .filter(archive -> ArchivePaths.isArchiveRoot(currentDir))
                 .orElse(currentDir);   // land on the archive we came out of
@@ -1077,22 +1210,25 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     private void goBack() {
         if (backStack.isEmpty()) return;
-        Path target = backStack.pop();
-        if (currentDir != null) forwardStack.push(currentDir);
+        BrowserLocation target = backStack.pop();
+        BrowserLocation current = currentLocation();
+        if (current != null) forwardStack.push(current);
         traverseHistory(target);
     }
 
     private void goForward() {
         if (forwardStack.isEmpty()) return;
-        Path target = forwardStack.pop();
-        if (currentDir != null) backStack.push(currentDir);
+        BrowserLocation target = forwardStack.pop();
+        BrowserLocation current = currentLocation();
+        if (current != null) backStack.push(current);
         traverseHistory(target);
     }
 
-    private void traverseHistory(Path target) {
+    private void traverseHistory(BrowserLocation target) {
         traversingHistory = true;
         try {
-            navigateAndSync(target);
+            if (target.isComputer()) navigateToComputer();
+            else navigateAndSync(target.directory());
         } finally {
             traversingHistory = false;
         }
@@ -1114,7 +1250,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             // An archive is browsed as a folder, so it follows the folder
             // toggle rather than the non-viewable-file one it would otherwise
             // hide behind.
-            case DIRECTORY, ARCHIVE -> showDirsProp.get();
+            case DIRECTORY -> atComputerLocation || showDirsProp.get();
+            case ARCHIVE -> showDirsProp.get();
             case MEDIA -> showViewableProp.get();
             case OTHER -> showNonViewableProp.get();
         });
@@ -1170,6 +1307,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         if (listingFailureMessage != null) {
             emptyStateLabel.setText("Can't read this folder — " + listingFailureMessage);
+            emptyStateLabel.setVisible(true);
+            return;
+        }
+        if (atComputerLocation) {
+            emptyStateLabel.setText("No drives available");
             emptyStateLabel.setVisible(true);
             return;
         }
@@ -1249,6 +1391,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var fileMenu = new Menu("_File", null,
                 action("_Open Folder\u2026", keys.mod1(KeyCode.O), this::chooseDirectory),
                 buildMoveItem(owner),
+                buildTrashItem(owner),
+                buildExportMenu(owner),
                 new SeparatorMenuItem(),
                 action("_Settings\u2026", keys.mod1(KeyCode.COMMA), this::showSettings),
                 new SeparatorMenuItem(),
@@ -1628,6 +1772,35 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         return item;
     }
 
+    private MenuItem buildTrashItem(MenuOwner owner) {
+        var item = action("Move to _" + MoveController.trashDestinationName(),
+                keys.moveToTrash(), () -> {
+            switch (owner) {
+                case MAIN -> moveToTrash();
+                case MOSAIC -> mosaic.moveToTrash();
+                case VIEWER -> viewer.moveToTrash();
+            }
+        });
+        if (owner == MenuOwner.VIEWER) {
+            item.disableProperty().bind(viewer.hasContentProperty().not());
+        }
+        return item;
+    }
+
+    /** Extensible export submenu scoped to the window owning the menu bar. */
+    private Menu buildExportMenu(MenuOwner owner) {
+        Runnable action = switch (owner) {
+            case MAIN -> this::exportZeroMetadataCopies;
+            case MOSAIC -> mosaic::exportZeroMetadataCopies;
+            case VIEWER -> viewer::exportZeroMetadataCopies;
+        };
+        var item = action("As _Zero-Metadata Copy\u2026", null, action);
+        if (owner == MenuOwner.VIEWER) {
+            item.disableProperty().bind(viewer.hasContentProperty().not());
+        }
+        return new Menu("_Export", null, item);
+    }
+
     private static MenuItem action(String text, KeyCombination accel, Runnable handler) {
         var item = new MenuItem(text);
         if (accel != null) item.setAccelerator(accel);
@@ -1829,7 +2002,23 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private void expandAndSelect(Path target) {
         TreeItem<Path> node = tree.getRoot();
         Path root = node.getValue();
-        if (!target.startsWith(root)) {
+        if (root == null) {
+            Path targetRoot = target.getRoot();
+            if (targetRoot == null) return;
+            TreeItem<Path> drive = null;
+            for (TreeItem<Path> child : node.getChildren()) {
+                if (targetRoot.equals(child.getValue())) {
+                    drive = child;
+                    break;
+                }
+            }
+            if (drive == null) {
+                drive = new DirTreeItem(targetRoot);
+                node.getChildren().add(drive);
+            }
+            node = drive;
+            root = targetRoot;
+        } else if (!target.startsWith(root)) {
             Path targetRoot = target.getRoot();
             if (targetRoot == null) return;
             node = new DirTreeItem(targetRoot);
@@ -1851,6 +2040,24 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         tree.getSelectionModel().select(node);
         tree.scrollTo(tree.getRow(node));
+    }
+
+    /** Selects the virtual navigation-tree root without feeding the listener back. */
+    private void selectComputerInTree() {
+        TreeItem<Path> root = tree.getRoot();
+        if (root != null && root.getValue() == null) {
+            tree.getSelectionModel().select(root);
+            tree.scrollTo(tree.getRow(root));
+        }
+    }
+
+    /** Refreshes attached/detached drives whenever Computer is entered. */
+    private void refreshComputerTreeRoots(List<Path> roots) {
+        TreeItem<Path> computer = tree.getRoot();
+        if (computer == null || computer.getValue() != null) return;
+        computer.getChildren().setAll(roots.stream()
+                .<TreeItem<Path>>map(DirTreeItem::new)
+                .toList());
     }
 
     private void chooseDirectory() {
@@ -2079,7 +2286,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         if (entry == null) return;
         switch (entry.type()) {
             case PARENT -> navigateToParent();
-            case DIRECTORY -> enterFolder(entry.path());
+            case DIRECTORY -> {
+                if (atComputerLocation) navigateAndSync(entry.path());
+                else enterFolder(entry.path());
+            }
             case ARCHIVE -> openArchive(entry.path());
             // Keep Focus only means something across separate windows (the
             // viewer opens without stealing focus); the single window always
@@ -2161,7 +2371,29 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     /** Cmd+M / menu / context-menu: open the Move dialog for the selection. */
     private void openMove() {
+        if (atComputerLocation) {
+            statusLabel.setText("Choose a folder before moving items");
+            return;
+        }
         moveController.open();
+    }
+
+    /** Platform shortcut / menu / context-menu: move the selection to native trash. */
+    private void moveToTrash() {
+        if (atComputerLocation) {
+            statusLabel.setText("Drive roots cannot be moved to Trash");
+            return;
+        }
+        moveController.moveSelectionToTrash();
+    }
+
+    /** Exports payload-preserving _0m copies for the selected files. */
+    private void exportZeroMetadataCopies() {
+        if (atComputerLocation) {
+            statusLabel.setText("Choose files before exporting");
+            return;
+        }
+        metadataStripController.createCopies();
     }
 
     /**
@@ -2171,6 +2403,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * move the parent link). Order follows the listing, not click order.
      */
     private MoveController.Selection currentMoveSelection() {
+        if (atComputerLocation) return new MoveController.Selection(List.of(), false);
         boolean parentExcluded = false;
         List<Path> sources = new ArrayList<>();
         for (DirEntry sel : listView.getSelectionModel().getSelectedItems()) {
@@ -2214,6 +2447,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * focus" sequencing); a null path clears the selection.
      */
     private void refreshAfterMove(Path focusPath) {
+        if (currentDir == null) return;
         pendingSelection = focusPath;
         navigate(currentDir);
     }
@@ -2761,6 +2995,30 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 + service.nativeVersions());
         alert.initOwner(stage());
         alert.showAndWait();
+    }
+
+    static boolean supportsComputerLocation(String osName) {
+        return osName != null && osName.toLowerCase(Locale.ROOT).startsWith("windows");
+    }
+
+    /** Builds the virtual Computer listing from real, independently rooted drives. */
+    static List<DirEntry> computerListing(Iterable<Path> roots) {
+        var result = new ArrayList<DirEntry>();
+        for (Path root : roots) {
+            if (root != null) result.add(new DirEntry(root, DirEntry.Type.DIRECTORY, null, 0, 0));
+        }
+        return List.copyOf(result);
+    }
+
+    private static TreeItem<Path> navigationTreeRoot(Path initialRoot) {
+        if (!supportsComputerLocation(System.getProperty("os.name"))) {
+            return new DirTreeItem(initialRoot);
+        }
+        var computer = new TreeItem<Path>(null);
+        for (Path root : FileSystemRoots.discover()) {
+            computer.getChildren().add(new DirTreeItem(root));
+        }
+        return computer;
     }
 
     /** Whether a tree click landed on a populated cell, excluding its expand arrow. */

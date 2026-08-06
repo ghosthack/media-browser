@@ -76,6 +76,11 @@ public final class ColorManagedMediaFacade implements MediaFacade {
                     "skipped (no still raster)");
             return new VisualResult(probe, base.frame());
         }
+        if (ColorPolicy.mode() == ColorPolicy.Mode.UNMANAGED) {
+            if (trace != null) trace.declined("ICC color management", started,
+                    bypassDetail(probe.colorProfile()));
+            return new VisualResult(probe, base.frame());
+        }
         IccColorConverter.Decision decision =
                 IccColorConverter.convert(base.frame().orElseThrow(), probe.colorProfile());
         recordDecision(trace, started, decision);
@@ -105,10 +110,20 @@ public final class ColorManagedMediaFacade implements MediaFacade {
                             : "skipped (no still raster; " + profile.name() + ")");
             return base;
         }
+        if (ColorPolicy.mode() == ColorPolicy.Mode.UNMANAGED) {
+            if (trace != null) trace.declined("ICC color management", started,
+                    bypassDetail(profile));
+            return new Thumbnail(base.frame(), base.kind(), profile);
+        }
         IccColorConverter.Decision decision =
                 IccColorConverter.convert(base.frame().orElseThrow(), profile);
         recordDecision(trace, started, decision);
         return new Thumbnail(Optional.of(decision.frame()), base.kind(), profile);
+    }
+
+    private static String bypassDetail(ColorProfile profile) {
+        return profile == null ? "bypassed (unmanaged; untagged)"
+                : "bypassed (unmanaged; " + profile.name() + ")";
     }
 
     private MediaProbe attachProfile(Path file, MediaProbe probe) {

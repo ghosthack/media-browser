@@ -4,6 +4,7 @@ import io.github.ghosthack.mediabrowser.AppSettings;
 import io.github.ghosthack.mediabrowser.LoadingIndicator;
 import io.github.ghosthack.mediabrowser.album.AlbumStore;
 import io.github.ghosthack.mediabrowser.media.AaeStore;
+import io.github.ghosthack.mediabrowser.media.ColorProfile;
 import io.github.ghosthack.mediabrowser.media.ContentSniffer;
 import io.github.ghosthack.mediabrowser.media.ExtensionClassifier;
 import io.github.ghosthack.mediabrowser.media.MediaItem;
@@ -14,6 +15,7 @@ import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
+import io.github.ghosthack.mediabrowser.media.color.ColorPolicy;
 import io.github.ghosthack.mediabrowser.media.VideoPlayer;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 import io.github.ghosthack.mediabrowser.media.move.FileOps;
@@ -51,6 +53,7 @@ import javafx.scene.control.MenuBar;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.RadioButton;
+import javafx.scene.control.RadioMenuItem;
 import javafx.scene.control.ScrollBar;
 import javafx.scene.control.Slider;
 import javafx.scene.control.SplitPane;
@@ -131,17 +134,17 @@ import java.util.function.Consumer;
  * {@code C}) flips between fit and crop-to-fill, and is a no-op while 1:1 is
  * active.</p>
  *
- * <p>The toolbar toggle hides the toolbar (and, with it, its own button); the
- * toolbar comes back by pressing {@code T} or right-clicking the viewport,
- * whose context menu also mirrors the info-panel and status-bar toggles.
+ * <p>The toolbar can be hidden or restored by pressing {@code T} or
+ * right-clicking the viewport, whose context menu also mirrors the info-panel
+ * and status-bar toggles.
  * {@code S} toggles the status bar and {@code I} the info panel. Each of the
  * three chrome elements carries a 📌 pin toggle; pinning one keeps it visible
  * through an {@code F} focus-mode maximize instead of being hidden. The pin
  * toggles are hidden by default; the toolbar's {@code Pins} toggle (or
  * {@code P}) reveals them.</p>
  *
- * <p>The toolbar's {@code Slideshow} toggle (mirrored by Viewer ▸ Slideshow)
- * starts a timed auto-advance through the directory ring: a JavaFX
+ * <p>The Viewer ▸ Slideshow check item starts a timed auto-advance through
+ * the directory ring: a JavaFX
  * {@link javafx.animation.Timeline} fires {@link #navigate} every
  * <em>interval</em> seconds in the configured direction, wrapping at the ends.
  * Viewer ▸ Slideshow Settings… opens a form to set the interval (a 1–10s
@@ -194,6 +197,23 @@ public final class ViewerWindow implements AppShell.ShellView {
      * errored or video-playback states.
      */
     private RasterFrame lastUprightFrame;
+    // --- still-image color policy (docs/color-gamut-mapping.md) ---
+    // Menu selection alone scopes to the shown image; "Apply always" promotes
+    // it to the persisted AppSettings default. Overrides reset on navigation.
+    private final MenuButton colorButton = new MenuButton("Color");
+    private final MenuButton gamutButton = new MenuButton("Gamut");
+    private final RadioMenuItem colorManagedItem = new RadioMenuItem("Managed (convert to sRGB)");
+    private final RadioMenuItem colorUnmanagedItem = new RadioMenuItem("Unmanaged (raw bytes)");
+    private final CheckMenuItem colorApplyAlwaysItem = new CheckMenuItem("Apply always");
+    private final RadioMenuItem gamutClipItem = new RadioMenuItem("Clip");
+    private final RadioMenuItem gamutCompressItem = new RadioMenuItem("Preserve gradation");
+    private final CheckMenuItem gamutApplyAlwaysItem = new CheckMenuItem("Apply always");
+    private final MenuItem colorStatusItem = new MenuItem("Profile: —");
+    private final MenuItem colorRenderingItem = new MenuItem("Rendering: —");
+    private ColorPolicy.Mode colorModeOverride;
+    private ColorPolicy.Gamut gamutOverride;
+    /** Siblings index the transient overrides belong to; -1 when none. */
+    private int colorOverrideIndex = -1;
     /** Window-top container; the shared menu bar is inserted above the toolbar. */
     private VBox topBox;
     /** This view's root, hosted by the shell while the viewer is active. */
@@ -392,6 +412,7 @@ public final class ViewerWindow implements AppShell.ShellView {
      * references it from a lambda, so it is assigned once afterwards.
      */
     private MoveController moveController;
+    private MetadataStripController metadataStripController;
 
 
     /** Active playback, if any. The session counter voids stale callbacks. */
@@ -598,12 +619,13 @@ public final class ViewerWindow implements AppShell.ShellView {
         shell.fullScreenProperty().addListener(
                 (obs, was, is) -> fullScreenToggle.setSelected(is));
 
+        initColorMenus();
         this.toolBar = new ToolBar(toolbarPin, new Separator(),
                 prevButton, nextButton, new Separator(),
-                playButton, repeatToggle, autoplayToggle, slideshowToggle,
-                flipbookToggle, flipbookLoopToggle, new Separator(), cropToggle, new Separator(),
-                infoToggle, metadataToggle, diagnosticsToggle,
-                statusToggle, toolbarToggle, pinsToggle, fullScreenToggle);
+                playButton, repeatToggle, autoplayToggle,
+                new Separator(), cropToggle, fullScreenToggle, new Separator(),
+                colorButton, gamutButton, new Separator(),
+                pinsToggle);
         for (Node item : toolBar.getItems()) {
             if (item instanceof Control control) {
                 control.setMinHeight(TOOLBAR_CONTROL_HEIGHT);
@@ -771,6 +793,9 @@ public final class ViewerWindow implements AppShell.ShellView {
         // the shell's active view (a detached root gets none), so no per-key
         // "am I active" gating is needed.
         root.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, e -> {
+            // The Metadata filter owns editing keys, especially Backspace/Delete;
+            // none of the viewer's global shortcuts should fire while typing.
+            if (e.getTarget() instanceof TextInputControl) return;
             switch (e.getCode()) {
                 case ESCAPE -> { goBack(); e.consume(); }
                 // Command/Ctrl+W is the conventional "close window" chord and
@@ -792,9 +817,25 @@ public final class ViewerWindow implements AppShell.ShellView {
                     else if (e.isShortcutDown()) { if (navigateOpenerToParent()) e.consume(); }
                     else { navigate(1); e.consume(); }
                 }
-                // Backspace backs the opener (mosaic or main window) out to its
-                // parent directory, like modifier1+Left/Right.
-                case BACK_SPACE -> { if (navigateOpenerToParent()) e.consume(); }
+                // Bare Backspace backs the opener out to its parent. On macOS,
+                // modifier1+Backspace is Command+Delete (move to Trash).
+                case BACK_SPACE -> {
+                    if (keys.isMoveToTrash(e)) {
+                        moveToTrash();
+                        e.consume();
+                    } else if (!e.isAltDown() && !e.isControlDown() && !e.isMetaDown()
+                            && !e.isShiftDown() && navigateOpenerToParent()) {
+                        e.consume();
+                    }
+                }
+                // Windows/Linux convention: bare Delete moves the current item
+                // to Recycle Bin / Trash.
+                case DELETE -> {
+                    if (keys.isMoveToTrash(e)) {
+                        moveToTrash();
+                        e.consume();
+                    }
+                }
                 // Up/Down and PgUp/PgDn aren't the viewer's to act on: hand them
                 // to the window that opened this session (mosaic or main) so its
                 // own grid/list moves selection while the viewer stays in front.
@@ -941,6 +982,20 @@ public final class ViewerWindow implements AppShell.ShellView {
             @Override public void refreshAfterMove(Path focusPath) { ViewerWindow.this.refreshAfterMove(focusPath); }
             @Override public void showStatus(String message) { statusLabel.setText(message); }
         });
+        this.metadataStripController = new MetadataStripController(service,
+                new MetadataStripController.Host() {
+                    @Override public Stage owner() { return stage(); }
+                    @Override public MoveController.Selection currentSelection() {
+                        return currentMoveSelection();
+                    }
+                    @Override public void refreshAfterStrip(Path firstOutput) {
+                        // Keep the viewer on the original while passively re-listing its host.
+                        if (host != null && index >= 0 && index < siblings.size()) {
+                            host.refreshAfterExtensionFix(siblings.get(index).path());
+                        }
+                    }
+                    @Override public void showStatus(String message) { statusLabel.setText(message); }
+                });
     }
 
     // --- ShellView ------------------------------------------------------------
@@ -1590,7 +1645,139 @@ public final class ViewerWindow implements AppShell.ShellView {
         nowLoadingOverlay.stop();
     }
 
+    // --- still-image color policy menus ---------------------------------------
+
+    private void initColorMenus() {
+        var modeGroup = new ToggleGroup();
+        colorManagedItem.setToggleGroup(modeGroup);
+        colorUnmanagedItem.setToggleGroup(modeGroup);
+        colorStatusItem.setDisable(true);
+        colorRenderingItem.setDisable(true);
+        colorButton.setTooltip(new Tooltip(
+                "Still-image color management (embedded ICC profile → sRGB)"));
+        colorButton.getItems().addAll(colorManagedItem, colorUnmanagedItem,
+                new SeparatorMenuItem(), colorApplyAlwaysItem,
+                new SeparatorMenuItem(), colorStatusItem, colorRenderingItem);
+        var gamutGroup = new ToggleGroup();
+        gamutClipItem.setToggleGroup(gamutGroup);
+        gamutCompressItem.setToggleGroup(gamutGroup);
+        gamutButton.setTooltip(new Tooltip(
+                "Out-of-gamut colors: clip to the sRGB edge, or compress chroma "
+                + "to preserve gradation (matrix profiles only)"));
+        gamutButton.getItems().addAll(gamutClipItem, gamutCompressItem,
+                new SeparatorMenuItem(), gamutApplyAlwaysItem);
+        colorApplyAlwaysItem.setSelected(settings.viewerColorApplyAlways());
+        gamutApplyAlwaysItem.setSelected(settings.viewerGamutApplyAlways());
+        colorManagedItem.setOnAction(e -> onColorModePicked(ColorPolicy.Mode.MANAGED));
+        colorUnmanagedItem.setOnAction(e -> onColorModePicked(ColorPolicy.Mode.UNMANAGED));
+        gamutClipItem.setOnAction(e -> onGamutPicked(ColorPolicy.Gamut.CLIP));
+        gamutCompressItem.setOnAction(e -> onGamutPicked(ColorPolicy.Gamut.COMPRESS));
+        colorApplyAlwaysItem.setOnAction(e -> onApplyAlwaysToggled(true));
+        gamutApplyAlwaysItem.setOnAction(e -> onApplyAlwaysToggled(false));
+        syncColorMenus();
+    }
+
+    private ColorPolicy.Mode effectiveColorMode() {
+        return colorModeOverride != null ? colorModeOverride : settings.viewerColorMode();
+    }
+
+    private ColorPolicy.Gamut effectiveGamut() {
+        return gamutOverride != null ? gamutOverride : settings.viewerColorGamut();
+    }
+
+    private void onColorModePicked(ColorPolicy.Mode mode) {
+        if (colorApplyAlwaysItem.isSelected()) {
+            settings.setViewerColorMode(mode);
+            colorModeOverride = null;
+            saveSettingsQuietly();
+        } else {
+            colorModeOverride = mode;
+            colorOverrideIndex = index;
+        }
+        applyColorPolicy(true);
+    }
+
+    private void onGamutPicked(ColorPolicy.Gamut gamut) {
+        if (gamutApplyAlwaysItem.isSelected()) {
+            settings.setViewerColorGamut(gamut);
+            gamutOverride = null;
+            saveSettingsQuietly();
+        } else {
+            gamutOverride = gamut;
+            colorOverrideIndex = index;
+        }
+        applyColorPolicy(true);
+    }
+
+    /** Checking promotes the current transient selection to the persisted default. */
+    private void onApplyAlwaysToggled(boolean color) {
+        if (color) {
+            settings.setViewerColorApplyAlways(colorApplyAlwaysItem.isSelected());
+            if (colorApplyAlwaysItem.isSelected() && colorModeOverride != null) {
+                settings.setViewerColorMode(colorModeOverride);
+                colorModeOverride = null;
+            }
+        } else {
+            settings.setViewerGamutApplyAlways(gamutApplyAlwaysItem.isSelected());
+            if (gamutApplyAlwaysItem.isSelected() && gamutOverride != null) {
+                settings.setViewerColorGamut(gamutOverride);
+                gamutOverride = null;
+            }
+        }
+        saveSettingsQuietly();
+        applyColorPolicy(false); // effective policy unchanged; no re-decode
+    }
+
+    private void applyColorPolicy(boolean redecode) {
+        ColorPolicy.set(effectiveColorMode(), effectiveGamut());
+        syncColorMenus();
+        if (redecode && player == null && index >= 0 && index < siblings.size()) {
+            loadCurrent();
+        }
+    }
+
+    /** The dot marks a transient this-image-only override. */
+    private void syncColorMenus() {
+        colorManagedItem.setSelected(effectiveColorMode() == ColorPolicy.Mode.MANAGED);
+        colorUnmanagedItem.setSelected(effectiveColorMode() == ColorPolicy.Mode.UNMANAGED);
+        gamutClipItem.setSelected(effectiveGamut() == ColorPolicy.Gamut.CLIP);
+        gamutCompressItem.setSelected(effectiveGamut() == ColorPolicy.Gamut.COMPRESS);
+        colorButton.setText(colorModeOverride != null ? "Color •" : "Color");
+        gamutButton.setText(gamutOverride != null ? "Gamut •" : "Gamut");
+        gamutButton.setDisable(effectiveColorMode() == ColorPolicy.Mode.UNMANAGED);
+    }
+
+    /** Transient overrides scope to one image; leaving it restores the defaults. */
+    private void resetColorOverridesOnNavigation() {
+        if (colorModeOverride == null && gamutOverride == null) return;
+        if (index == colorOverrideIndex) return; // same item: a policy re-decode
+        colorModeOverride = null;
+        gamutOverride = null;
+        colorOverrideIndex = -1;
+        ColorPolicy.set(effectiveColorMode(), effectiveGamut());
+        syncColorMenus();
+    }
+
+    private void updateColorStatus(ColorProfile profile) {
+        colorStatusItem.setText(profile == null
+                ? "Profile: none (assumed sRGB)"
+                : "Profile: " + profile.name() + (profile.isSrgb() ? " (sRGB)" : ""));
+        colorRenderingItem.setText(profile == null
+                ? "Rendering: colorimetric"
+                : "Rendering: " + io.github.ghosthack.mediabrowser.media.color.ProfileFacts
+                        .of(profile.iccData()).renderingsLine());
+    }
+
+    private void saveSettingsQuietly() {
+        try {
+            settings.save();
+        } catch (java.io.IOException ignored) {
+            // ignored: the in-memory policy still applies for the session
+        }
+    }
+
     private void loadCurrent() {
+        resetColorOverridesOnNavigation();
         // Navigating away from a video that played fine is one of the two
         // moments the automatic extension fix may run (the other: clean
         // end-of-stream) — the handle is being released anyway.
@@ -1680,6 +1867,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                     // before this decode lands, so a player-guard at the top would
                     // leave the panel stuck on the previous item for every movie.
                     infoPanel.show(result.probe());
+                    updateColorStatus(result.probe().colorProfile());
                     onItemProbed.accept(result.probe());
                     // live playback owns the viewport; never paint a still over it
                     if (player != null) {
@@ -1815,6 +2003,18 @@ public final class ViewerWindow implements AppShell.ShellView {
         var move = new MenuItem("Move\u2026");
         if (keys != null) move.setAccelerator(keys.mod1(KeyCode.M));
         move.setOnAction(e -> openMove());
+        var trash = new MenuItem(MoveController.trashActionText());
+        if (keys != null) trash.setAccelerator(keys.moveToTrash());
+        trash.setOnAction(e -> {
+            viewMenu.hide();
+            Platform.runLater(this::moveToTrash);
+        });
+        var zeroMetadata = new MenuItem("Export as Zero-Metadata Copy\u2026");
+        zeroMetadata.setOnAction(e -> {
+            viewMenu.hide();
+            Platform.runLater(this::exportZeroMetadataCopies);
+        });
+        var exportMenu = new Menu("Export", null, zeroMetadata);
         albumMenu = new AlbumMenu(albumStore, settings,
                 () -> currentMoveSelection().sources(), stage(), statusLabel::setText);
         var rotateLeft = new MenuItem("Rotate Left");
@@ -1864,7 +2064,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         var toggles = new Menu("Toggle\u2026", null,
                 toolbarItem, infoItem, metadataItem, diagnosticsItem, statusItem, pinsItem);
 
-        viewMenu = new ContextMenu(copyPath, move, albumMenu.menu(),
+        viewMenu = new ContextMenu(copyPath, move, trash, exportMenu, albumMenu.menu(),
                 new SeparatorMenuItem(),
                 adjustMenu, new SeparatorMenuItem(), toggles);
         WindowChrome.makeDismissive(viewMenu, viewport.getScene());
@@ -2006,7 +2206,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         slideshowTimeline.play();
     }
 
-    /** Refreshes the toolbar toggle's tooltip to reflect the current config. */
+    /** Refreshes the backing toggle's tooltip to reflect the current config. */
     private void updateSlideshowTooltip() {
         slideshowToggle.getTooltip().setText("Auto-advance "
                 + (slideshowReverse ? "backward" : "forward")
@@ -2234,7 +2434,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         return loop ? 0 : -1;
     }
 
-    /** Refreshes the toolbar toggle's tooltip to reflect the current config. */
+    /** Refreshes the backing toggle's tooltip to reflect the current config. */
     private void updateFlipbookTooltip() {
         flipbookToggle.getTooltip().setText("Play this directory's same-size images "
                 + (flipbookLoopToggle.isSelected() ? "as a looping " : "once as a ")
@@ -2355,6 +2555,18 @@ public final class ViewerWindow implements AppShell.ShellView {
     public void openMove() {
         if (index < 0 || index >= siblings.size()) return;
         moveController.open();
+    }
+
+    /** Platform shortcut / menu / context-menu: move the on-screen item to native trash. */
+    public void moveToTrash() {
+        if (index < 0 || index >= siblings.size()) return;
+        moveController.moveSelectionToTrash();
+    }
+
+    /** File/context-menu action: export a payload-preserving _0m copy. */
+    public void exportZeroMetadataCopies() {
+        if (index < 0 || index >= siblings.size()) return;
+        metadataStripController.createCopies();
     }
 
     /** The directory the on-screen item lives in; relative paths resolve against it. */

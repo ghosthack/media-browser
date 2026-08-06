@@ -6,6 +6,7 @@ import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
 import javafx.scene.input.KeyCombination.Modifier;
+import javafx.scene.input.KeyEvent;
 
 import java.util.Locale;
 
@@ -108,6 +109,30 @@ public final class KeyScheme {
     /** {@code modifier2 + code} — the secondary (Alt/Option) modifier. */
     public KeyCombination mod2(KeyCode code) {
         return new KeyCodeCombination(code, mod2);
+    }
+
+    /**
+     * Native file-manager shortcut for moving the selection to trash:
+     * modifier1+Backspace (Command+Delete by default) on macOS, bare Delete
+     * on Windows and Linux.
+     */
+    public KeyCombination moveToTrash() {
+        String osName = System.getProperty("os.name", "");
+        KeyCode key = moveToTrashKey(osName);
+        return isMacOs(osName) ? mod1(key) : new KeyCodeCombination(key);
+    }
+
+    /** Whether this key press exactly matches {@link #moveToTrash()}. */
+    public boolean isMoveToTrash(KeyEvent event) {
+        return moveToTrash().match(event);
+    }
+
+    static boolean isMacOs(String osName) {
+        return osName != null && osName.toLowerCase(Locale.ROOT).contains("mac");
+    }
+
+    static KeyCode moveToTrashKey(String osName) {
+        return isMacOs(osName) ? KeyCode.BACK_SPACE : KeyCode.DELETE;
     }
 
     /**

@@ -7,16 +7,18 @@ import java.time.Instant;
 /**
  * One user-performed file-organization action, recorded in the session
  * action log ({@link io.github.ghosthack.mediabrowser.ui.ActionLog}). The in-memory
- * log empties on quit, but each entry carries enough to serialize or revert
+ * log empties on quit, but each entry carries enough to serialize and diagnose
  * later: the action type, timestamp, source path, and the <em>resolved</em>
  * final target path (post auto-rename, which may differ from the requested
- * destination) — the JSONL form ({@link #toJsonLine()}/{@link #fromJsonLine})
- * is what the optional append-only {@link ActionLogFile} writes.
+ * destination). Trash entries use an empty target because the desktop API
+ * does not disclose the native Trash / Recycle Bin path. The JSONL form
+ * ({@link #toJsonLine()}/{@link #fromJsonLine}) is what the optional
+ * append-only {@link ActionLogFile} writes.
  *
  * <p>Ported from the Swing predecessor's {@code ActionLogEntry}, trimmed to the
- * action types this app performs (dialog moves, single-file renames and
- * quick-moves; the predecessor's delete and virtual-catalog types have no counterpart
- * here yet).
+ * action types this app performs (dialog moves, single-file renames,
+ * quick-moves and moves to trash; virtual-catalog types have no counterpart
+ * here).
  */
 public record ActionLogEntry(
         long timestampMillis,
@@ -27,6 +29,7 @@ public record ActionLogEntry(
     public enum Type {
         MOVE,
         RENAME,
+        TRASH,
         /**
          * The automatic extension fix: a content-promoted file (no classifying
          * extension) renamed in place to its header's canonical extension after
@@ -58,11 +61,18 @@ public record ActionLogEntry(
                 sourcePath.toString(), finalPath.toString());
     }
 
+    /** Entry for one item successfully handed to the OS Trash / Recycle Bin. */
+    public static ActionLogEntry trashed(Path sourcePath) {
+        return new ActionLogEntry(System.currentTimeMillis(), Type.TRASH,
+                sourcePath.toString(), "");
+    }
+
     /** One-line human-readable description, used by the action-log panel. */
     public String summary() {
         return switch (type) {
             case MOVE -> "Moved " + sourcePath + " → " + targetPath;
             case RENAME -> "Renamed " + sourcePath + " → " + leafName(targetPath);
+            case TRASH -> "Moved to Trash: " + sourcePath;
             case EXTFIX -> "Extension fix: " + sourcePath + " → " + leafName(targetPath);
         };
     }

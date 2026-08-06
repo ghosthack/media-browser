@@ -21,6 +21,8 @@ final class IccColorConverter {
 
     /** One transform instance per worker thread; ColorConvertOp instances serialize internally. */
     private static final ThreadLocal<Transform> TRANSFORM = new ThreadLocal<>();
+    /** Per-thread parse cache for the compress path's matrix-shaper view. */
+    private static final ThreadLocal<Shaper> SHAPER = new ThreadLocal<>();
 
     private IccColorConverter() {}
 
@@ -34,12 +36,37 @@ final class IccColorConverter {
         }
 
         try {
+            if (ColorPolicy.gamut() == ColorPolicy.Gamut.COMPRESS) {
+                MatrixShaperProfile shaper = shaperFor(profile);
+                if (shaper == null) {
+                    return new Decision(filter(frame, profile), Outcome.APPLIED,
+                            "applied (" + profile.name()
+                            + "; gamut clip — LUT profile, compression unavailable)");
+                }
+                GamutMapper.Stats stats = GamutMapper.convert(
+                        frame.bgra(), frame.width(), frame.height(), shaper);
+                return new Decision(frame, Outcome.APPLIED,
+                        "applied (" + profile.name() + "; gamut compress, "
+                        + stats.percent() + " out-of-gamut)");
+            }
             return new Decision(filter(frame, profile), Outcome.APPLIED,
                     "applied (" + profile.name() + ")");
         } catch (RuntimeException ex) {
             throw new MediaException("ICC conversion failed for " + profile.name(), ex);
         }
     }
+
+    private static MatrixShaperProfile shaperFor(ColorProfile profile) {
+        Shaper cached = SHAPER.get();
+        if (cached == null || !cached.profile().equals(profile)) {
+            cached = new Shaper(profile,
+                    MatrixShaperProfile.parse(profile.iccData()).orElse(null));
+            SHAPER.set(cached);
+        }
+        return cached.shaper();
+    }
+
+    private record Shaper(ColorProfile profile, MatrixShaperProfile shaper) {}
 
     /** Minimum pixels per band, so small rasters (thumbnails) stay single-threaded. */
     private static final int MIN_BAND_PIXELS = 512 * 1024;

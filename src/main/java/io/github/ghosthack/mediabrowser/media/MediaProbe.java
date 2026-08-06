@@ -61,7 +61,11 @@ public record MediaProbe(
         if (sampleRate > 0) rows.put("Sample rate", sampleRate + " Hz");
         if (channels > 0) rows.put("Channels", Integer.toString(channels));
         if (pixelDescription != null) rows.put("Pixels", pixelDescription);
-        if (colorProfile != null) rows.put("Color profile", colorProfile.name());
+        if (colorProfile != null) {
+            rows.put("Color profile", colorProfile.name());
+            rows.put("Renderings", io.github.ghosthack.mediabrowser.media.color.ProfileFacts
+                    .of(colorProfile.iccData()).renderingsLine());
+        }
         rows.put("Path", path.toString());
         return rows;
     }

@@ -11,7 +11,7 @@ import javafx.collections.ObservableList;
 
 /**
  * The session action log: every file-organization action performed this run
- * (dialog moves, renames, quick-moves), in order, capped at {@link #LIMIT}
+ * (dialog moves, renames, quick-moves and moves to trash), in order, capped at {@link #LIMIT}
  * oldest-first. In-memory and emptied on quit — except that with the
  * {@code actionLog.file} setting on (Settings ▸ General, default off, applied
  * live) every recorded entry is also appended to the on-disk JSONL log

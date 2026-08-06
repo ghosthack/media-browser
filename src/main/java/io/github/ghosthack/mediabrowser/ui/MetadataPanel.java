@@ -8,6 +8,7 @@ import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ReadOnlyStringWrapper;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.scene.Cursor;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.ContextMenu;
@@ -24,6 +25,8 @@ import javafx.scene.control.TreeTableRow;
 import javafx.scene.control.TreeTableView;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.MouseButton;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -52,6 +55,8 @@ import java.util.Locale;
 public final class MetadataPanel extends VBox {
 
     private static final String PLACEHOLDER = "Press Load to read full metadata";
+    private static final double MIN_COLUMN_WIDTH = 60;
+    private static final double COLUMN_RESIZE_SLOP = 4;
 
     /** A group header row; carries the entry count for the value column. */
     private record GroupHeader(String name, int count) {}
@@ -68,6 +73,10 @@ public final class MetadataPanel extends VBox {
     private final ToggleButton toolsToggle = new ToggleButton("...");
     private final TextField filterField = new TextField();
     private final HBox titleRow;
+    private boolean resizingPropertyColumn;
+    private boolean metadataColumnsLaidOut;
+    private double columnResizeStartX;
+    private double columnResizeStartWidth;
 
     /** Most recently loaded metadata, kept unfiltered so the filter can re-render. */
     private Metadata master;
@@ -128,10 +137,11 @@ public final class MetadataPanel extends VBox {
         table.setRoot(root);
         table.setShowRoot(false);
         table.getColumns().setAll(List.of(keyCol, valueCol));
-        // Share the headerless 24px row rhythm and pinned Property-column width
-        // used by Info and Diagnostics; only Metadata's tree grouping differs.
+        // Share the headerless 24px row rhythm and initial Property-column width
+        // used by Info and Diagnostics; Metadata then lets the divider move.
         InfoPanel.configurePropertyValueTable(table, keyCol);
-        table.setColumnResizePolicy(TreeTableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        enableColumnResizing(keyCol, valueCol);
+        installColumnResizePolicy(keyCol, valueCol);
         table.setPlaceholder(placeholder);
         table.setRowFactory(tv -> rowWithCopyMenu());
         VBox.setVgrow(table, Priority.ALWAYS);
@@ -142,6 +152,96 @@ public final class MetadataPanel extends VBox {
         // moved the window's panel edge whenever this panel was toggled on.
         setPrefWidth(280);
         setMinWidth(160);
+    }
+
+    /**
+     * Makes the visible Property/Value boundary draggable even though this
+     * table deliberately hides its column-header row (where JavaFX normally
+     * exposes its resize handle).
+     */
+    private void enableColumnResizing(
+            TreeTableColumn<Object, String> propertyColumn,
+            TreeTableColumn<Object, String> valueColumn) {
+        propertyColumn.setMinWidth(MIN_COLUMN_WIDTH);
+        propertyColumn.setResizable(true);
+        valueColumn.setMinWidth(MIN_COLUMN_WIDTH);
+        valueColumn.setResizable(true);
+
+        table.addEventFilter(MouseEvent.MOUSE_MOVED, event -> {
+            if (!resizingPropertyColumn) {
+                table.setCursor(isOnColumnDivider(event.getX(), propertyColumn)
+                        ? Cursor.H_RESIZE : null);
+            }
+        });
+        table.addEventFilter(MouseEvent.MOUSE_EXITED, event -> {
+            if (!resizingPropertyColumn) table.setCursor(null);
+        });
+        table.addEventFilter(MouseEvent.MOUSE_PRESSED, event -> {
+            if (event.getButton() != MouseButton.PRIMARY
+                    || !isOnColumnDivider(event.getX(), propertyColumn)) return;
+            resizingPropertyColumn = true;
+            columnResizeStartX = event.getX();
+            columnResizeStartWidth = propertyColumn.getWidth();
+            table.setCursor(Cursor.H_RESIZE);
+            event.consume();
+        });
+        table.addEventFilter(MouseEvent.MOUSE_DRAGGED, event -> {
+            if (!resizingPropertyColumn) return;
+            double requestedWidth = columnResizeStartWidth
+                    + event.getX() - columnResizeStartX;
+            double delta = requestedWidth - propertyColumn.getWidth();
+            table.resizeColumn(propertyColumn, delta);
+            event.consume();
+        });
+        table.addEventFilter(MouseEvent.MOUSE_RELEASED, event -> {
+            if (!resizingPropertyColumn) return;
+            resizingPropertyColumn = false;
+            table.setCursor(isOnColumnDivider(event.getX(), propertyColumn)
+                    ? Cursor.H_RESIZE : null);
+            event.consume();
+        });
+        table.addEventFilter(MouseEvent.MOUSE_CLICKED, event -> {
+            if (event.getButton() == MouseButton.PRIMARY
+                    && isOnColumnDivider(event.getX(), propertyColumn)) event.consume();
+        });
+    }
+
+    /**
+     * Keeps the Property column at its preferred/current width during automatic
+     * table layout, leaving Value to absorb available space. Both columns stay
+     * flexible while the user is actively dragging their shared divider.
+     */
+    private void installColumnResizePolicy(
+            TreeTableColumn<Object, String> propertyColumn,
+            TreeTableColumn<Object, String> valueColumn) {
+        var constrained = TreeTableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN;
+        table.setColumnResizePolicy(features -> {
+            if (features.getColumn() != null) return constrained.call(features);
+            if (features.getContentWidth() <= 0) return constrained.call(features);
+
+            double preservedWidth = metadataColumnsLaidOut
+                    ? propertyColumn.getWidth() : propertyColumn.getPrefWidth();
+            preservedWidth = Math.min(preservedWidth,
+                    Math.max(propertyColumn.getMinWidth(),
+                            features.getContentWidth() - valueColumn.getMinWidth()));
+            double oldMin = propertyColumn.getMinWidth();
+            double oldMax = propertyColumn.getMaxWidth();
+            propertyColumn.setMinWidth(preservedWidth);
+            propertyColumn.setMaxWidth(preservedWidth);
+            try {
+                Boolean result = constrained.call(features);
+                metadataColumnsLaidOut = true;
+                return result;
+            } finally {
+                propertyColumn.setMaxWidth(oldMax);
+                propertyColumn.setMinWidth(oldMin);
+            }
+        });
+    }
+
+    private static boolean isOnColumnDivider(
+            double pointerX, TreeTableColumn<?, ?> propertyColumn) {
+        return Math.abs(pointerX - propertyColumn.getWidth()) <= COLUMN_RESIZE_SLOP;
     }
 
     // --- viewer-facing API --------------------------------------------------

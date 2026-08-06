@@ -47,6 +47,7 @@ import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
+import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
@@ -323,6 +324,7 @@ public final class MosaicWindow
      * current directory, post-move focus and refresh.
      */
     private final MoveController moveController;
+    private final MetadataStripController metadataStripController;
 
     /** On-screen tile size control (nudged by the Mosaic menu). */
     private Slider sizeSlider;
@@ -481,6 +483,8 @@ public final class MosaicWindow
     private Supplier<Path> dirSupplier;
     /** Navigates the (shared) location into a folder or {@code ..}; set by the host. */
     private Consumer<Path> navigator = path -> { };
+    /** Enters a virtual parent that cannot be expressed as a {@link Path}. */
+    private Runnable virtualParentHandler;
     /** Steps the shared location back/forward through history; set by the host. */
     private Runnable backHandler = () -> { };
     private Runnable forwardHandler = () -> { };
@@ -1097,6 +1101,17 @@ public final class MosaicWindow
             @Override public void showStatus(String message) { statusLabel.setText(message); }
             @Override public void releaseBeforeMove(List<Path> moving) { viewer.releaseBeforeMove(moving); }
         });
+        this.metadataStripController = new MetadataStripController(service,
+                new MetadataStripController.Host() {
+                    @Override public Stage owner() { return stage(); }
+                    @Override public MoveController.Selection currentSelection() {
+                        return currentMoveSelection();
+                    }
+                    @Override public void refreshAfterStrip(Path firstOutput) {
+                        MosaicWindow.this.refreshAfterStrip(firstOutput);
+                    }
+                    @Override public void showStatus(String message) { statusLabel.setText(message); }
+                });
     }
 
     /**
@@ -1536,7 +1551,8 @@ public final class MosaicWindow
         } else if (lead != null) {
             statusLabel.setText(lead.displayName());
         } else {
-            statusLabel.setText(mosaicDir != null ? mosaicDir.toString() : "");
+            statusLabel.setText(mosaicDir != null
+                    ? mosaicDir.toString() : MainWindow.COMPUTER_LOCATION_NAME);
         }
         if (infoPanelVisible.get()) refreshInfoPanel(lead, count, gen);
         // Metadata panel (manual by default): reset to the new selection's
@@ -1755,6 +1771,11 @@ public final class MosaicWindow
         this.navigator = navigator != null ? navigator : path -> { };
     }
 
+    /** Sets the host callback used when a drive root's parent is Computer. */
+    public void setVirtualParentHandler(Runnable handler) {
+        this.virtualParentHandler = handler;
+    }
+
     /**
      * Sets the handlers that step the shared location back/forward through the
      * host's navigation history (wired to Cmd+Left / Cmd+Right). Like
@@ -1927,6 +1948,18 @@ public final class MosaicWindow
         moveController.open();
     }
 
+    /** Platform shortcut / menu / context-menu: move selected tiles to native trash. */
+    public void moveToTrash() {
+        if (dirSupplier == null || dirSupplier.get() == null) return;
+        moveController.moveSelectionToTrash();
+    }
+
+    /** File/context-menu action: export payload-preserving _0m copies. */
+    public void exportZeroMetadataCopies() {
+        if (dirSupplier == null || dirSupplier.get() == null) return;
+        metadataStripController.createCopies();
+    }
+
     /**
      * Resolves the move sources from the selected tiles: every selected entry
      * other than the {@code ..} parent tile (in listing order), with
@@ -1934,6 +1967,9 @@ public final class MosaicWindow
      * (so the dialog never tries to move the parent link).
      */
     private MoveController.Selection currentMoveSelection() {
+        if (dirSupplier == null || dirSupplier.get() == null) {
+            return new MoveController.Selection(List.of(), false);
+        }
         boolean parentExcluded = false;
         List<Path> sources = new ArrayList<>();
         for (int i : selection) {            // TreeSet → ascending = listing order
@@ -1977,6 +2013,15 @@ public final class MosaicWindow
         if (dir == null) return;
         pendingSelectPath = focusPath;
         autoOpenAfterRebuild = true;   // keep the viewer in step once the re-list lands
+        navigator.accept(dir);
+    }
+
+    /** Re-lists after creating a sibling copy without forcing the viewer open. */
+    private void refreshAfterStrip(Path output) {
+        Path dir = dirSupplier != null ? dirSupplier.get() : null;
+        if (dir == null) return;
+        pendingSelectPath = output;
+        autoOpenAfterRebuild = false;
         navigator.accept(dir);
     }
 
@@ -2133,8 +2178,9 @@ public final class MosaicWindow
             anchor = lead;
         }
         title.set((dir != null ? dir.getFileName() != null
-                ? dir.getFileName().toString() : dir.toString() : "Mosaic") + " — Mosaic");
-        locationField.setText(dir != null ? dir.toString() : "");
+                ? dir.getFileName().toString() : dir.toString()
+                : MainWindow.COMPUTER_LOCATION_NAME) + " — Mosaic");
+        locationField.setText(dir != null ? dir.toString() : MainWindow.COMPUTER_LOCATION_NAME);
         statusCountLabel.setText(countText());
         updateSelectionPanels();
         relayout();
@@ -3294,6 +3340,8 @@ public final class MosaicWindow
      * in flight.
      */
     private FolderPreview folderPreviewFor(Path dir) {
+        // Do not scan whole drive roots merely to decorate the Computer view.
+        if (mosaicDir == null) return null;
         boolean wantCollage = thumbnailsVisible.get() && folderPreviewGrid > 0;
         // With both the collage and the reticule off there is nothing to learn,
         // so the listing is never made — the scan stays as lazy as it was.
@@ -3432,7 +3480,22 @@ public final class MosaicWindow
             case F2 -> { if (moveController.quickMove(1)) e.consume(); }
             case F3 -> { if (moveController.quickMove(2)) e.consume(); }
             case F4 -> { if (moveController.quickMove(3)) e.consume(); }
-            case BACK_SPACE -> { navigateToParent(); e.consume(); }
+            case BACK_SPACE -> {
+                if (keys.isMoveToTrash(e)) {
+                    moveToTrash();
+                    e.consume();
+                } else if (!e.isAltDown() && !e.isControlDown() && !e.isMetaDown()
+                        && !e.isShiftDown()) {
+                    navigateToParent();
+                    e.consume();
+                }
+            }
+            case DELETE -> {
+                if (keys.isMoveToTrash(e)) {
+                    moveToTrash();
+                    e.consume();
+                }
+            }
             // '/' switches to the viewer on the selected media (taking focus),
             // the mirror of the viewer's own '/' (toggle 1:1).
             case SLASH -> { switchToViewer(); e.consume(); }
@@ -3527,6 +3590,12 @@ public final class MosaicWindow
      * focused for fixing. Mirrors the main window's address bar.
      */
     private void navigateFromLocation() {
+        if (dirSupplier != null && dirSupplier.get() == null
+                && MainWindow.COMPUTER_LOCATION_NAME.equalsIgnoreCase(
+                        locationField.getText().trim())) {
+            canvas.requestFocus();
+            return;
+        }
         // Accepts an archive locator (/discs/photos.iso!/DCIM) as well as a
         // plain path, mounting the container when needed.
         Path target = ArchivePaths.parse(locationField.getText())
@@ -3578,6 +3647,11 @@ public final class MosaicWindow
                     .filter(archive -> ArchivePaths.isArchiveRoot(dir))
                     .orElse(dir);      // select the folder we came from in the parent
             navigator.accept(parent);
+        } else if (dir != null && virtualParentHandler != null) {
+            // Windows drive roots have a virtual Computer parent. Remember the
+            // drive so the Computer rebuild lands back on the tile we left.
+            pendingSelectPath = dir;
+            virtualParentHandler.run();
         }
     }
 
@@ -3713,6 +3787,18 @@ public final class MosaicWindow
             tileMenu.hide();
             Platform.runLater(this::openMove);
         });
+        var trash = new MenuItem(MoveController.trashActionText());
+        trash.setAccelerator(keys.moveToTrash());
+        trash.setOnAction(e -> {
+            tileMenu.hide();
+            Platform.runLater(this::moveToTrash);
+        });
+        var zeroMetadata = new MenuItem("Export as Zero-Metadata Copy\u2026");
+        zeroMetadata.setOnAction(e -> {
+            tileMenu.hide();
+            Platform.runLater(this::exportZeroMetadataCopies);
+        });
+        var exportMenu = new Menu("Export", null, zeroMetadata);
         var rotateLeft = new MenuItem("Rotate Left");
         rotateLeft.setAccelerator(new KeyCodeCombination(KeyCode.F6));
         rotateLeft.setOnAction(e -> rotateSelection(-1));
@@ -3737,7 +3823,7 @@ public final class MosaicWindow
                 blackWhite, invert);
         albumMenu = new AlbumMenu(albumStore, settings, this::albumSelectionPaths,
                 stage(), statusLabel::setText);
-        tileMenu = new ContextMenu(copyPath, move, albumMenu.menu(),
+        tileMenu = new ContextMenu(copyPath, move, trash, exportMenu, albumMenu.menu(),
                 new SeparatorMenuItem(), adjustMenu);
         // Dismiss readily (any press closes it, and isn't swallowed) and open
         // with the first item highlighted; shared with the viewer's view menu.
@@ -3914,6 +4000,12 @@ public final class MosaicWindow
      * {@code ..} walks back up through every level that was skipped.</p>
      */
     private void enterFolder(Path dir) {
+        // A null supplied directory is the Windows Computer view. Its rows are
+        // drive roots, which open directly rather than being chain-collapsed.
+        if (dirSupplier != null && dirSupplier.get() == null) {
+            navigator.accept(dir);
+            return;
+        }
         if (!settings.listingCollapseFolderChains()) {
             navigator.accept(dir);
             return;

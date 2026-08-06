@@ -9,10 +9,12 @@ import io.github.ghosthack.mediabrowser.media.move.MoveDialogIntents;
 import io.github.ghosthack.mediabrowser.media.move.MoveDialogLogic;
 import io.github.ghosthack.mediabrowser.media.move.MoveDialogModel;
 import io.github.ghosthack.mediabrowser.media.move.MovePlanner;
+import io.github.ghosthack.mediabrowser.media.move.TrashOps;
 import io.github.ghosthack.mediabrowser.media.move.TreeNode;
 
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
+import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
 import javafx.stage.Stage;
 
@@ -22,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Drives the {@link MoveDialog}: owns the {@link MoveDialogModel}, handles every
@@ -200,6 +203,116 @@ public final class MoveController implements MoveDialogIntents {
     /** Whether the dialog is currently showing. */
     public boolean isShowing() {
         return dialog != null && dialog.stage().isShowing();
+    }
+
+    // ---- Move to Trash / Recycle Bin ---------------------------------------
+
+    /**
+     * Confirm and move the current selection to the native Trash / Recycle Bin.
+     * Selection, archive refusal, handle release, async execution and post-move
+     * focus deliberately follow the same path as ordinary moves.
+     */
+    public void moveSelectionToTrash() {
+        if (isShowing() || moveInFlight) return;
+
+        Selection selection = host.currentSelection();
+        if (selection.sources().isEmpty()) {
+            host.showStatus(selection.parentExcluded()
+                    ? "Only the parent folder \"..\" is selected; nothing to move to "
+                            + trashDestinationName() + "."
+                    : "No items selected to move to " + trashDestinationName() + ".");
+            return;
+        }
+        if (refusesArchiveSources(selection)) return;
+        if (!TrashOps.isSupported()) {
+            host.showStatus("Move to " + trashDestinationName()
+                    + " is not supported by this desktop environment.");
+            return;
+        }
+
+        List<Path> moving = selection.sources();
+        if (!confirmTrash(moving)) return;
+
+        Path nextFocus = host.nextFocusAfterMove(moving);
+        moveInFlight = true;
+        host.releaseBeforeMove(moving);
+        service.fileOp(() -> TrashOps.moveToTrash(moving))
+                .whenComplete((result, error) -> Platform.runLater(() ->
+                        finishTrash(result, error, nextFocus)));
+    }
+
+    /** Platform-native noun used by menus, confirmation copy and status text. */
+    static String trashDestinationName() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        return os.startsWith("windows") ? "Recycle Bin" : "Trash";
+    }
+
+    /** Platform-native File-menu/context-menu label. */
+    static String trashActionText() {
+        return "Move to " + trashDestinationName();
+    }
+
+    private boolean confirmTrash(List<Path> moving) {
+        String destination = trashDestinationName();
+        String subject;
+        if (moving.size() == 1) {
+            Path name = moving.getFirst().getFileName();
+            subject = "\u201c" + (name == null ? moving.getFirst() : name) + "\u201d";
+        } else {
+            subject = moving.size() + " selected items";
+        }
+
+        var move = new ButtonType("Move to " + destination, ButtonBar.ButtonData.OK_DONE);
+        var alert = new Alert(Alert.AlertType.CONFIRMATION, "", move, ButtonType.CANCEL);
+        alert.setTitle("Move to " + destination);
+        alert.setHeaderText("Move " + subject + " to " + destination + "?");
+        alert.setContentText("You can restore " + (moving.size() == 1 ? "it" : "them")
+                + " from " + destination + " using your system file manager.");
+        alert.initOwner(host.owner());
+        return alert.showAndWait().filter(button -> button == move).isPresent();
+    }
+
+    /** Apply a native trash result back on the FX thread. */
+    private void finishTrash(TrashOps.Result result, Throwable error, Path nextFocus) {
+        try {
+            if (error != null) {
+                host.showStatus("Move to " + trashDestinationName() + " failed: "
+                        + message(error));
+                return;
+            }
+
+            for (Path moved : result.moved()) {
+                ActionLog.get().record(ActionLogEntry.trashed(moved));
+            }
+
+            if (!result.moved().isEmpty()) {
+                Path focus = result.failures().isEmpty()
+                        ? nextFocus : result.failures().getFirst().path();
+                host.refreshAfterMove(focus);
+            }
+
+            List<String> failures = result.failures().stream()
+                    .map(failure -> displayName(failure.path()) + ": " + failure.reason())
+                    .toList();
+            if (failures.isEmpty()) {
+                int count = result.moved().size();
+                host.showStatus("Moved " + count + " item" + (count == 1 ? "" : "s")
+                        + " to " + trashDestinationName() + ".");
+            } else if (!result.moved().isEmpty()) {
+                host.showStatus(failureList("Some items could not be moved to "
+                        + trashDestinationName() + ":", failures));
+            } else {
+                host.showStatus(failureList("Move to " + trashDestinationName()
+                        + " failed:", failures));
+            }
+        } finally {
+            moveInFlight = false;
+        }
+    }
+
+    private static String displayName(Path path) {
+        Path name = path.getFileName();
+        return (name == null ? path : name).toString();
     }
 
     // ---- Quick move (F1–F4, port of AppStore.quickMoveToHistoryIndex) --------

@@ -40,3 +40,21 @@
     -fx-pref-height: 0;
     -fx-max-height: 0;
 }
+
+/*
+ * Metadata is the only headerless tree table. Its rows are fixed at 24px,
+ * while the Cupertino tree-table disclosure inset is sized for the theme's
+ * much taller default rows. Centre the disclosure node in the compact row and
+ * give the small theme triangle a little more presence. Keep this scoped to
+ * headerless tree tables so directory trees and dialogs retain their theme's
+ * native spacing.
+ */
+.tree-table-view.headerless-table .tree-table-row-cell > .tree-disclosure-node {
+    -fx-padding: 0 0.5em 0 0.5em;
+    -fx-alignment: center;
+}
+
+.tree-table-view.headerless-table .tree-table-row-cell > .tree-disclosure-node > .arrow {
+    -fx-scale-x: 1.3;
+    -fx-scale-y: 1.3;
+}

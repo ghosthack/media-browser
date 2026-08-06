@@ -118,12 +118,12 @@ public final class InfoPanel extends VBox {
     }
 
     /**
-     * Applies the same Property-column alignment and headerless compact rows to
-     * Metadata's tree table while leaving its custom grouped columns intact.
+     * Applies the same initial Property-column alignment and headerless compact
+     * rows to Metadata's tree table while leaving its columns resizable.
      */
     static void configurePropertyValueTable(
             TreeTableView<?> table, TableColumnBase<?, ?> propertyColumn) {
-        fixWidth(propertyColumn);
+        propertyColumn.setPrefWidth(PROPERTY_COLUMN_WIDTH);
         configurePropertyTableChrome(table);
     }
 

@@ -105,6 +105,10 @@ public final class AppSettings {
     private static final String VIEWER_FLIPBOOK_LOOP_KEY = "viewer.flipbook.loop";
     private static final String VIEWER_LOADING_INDICATOR_KEY = "viewer.loadingIndicator";
     private static final String VIEWER_LOADING_INDICATOR_DELAY_KEY = "viewer.loadingIndicator.delayMs";
+    private static final String VIEWER_COLOR_MODE_KEY = "viewer.color.mode";
+    private static final String VIEWER_COLOR_GAMUT_KEY = "viewer.color.gamut";
+    private static final String VIEWER_COLOR_APPLY_ALWAYS_KEY = "viewer.color.applyAlways";
+    private static final String VIEWER_GAMUT_APPLY_ALWAYS_KEY = "viewer.gamut.applyAlways";
     private static final String MOSAIC_MENU_BAR_KEY = "mosaic.menuBar.visible";
     private static final String MOSAIC_TOOLBAR_KEY = "mosaic.toolbar.visible";
     private static final String MOSAIC_STATUS_BAR_KEY = "mosaic.statusBar.visible";
@@ -144,7 +148,7 @@ public final class AppSettings {
     private static final int DEFAULT_THUMB_BUDGET_MB = 256;
 
     /** Fresh-install visual defaults. Explicit persisted choices always win. */
-    private static final Theme DEFAULT_THEME = Theme.CUPERTINO_DARK;
+    private static final Theme DEFAULT_THEME = Theme.PLAIN_DARK;
     private static final IconPack DEFAULT_ICON_PACK = IconPack.LUCID;
     private static final String DEFAULT_MOSAIC_TILE_SET_ID = "xedge-xs";
 
@@ -264,6 +268,12 @@ public final class AppSettings {
     private int viewerSlideshowIntervalSeconds = DEFAULT_VIEWER_SLIDESHOW_INTERVAL;
     private LoadingIndicator viewerLoadingIndicator = DEFAULT_VIEWER_LOADING_INDICATOR;
     private int viewerLoadingIndicatorDelayMs = DEFAULT_VIEWER_LOADING_INDICATOR_DELAY_MS;
+    private io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Mode viewerColorMode =
+            io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Mode.MANAGED;
+    private io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Gamut viewerColorGamut =
+            io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Gamut.CLIP;
+    private boolean viewerColorApplyAlways;
+    private boolean viewerGamutApplyAlways;
     private boolean viewerSlideshowReverse;
     private int viewerFlipbookFps = DEFAULT_VIEWER_FLIPBOOK_FPS;
     private boolean viewerFlipbookLoop = true;
@@ -375,7 +385,7 @@ public final class AppSettings {
         settings.listingShowHiddenFiles = Boolean.parseBoolean(
                 props.getProperty(LISTING_SHOW_HIDDEN_KEY, "true"));
         settings.listingIgnoreJunkFiles = Boolean.parseBoolean(
-                props.getProperty(LISTING_IGNORE_JUNK_KEY, "true"));
+                props.getProperty(LISTING_IGNORE_JUNK_KEY, "false"));
         settings.listingHideEmptyFiles = Boolean.parseBoolean(
                 props.getProperty(LISTING_HIDE_EMPTY_FILES_KEY, "false"));
         settings.listingHideEmptyFolders = Boolean.parseBoolean(
@@ -447,6 +457,18 @@ public final class AppSettings {
                 props.getProperty(VIEWER_LOADING_INDICATOR_DELAY_KEY),
                 DEFAULT_VIEWER_LOADING_INDICATOR_DELAY_MS,
                 MIN_VIEWER_LOADING_INDICATOR_DELAY_MS, MAX_VIEWER_LOADING_INDICATOR_DELAY_MS);
+        settings.viewerColorMode =
+                io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Mode.fromSettings(
+                        props.getProperty(VIEWER_COLOR_MODE_KEY),
+                        io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Mode.MANAGED);
+        settings.viewerColorGamut =
+                io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Gamut.fromSettings(
+                        props.getProperty(VIEWER_COLOR_GAMUT_KEY),
+                        io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Gamut.CLIP);
+        settings.viewerColorApplyAlways =
+                Boolean.parseBoolean(props.getProperty(VIEWER_COLOR_APPLY_ALWAYS_KEY, "false"));
+        settings.viewerGamutApplyAlways =
+                Boolean.parseBoolean(props.getProperty(VIEWER_GAMUT_APPLY_ALWAYS_KEY, "false"));
         settings.mosaicMenuBarVisible =
                 Boolean.parseBoolean(props.getProperty(MOSAIC_MENU_BAR_KEY, "true"));
         settings.mosaicToolbarVisible =
@@ -637,6 +659,12 @@ public final class AppSettings {
         props.setProperty(VIEWER_LOADING_INDICATOR_KEY, viewerLoadingIndicator.name());
         props.setProperty(VIEWER_LOADING_INDICATOR_DELAY_KEY,
                 Integer.toString(viewerLoadingIndicatorDelayMs));
+        props.setProperty(VIEWER_COLOR_MODE_KEY, viewerColorMode.name());
+        props.setProperty(VIEWER_COLOR_GAMUT_KEY, viewerColorGamut.name());
+        props.setProperty(VIEWER_COLOR_APPLY_ALWAYS_KEY,
+                Boolean.toString(viewerColorApplyAlways));
+        props.setProperty(VIEWER_GAMUT_APPLY_ALWAYS_KEY,
+                Boolean.toString(viewerGamutApplyAlways));
         props.setProperty(MOSAIC_MENU_BAR_KEY, Boolean.toString(mosaicMenuBarVisible));
         props.setProperty(MOSAIC_TOOLBAR_KEY, Boolean.toString(mosaicToolbarVisible));
         props.setProperty(MOSAIC_STATUS_BAR_KEY, Boolean.toString(mosaicStatusBarVisible));
@@ -816,7 +844,7 @@ public final class AppSettings {
 
     /**
      * The application look applied across every window (default
-     * {@link Theme#CUPERTINO_DARK}). Applied live by {@code ui.ThemeManager} when
+     * {@link Theme#PLAIN_DARK}). Applied live by {@code ui.ThemeManager} when
      * changed in the Settings dialog.
      */
     public Theme theme() {
@@ -1046,9 +1074,8 @@ public final class AppSettings {
     }
 
     /**
-     * Whether junk files are dropped from listings. On by default — see
-     * {@code MediaService.setListingIgnoreJunk} for why a visible change to
-     * existing listings is nonetheless the right default. Identifiers say
+     * Whether junk files are dropped from listings. Off by default, so the
+     * positive Show ▸ System Files menu item starts selected. Identifiers say
      * "junk" because the media layer already does; the menu says "system
      * files", because a menu item should not call a user's disk junk.
      */
@@ -1365,6 +1392,49 @@ public final class AppSettings {
     public void setViewerLoadingIndicator(LoadingIndicator indicator) {
         this.viewerLoadingIndicator = indicator == null
                 ? DEFAULT_VIEWER_LOADING_INDICATOR : indicator;
+    }
+
+    /**
+     * Persisted default still-image color policy (default MANAGED + CLIP).
+     * The viewer seeds {@link io.github.ghosthack.mediabrowser.media.color.ColorPolicy}
+     * from these and owns per-image transient overrides on top.
+     */
+    public io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Mode viewerColorMode() {
+        return viewerColorMode;
+    }
+
+    public void setViewerColorMode(
+            io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Mode mode) {
+        this.viewerColorMode = mode == null
+                ? io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Mode.MANAGED : mode;
+    }
+
+    public io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Gamut viewerColorGamut() {
+        return viewerColorGamut;
+    }
+
+    public void setViewerColorGamut(
+            io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Gamut gamut) {
+        this.viewerColorGamut = gamut == null
+                ? io.github.ghosthack.mediabrowser.media.color.ColorPolicy.Gamut.CLIP : gamut;
+    }
+
+    /** Whether Color menu selections persist as the default instead of per-image. */
+    public boolean viewerColorApplyAlways() {
+        return viewerColorApplyAlways;
+    }
+
+    public void setViewerColorApplyAlways(boolean applyAlways) {
+        this.viewerColorApplyAlways = applyAlways;
+    }
+
+    /** Whether Gamut menu selections persist as the default instead of per-image. */
+    public boolean viewerGamutApplyAlways() {
+        return viewerGamutApplyAlways;
+    }
+
+    public void setViewerGamutApplyAlways(boolean applyAlways) {
+        this.viewerGamutApplyAlways = applyAlways;
     }
 
     /**

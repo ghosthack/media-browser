@@ -3,6 +3,7 @@ package io.github.ghosthack.mediabrowser.ui;
 import io.github.ghosthack.mediabrowser.AppSettings;
 
 import javafx.animation.PauseTransition;
+import javafx.application.Platform;
 import javafx.beans.value.ChangeListener;
 import javafx.scene.control.SplitPane;
 import javafx.scene.layout.Region;
@@ -38,6 +39,14 @@ final class SidePanelWidth {
     private final PauseTransition saveDebounce = new PauseTransition(Duration.millis(250));
     /** Set while waiting for the first layout pass to give the split a width. */
     private ChangeListener<Number> pendingApply;
+    /**
+     * True from a host-width change through the deferred divider placement.
+     * JavaFX can report intermediate panel widths while a Stage enters or
+     * leaves full screen; none of those are user divider drags.
+     */
+    private boolean hostResizePending;
+    /** Coalesces the width changes emitted during one window resize/pulse. */
+    private boolean resizeApplyQueued;
     /** The split's width at the last stack-width change; see the listener. */
     private double lastTotalWidth = -1;
     /** The width {@link #apply()} last asked for, so we don't persist our own placement. */
@@ -51,12 +60,33 @@ final class SidePanelWidth {
         // it absorbs the change (the way the panels behaved in BorderPane).
         SplitPane.setResizableWithParent(panels, false);
 
+        // A full-screen transition is different from an ordinary SplitPane
+        // layout on some JavaFX/window-manager combinations: its divider keeps
+        // the fraction calculated for the full-screen width. On restore that
+        // fraction can squeeze a 280px panel down to its 160px minimum. Reapply
+        // the remembered pixel width after the host has settled for the pulse.
+        split.widthProperty().addListener((o, was, now) -> {
+            if (now.doubleValue() <= 0) return;
+            hostResizePending = true;
+            if (resizeApplyQueued) return;
+            resizeApplyQueued = true;
+            Platform.runLater(() -> {
+                try {
+                    apply();
+                } finally {
+                    resizeApplyQueued = false;
+                    hostResizePending = false;
+                }
+            });
+        });
+
         panels.widthProperty().addListener((o, was, now) -> {
             double width = now.doubleValue();
             double total = split.getWidth();
             boolean splitResized = total != lastTotalWidth;
             lastTotalWidth = total;
             if (width < 1 || !split.getItems().contains(panels)) return;   // hidden, not resized
+            if (hostResizePending) return;                  // Stage/full-screen transition
             if (splitResized) return;                       // the window moved it, not the user
             if (Math.abs(width - requestedWidth) < 1) return;   // our own placement
             if (Math.abs(width - settings.sidePanelWidth()) < 1) return;

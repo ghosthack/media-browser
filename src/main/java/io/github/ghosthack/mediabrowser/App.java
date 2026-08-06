@@ -50,6 +50,11 @@ public final class App extends Application {
         // backends — applied before the backend binds so the first playback
         // session already honours it.
         HwDecode.configure(settings.decodeDevice());
+        // Still-image color policy — before the backend binds, so the very
+        // first decode (thumbnails included) already honours the persisted
+        // mode/gamut defaults.
+        io.github.ghosthack.mediabrowser.media.color.ColorPolicy.set(
+                settings.viewerColorMode(), settings.viewerColorGamut());
         String configured = settings.mediaBackend();
         try {
             // fromSettings throws for a recognized-but-unavailable selection
