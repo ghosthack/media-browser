@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Exercise the real native launcher from a jpackage app image. No media fixture
-# is required: App's private --package-smoke route initializes the default
-# bundled backend and exits before starting JavaFX.
+# is required: App's private --package-smoke route exercises the shared AWT
+# raster bridge, initializes the default bundled backend and exits before
+# starting JavaFX.
 set -euo pipefail
 
 if (( $# != 1 )); then
@@ -52,7 +53,7 @@ done
     exit 1
 }
 PACKAGED_MODULES="$(sed -n 's/^MODULES="\(.*\)"$/\1/p' "$RUNTIME_RELEASE" | tr ' ' '\n')"
-for required in jdk.incubator.vector java.xml jdk.unsupported jdk.zipfs; do
+for required in java.desktop jdk.incubator.vector java.xml jdk.unsupported jdk.zipfs; do
     grep -Fxq "$required" <<<"$PACKAGED_MODULES" || {
         echo "error: packaged Java runtime is missing module: $required" >&2
         exit 1

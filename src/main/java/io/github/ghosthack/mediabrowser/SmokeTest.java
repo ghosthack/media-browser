@@ -1,12 +1,14 @@
 package io.github.ghosthack.mediabrowser;
 
 import io.github.ghosthack.mediabrowser.gl.GlVideoRenderer;
+import io.github.ghosthack.mediabrowser.media.BufferedImageRaster;
 import io.github.ghosthack.mediabrowser.media.MediaBackend;
 import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.VideoStream;
 
+import java.awt.image.BufferedImage;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
@@ -26,6 +28,7 @@ import java.nio.file.Path;
 public final class SmokeTest {
 
     public static void main(String[] args) {
+        verifyAwtRasterBridge();
         var backend = MediaBackend.fromSettings(System.getProperty("media.backend"));
         // Playback decode policy, e.g. -Ddecode.device=hardware for the hw
         // playback smoke (FFM backends only; see media.ffm.HwDecode).
@@ -80,6 +83,28 @@ public final class SmokeTest {
                 }
             }
         }
+    }
+
+    /**
+     * Resolves and exercises the {@code java.desktop} classes shared by the
+     * ImageIO, jcodec and color-management paths. The packaged-runtime smoke
+     * invokes {@code SmokeTest} without fixtures, so this synthetic pixel keeps
+     * a trimmed jpackage image from passing CI when its first real decode would
+     * fail with {@code NoClassDefFoundError: java/awt/image/Raster}.
+     */
+    private static void verifyAwtRasterBridge() {
+        BufferedImage image = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
+        image.setRGB(0, 0, 0x80402010);
+        RasterFrame frame = BufferedImageRaster.toRaster(image);
+        byte[] bgra = frame.bgra();
+        if (frame.width() != 1 || frame.height() != 1
+                || (bgra[0] & 0xff) != 0x10
+                || (bgra[1] & 0xff) != 0x20
+                || (bgra[2] & 0xff) != 0x40
+                || (bgra[3] & 0xff) != 0x80) {
+            throw new IllegalStateException("AWT raster bridge produced invalid BGRA output");
+        }
+        System.out.println("AWT raster bridge: 1x1 BGRA OK");
     }
 
     /**
