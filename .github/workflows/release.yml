@@ -107,10 +107,29 @@ jobs:
           security unlock-keychain -p actions "$keychain"
           security import "$certificate" -k "$keychain" \
             -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          intermediate="$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          curl --fail --silent --show-error --location \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+            --output "$intermediate"
+          intermediate_sha256="$(openssl x509 -inform DER -in "$intermediate" \
+            -noout -fingerprint -sha256 | cut -d= -f2 | tr -d :)"
+          if [[ "$intermediate_sha256" != \
+                F16CD3C54C7F83CEA4BF1A3E6A0819C8AAA8E4A1528FD144715F350643D2DF3A ]]; then
+            echo "Unexpected Developer ID G2 intermediate fingerprint." >&2
+            exit 1
+          fi
+          security add-certificates -k "$keychain" "$intermediate"
           security set-key-partition-list -S apple-tool:,apple: \
             -s -k actions "$keychain"
+          valid_identity_count="$(security find-identity -v -p codesigning "$keychain" | \
+            sed -n 's/^ *\([0-9][0-9]*\) valid identities found$/\1/p')"
+          if [[ "$valid_identity_count" != "1" ]]; then
+            echo "Expected exactly one valid macOS signing identity." >&2
+            security find-identity -v -p codesigning "$keychain" >&2
+            exit 1
+          fi
           echo "MACOS_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
-          rm -f "$certificate"
+          rm -f "$certificate" "$intermediate"
 
       - name: Build and package macOS or Linux
         if: matrix.asset != 'windows-x64'
