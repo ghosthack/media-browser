@@ -209,10 +209,25 @@ jobs:
             echo "Expected exactly one DMG to notarize." >&2
             exit 1
           fi
+          submission="$RUNNER_TEMP/media-browser-notary-submission.json"
           xcrun notarytool submit "${images[0]}" --wait \
             --apple-id "$NOTARY_APPLE_ID" \
             --password "$NOTARY_PASSWORD" \
-            --team-id "$NOTARY_TEAM_ID"
+            --team-id "$NOTARY_TEAM_ID" \
+            --output-format json > "$submission"
+          cat "$submission"
+          submission_id="$(jq -r '.id // empty' "$submission")"
+          submission_status="$(jq -r '.status // empty' "$submission")"
+          if [[ "$submission_status" != "Accepted" ]]; then
+            echo "Apple notarization failed with status: $submission_status" >&2
+            if [[ -n "$submission_id" ]]; then
+              xcrun notarytool log "$submission_id" \
+                --apple-id "$NOTARY_APPLE_ID" \
+                --password "$NOTARY_PASSWORD" \
+                --team-id "$NOTARY_TEAM_ID" || true
+            fi
+            exit 1
+          fi
           xcrun stapler staple "${images[0]}"
           xcrun stapler validate "${images[0]}"
 

@@ -83,6 +83,58 @@ fi
 
 shopt -s nullglob
 
+sign_macos_jar_natives() {
+    local signing_identity="$1"
+    local signing_root archive archive_root entry native_count=0
+    local -a native_entries
+
+    signing_root="$(mktemp -d "${TMPDIR:-/tmp}/media-browser-native-sign.XXXXXX")"
+
+    for archive in "$INPUT_DIR"/*.jar; do
+        native_entries=()
+        while IFS= read -r entry; do
+            case "$entry" in
+                /*|../*|*/../*|*/..)
+                    echo "error: unsafe native JAR entry: $entry" >&2
+                    rm -rf "$signing_root"
+                    return 1
+                    ;;
+                *.dylib|*.jnilib)
+                    native_entries+=("$entry")
+                    ;;
+            esac
+        done < <(jar tf "$archive")
+        (( ${#native_entries[@]} > 0 )) || continue
+
+        archive_root="$signing_root/$(basename "$archive")"
+        mkdir -p "$archive_root"
+        (
+            cd "$archive_root"
+            jar xf "$archive" "${native_entries[@]}"
+            for entry in "${native_entries[@]}"; do
+                if [[ -n "${MACOS_KEYCHAIN:-}" ]]; then
+                    codesign --force --sign "$signing_identity" \
+                        --timestamp --options runtime \
+                        --keychain "$MACOS_KEYCHAIN" "$entry"
+                else
+                    codesign --force --sign "$signing_identity" \
+                        --timestamp --options runtime "$entry"
+                fi
+                codesign --verify --strict --verbose=2 "$entry"
+            done
+            zip -q "$archive" "${native_entries[@]}"
+        )
+        native_count=$((native_count + ${#native_entries[@]}))
+    done
+
+    rm -rf "$signing_root"
+    if (( native_count == 0 )); then
+        echo "error: no embedded macOS native libraries were found to sign" >&2
+        return 1
+    fi
+    echo "==> Signed $native_count embedded macOS native libraries"
+}
+
 if [[ "$MODE" != "installer" ]]; then
     rm -rf "$INPUT_DIR" "$PACKAGE_ROOT"
     mkdir -p "$INPUT_DIR" "$IMAGE_DIR" "$RELEASE_DIR"
@@ -100,6 +152,15 @@ if [[ "$MODE" != "installer" ]]; then
         exit 1
     fi
     MAIN_JAR="$(basename "${APP_JARS[0]}")"
+
+    # Apple's notary service recursively scans native binaries stored inside
+    # dependency JARs. jpackage signs the app image, but it cannot reach into
+    # those archives, so sign and timestamp the embedded Mach-O libraries
+    # before the JARs are copied into the image.
+    if [[ "$PLATFORM" == "macos" && -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
+        echo "==> Signing embedded macOS native libraries"
+        sign_macos_jar_natives "$MACOS_SIGNING_IDENTITY"
+    fi
 
     case "$PLATFORM" in
         macos)   ICON="$ROOT/packaging/icons/media-browser.icns" ;;
