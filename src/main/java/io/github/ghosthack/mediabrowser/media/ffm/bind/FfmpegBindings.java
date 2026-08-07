@@ -36,10 +36,12 @@ public interface FfmpegBindings {
 
     /**
      * Opens {@code file} and reads stream info, returning the
-     * {@code AVFormatContext**} holder (allocated in {@code arena}). Throws
+     * {@code AVFormatContext**} holder (allocated in {@code arena}). When
+     * {@code inputFormatName} is non-null, it names the demuxer FFmpeg should
+     * use instead of auto-probing (for example {@code "mjpeg"}). Throws
      * {@link MediaException} on failure (and closes any partially-open context).
      */
-    MemorySegment openInput(Arena arena, Path file);
+    MemorySegment openInput(Arena arena, Path file, String inputFormatName);
 
     /** Dereferences and right-sizes the {@code AVFormatContext*} from its holder. */
     MemorySegment derefFormatContext(MemorySegment ctxPtr);

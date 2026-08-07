@@ -3,6 +3,10 @@ package io.github.ghosthack.mediabrowser.media.color;
 import com.drew.imaging.ImageMetadataReader;
 import com.drew.metadata.Directory;
 import com.drew.metadata.Tag;
+import com.drew.metadata.gif.GifAnimationDirectory;
+import com.drew.metadata.gif.GifControlDirectory;
+import com.drew.metadata.gif.GifHeaderDirectory;
+import com.drew.metadata.gif.GifImageDirectory;
 import com.drew.metadata.xmp.XmpDirectory;
 import io.github.ghosthack.mediabrowser.media.Metadata;
 
@@ -15,7 +19,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-/** Adds metadata-extractor's EXIF/XMP/IPTC/ICC inventory after base FFmpeg data. */
+/** Adds metadata-extractor's image metadata inventory after base FFmpeg data. */
 final class MetadataEnricher {
 
     static final Metadata.Provider PROVIDER = new Metadata.Provider(
@@ -31,8 +35,16 @@ final class MetadataEnricher {
             return base;
         }
 
+        int gifFrameCount = 0;
+        boolean hasGifAnimationDirectory = false;
+        for (Directory directory : extracted.getDirectories()) {
+            if (directory instanceof GifImageDirectory) gifFrameCount++;
+            if (directory instanceof GifAnimationDirectory) hasGifAnimationDirectory = true;
+        }
+
         LinkedHashMap<String, List<Metadata.Entry>> groups = new LinkedHashMap<>();
         Map<String, Set<String>> keys = new LinkedHashMap<>();
+        Map<String, Integer> directoryOccurrences = new LinkedHashMap<>();
         for (Metadata.Group group : base.groups()) {
             groups.put(group.name(), new ArrayList<>(group.entries()));
             HashSet<String> existing = new HashSet<>();
@@ -41,7 +53,17 @@ final class MetadataEnricher {
         }
 
         for (Directory directory : extracted.getDirectories()) {
-            String group = directory.getName();
+            // Graphic-control and image-descriptor blocks are per-frame decode
+            // instructions, not useful file-level metadata. A large animation
+            // can contain hundreds of each, so summarize them instead.
+            if (directory instanceof GifControlDirectory
+                    || directory instanceof GifImageDirectory) continue;
+
+            String directoryName = directory.getName();
+            int occurrence = directoryOccurrences.merge(directoryName, 1, Integer::sum);
+            // Preserve repeated file-level directories such as GIF comments.
+            String group = occurrence == 1
+                    ? directoryName : directoryName + " " + occurrence;
             if (directory instanceof XmpDirectory xmp) {
                 xmp.getXmpProperties().forEach((key, value) ->
                         add(groups, keys, group, Metadata.Entry.of(key, value)));
@@ -59,6 +81,14 @@ final class MetadataEnricher {
                     entry = Metadata.Entry.of(tag.getTagName(), value);
                 }
                 add(groups, keys, group, entry);
+            }
+            if (directory instanceof GifAnimationDirectory && gifFrameCount > 0) {
+                add(groups, keys, group,
+                        Metadata.Entry.of("Frame Count", Integer.toString(gifFrameCount)));
+            } else if (directory instanceof GifHeaderDirectory
+                    && gifFrameCount > 0 && !hasGifAnimationDirectory) {
+                add(groups, keys, "GIF Animation",
+                        Metadata.Entry.of("Frame Count", Integer.toString(gifFrameCount)));
             }
         }
 

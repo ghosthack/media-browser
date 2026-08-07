@@ -57,9 +57,14 @@ final class PdfEntryDetails {
                     return stack.equals(List.of(PdfFilter.Decoder.JPEG))
                             || stack.equals(List.of(PdfFilter.Decoder.JPEG_2000))
                             || stack.equals(List.of(PdfFilter.Decoder.JBIG2))
+                            || isViewableFlateRaster(raster)
                             || isFlateWrappedStandaloneRaster(raster);
                 })
                 .map(pdf -> MediaKind.IMAGE);
+    }
+
+    private static boolean isViewableFlateRaster(PdfRasterDescriptor raster) {
+        return StreamFileSystemProvider.supportsPdfFlateRaster(raster);
     }
 
     private static boolean isFlateWrappedStandaloneRaster(PdfRasterDescriptor raster) {
@@ -144,6 +149,8 @@ final class PdfEntryDetails {
         addIndex(builder, group, "JBIG2 globals entry", raster.jbig2GlobalsEntryIndex());
         if (raster.decoderStack().equals(List.of(PdfFilter.Decoder.JBIG2))) {
             builder.add(group, "Presentation", "PNG (decoder-only rendition)");
+        } else if (isViewableFlateRaster(raster)) {
+            builder.add(group, "Presentation", "PNG (decoded Flate raster)");
         }
         for (int i = 0; i < raster.filters().size(); i++) {
             PdfFilter filter = raster.filters().get(i);

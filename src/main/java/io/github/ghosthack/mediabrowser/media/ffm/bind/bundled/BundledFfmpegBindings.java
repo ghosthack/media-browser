@@ -52,10 +52,11 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     }
 
     @Override
-    public MemorySegment openInput(Arena arena, Path file) {
+    public MemorySegment openInput(Arena arena, Path file, String inputFormatName) {
         MemorySegment ctxPtr = arena.allocate(ValueLayout.ADDRESS);
+        MemorySegment inputFormat = findInputFormat(arena, inputFormatName);
         int err = FFmpeg.avformat_open_input(ctxPtr, arena.allocateFrom(file.toString()),
-                MemorySegment.NULL, MemorySegment.NULL);
+                inputFormat, MemorySegment.NULL);
         if (err < 0) {
             throw new MediaException("ffmpeg: cannot open " + file.getFileName()
                     + ": " + errStr(err));
@@ -67,6 +68,11 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
                     + ": " + errStr(err));
         }
         return ctxPtr;
+    }
+
+    private static MemorySegment findInputFormat(Arena arena, String name) {
+        if (name == null) return MemorySegment.NULL;
+        return FFmpeg.av_find_input_format(arena.allocateFrom(name));
     }
 
     @Override

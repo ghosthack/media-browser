@@ -1,6 +1,7 @@
 package io.github.ghosthack.mediabrowser.media.ffm;
 
 import io.github.ghosthack.mediabrowser.media.ColorProfile;
+import io.github.ghosthack.mediabrowser.media.ContentSniffer;
 import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
 import io.github.ghosthack.mediabrowser.media.MediaFacade;
@@ -290,9 +291,9 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                         thumb.kind(), thumb.colorProfile());
             }
         }
-        if (thumb.kind() == MediaKind.VIDEO && STILL_EXTENSIONS.contains(extension(file))) {
+        if (thumb.kind() == MediaKind.VIDEO && isStillCandidate(file)) {
             // The kind labels the result (e.g. the mosaic's video badge), so
-            // refine still-extension files with one cheap header probe — an
+            // refine still candidates with one cheap header probe — an
             // animated GIF/AVIF keeps VIDEO via its duration, a plain still
             // becomes IMAGE. AV-extension files never pay the second open.
             return new Thumbnail(thumb.frame(), refineKind(av.probe(file, -1), file).kind(),
@@ -409,12 +410,11 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
 
     /**
      * Downgrades a {@link MediaKind#VIDEO} probe to {@link MediaKind#IMAGE}
-     * when the file is a still: known still extension, no audio stream, and at
-     * most one frame's worth of container duration — FFmpeg demuxes stills as
-     * one-frame video, and the image2 demuxer (JPEG et al.) reports that one
-     * frame as a 1/fps duration rather than none. A real animation (GIF/AVIF)
-     * carries multiple frames' duration and stays VIDEO. Returns the original
-     * probe unchanged otherwise.
+     * when the file is a still: known still extension (or a strong still-image
+     * content signature for an unknown name), no audio stream, and at most one
+     * frame's worth of container duration — FFmpeg demuxes stills as one-frame
+     * video. A real animation (GIF/AVIF) carries multiple frames' duration and
+     * stays VIDEO. Returns the original probe unchanged otherwise.
      */
     private static MediaProbe refineKind(MediaProbe probe, Path file) {
         boolean atMostOneFrame = probe.durationMicros() <= 0
@@ -422,7 +422,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                         && probe.durationMicros() * probe.frameRate() <= 1_500_000);
         if (probe.kind() != MediaKind.VIDEO
                 || probe.audioCodec() != null
-                || !STILL_EXTENSIONS.contains(extension(file))
+                || !isStillCandidate(file)
                 || !atMostOneFrame) {
             return probe;
         }
@@ -576,14 +576,27 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     }
 
     /**
-     * JFIF-wrapped JPEG by name — the TurboJPEG fast path and the EXIF
-     * orientation bake key off this. {@code .jpe}/{@code .jfif} are the same
-     * bitstream under older Windows/browser spellings, so they get both.
+     * JFIF-wrapped JPEG by name, or by strong content signature when the name
+     * is unknown — the TurboJPEG fast path and EXIF orientation bake key off
+     * this. {@code .jpe}/{@code .jfif} are the same bitstream under older
+     * Windows/browser spellings, so they get both.
      */
     private static boolean isJpeg(Path file) {
         String ext = extension(file);
-        return "jpg".equals(ext) || "jpeg".equals(ext)
-                || "jpe".equals(ext) || "jfif".equals(ext);
+        if ("jpg".equals(ext) || "jpeg".equals(ext)
+                || "jpe".equals(ext) || "jfif".equals(ext)) {
+            return true;
+        }
+        return !STILL_EXTENSIONS.contains(ext) && !AV_EXTENSIONS.contains(ext)
+                && ContentSniffer.canonicalExtension(file).filter("jpg"::equals).isPresent();
+    }
+
+    /** Same promotion-only naming policy as content detection. */
+    private static boolean isStillCandidate(Path file) {
+        String ext = extension(file);
+        if (STILL_EXTENSIONS.contains(ext)) return true;
+        if (AV_EXTENSIONS.contains(ext)) return false;
+        return ContentSniffer.sniff(file).filter(MediaKind.IMAGE::equals).isPresent();
     }
 
     private static String extension(Path file) {

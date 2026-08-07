@@ -519,10 +519,18 @@ public final class MoveDialog {
         // and TREE we keep focus on the root so stray keystrokes can't disturb
         // the list/tree; the bright zone border + selection make the active zone
         // obvious. Mirrors the predecessor, which parked focus on the dialog itself.
+        //
+        // Do not request focus again when the right control already owns it.
+        // Text edits synchronously update the model and refresh the dialog; a
+        // re-entrant requestFocus()/positionCaret() while TextField is handling
+        // Backspace can make JavaFX drop the field's focus. It also needlessly
+        // moved the caret to the end after every edit.
         if (model.getFocusZone() == MoveDialogFocusZone.INPUT) {
-            targetField.requestFocus();
-            targetField.positionCaret(targetField.getText().length());
-        } else {
+            if (!targetField.isFocused()) {
+                targetField.requestFocus();
+                targetField.positionCaret(targetField.getText().length());
+            }
+        } else if (!root.isFocused()) {
             root.requestFocus();
         }
     }

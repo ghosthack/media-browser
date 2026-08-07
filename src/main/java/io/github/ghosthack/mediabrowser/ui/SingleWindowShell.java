@@ -28,8 +28,8 @@ import java.util.EnumMap;
  * replaces, {@link #back} pops (falling back to the browser). Escape unwinds
  * only from the viewer; leaving the mosaic goes through the menu bar
  * (Window ▸ Browser / File ▸ Close Window). Switching
- * away from the viewer leaves full-screen first, mirroring the separate-window
- * behaviour where Escape exited full-screen before hiding the viewer stage.</p>
+ * away from the viewer preserves full-screen because it belongs to the shared
+ * application window, not to whichever view currently fills it.</p>
  *
  * <p>The shell also centralizes what used to be per-stage plumbing: the shared
  * theme registration, the undecorated-window chrome (edge resize, drag
@@ -64,8 +64,8 @@ final class SingleWindowShell extends AppShell {
         ThemeManager.get().register(scene);
         WindowChrome.installStylesheet(scene);
         stage.setScene(scene);
-        // Escape is handled by the viewer's own key filter, where it can mean
-        // "leave full screen" or "back to the previous view".
+        // Escape is handled by the viewer's own key filter. Full screen belongs
+        // to this shared application window and survives a viewer-to-view switch.
         stage.setFullScreenExitKeyCombination(KeyCombination.NO_MATCH);
         stage.setFullScreenExitHint("");
         if (undecorated) {
@@ -155,9 +155,6 @@ final class SingleWindowShell extends AppShell {
                 // Dedupe so toggling between two views never grows the stack.
                 backStack.remove(prev);
                 backStack.push(prev);
-            }
-            if (prev == AppView.VIEWER && stage.isFullScreen()) {
-                stage.setFullScreen(false);
             }
         }
         activeView.set(v);

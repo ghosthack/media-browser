@@ -78,7 +78,7 @@ final class FfmpegVideoStream implements VideoStream {
         this.hwDeviceType = hw != null ? hw.deviceType() : -1;
         boolean ok = false;
         try {
-            ctxPtr = ff.openInput(arena, file);
+            ctxPtr = FfmpegInputFormats.open(ff, arena, file);
             ctx = ff.derefFormatContext(ctxPtr);
 
             MemorySegment decoderPtr = arena.allocate(ValueLayout.ADDRESS);

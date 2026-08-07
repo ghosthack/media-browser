@@ -19,13 +19,14 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Still-only ICC and metadata decorator over the bundled FFmpeg + TurboJPEG
- * facade. The wrapped facade remains the sole decoder and playback engine.
+ * Still-only ICC and image-metadata decorator over the bundled FFmpeg +
+ * TurboJPEG facade. Metadata enrichment also covers animated GIFs, while the
+ * wrapped facade remains the sole decoder and playback engine.
  */
 public final class ColorManagedMediaFacade implements MediaFacade {
 
-    private static final Set<String> STILL_EXTENSIONS = Set.of(
-            "jpg", "jpeg", "jpe", "jfif", "png", "apng", "webp", "bmp",
+    private static final Set<String> METADATA_ENRICHMENT_EXTENSIONS = Set.of(
+            "jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "webp", "bmp",
             "tif", "tiff", "avif", "heic", "heif", "jxl", "jp2", "j2k",
             "jpf", "jls", "pcd", "tga", "pcx", "ppm", "pgm", "pbm",
             "pnm", "pam", "pfm", "xpm", "xbm", "xwd", "sgi", "ras",
@@ -144,7 +145,7 @@ public final class ColorManagedMediaFacade implements MediaFacade {
     @Override
     public Metadata readMetadata(Path file) {
         Metadata base = delegate.readMetadata(file);
-        return isStill(file) ? MetadataEnricher.enrich(file, base) : base;
+        return supportsMetadataEnrichment(file) ? MetadataEnricher.enrich(file, base) : base;
     }
 
     @Override
@@ -167,10 +168,10 @@ public final class ColorManagedMediaFacade implements MediaFacade {
         delegate.close();
     }
 
-    private static boolean isStill(Path file) {
+    private static boolean supportsMetadataEnrichment(Path file) {
         String name = file.getFileName().toString();
         int dot = name.lastIndexOf('.');
-        return dot >= 0 && STILL_EXTENSIONS.contains(
+        return dot >= 0 && METADATA_ENRICHMENT_EXTENSIONS.contains(
                 name.substring(dot + 1).toLowerCase(Locale.ROOT));
     }
 }

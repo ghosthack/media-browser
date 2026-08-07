@@ -7,6 +7,7 @@ import io.github.ghosthack.pdfmedia.PdfArchive;
 import io.github.ghosthack.pdfmedia.PdfEntry;
 import io.github.ghosthack.pdfmedia.PdfFilter;
 import io.github.ghosthack.pdfmedia.PdfMrcComposite;
+import io.github.ghosthack.pdfmedia.PdfRasterDescriptor;
 import io.github.ghosthack.seven.SevenArchive;
 import io.github.ghosthack.seven.SevenEntry;
 import io.github.ghosthack.unrar.RarArchive;
@@ -179,16 +180,23 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
             for (PdfEntry entry : reader.entries()) {
                 String name = uniquePdfName(entry, usedNames);
                 boolean decodedJbig2 = rasterEncodedAs(entry, PdfFilter.Decoder.JBIG2);
+                boolean decodedFlate = PdfFlateImages.supports(entry);
                 String wrappedRasterExtension = flateWrappedRasterExtension(entry);
                 archive.add(name, false, entry.declaredSize().orElse(-1), null, entry,
                         () -> reader.openStream(entry),
-                        decodedJbig2 ? "png" : wrappedRasterExtension,
+                        decodedJbig2 || decodedFlate ? "png" : wrappedRasterExtension,
                         decodedJbig2
                                 ? () -> PdfJbig2Images.openPng(reader, entry)
-                                : wrappedRasterExtension == null
-                                        ? null
-                                        : () -> new InflaterInputStream(reader.openStream(entry)),
-                        decodedJbig2 ? () -> PdfJbig2Images.decode(reader, entry) : null);
+                                : decodedFlate
+                                        ? () -> PdfFlateImages.openPng(reader, entry)
+                                        : wrappedRasterExtension == null
+                                                ? null
+                                                : () -> new InflaterInputStream(
+                                                        reader.openStream(entry)),
+                        decodedJbig2
+                                ? () -> PdfJbig2Images.decode(reader, entry)
+                                : decodedFlate
+                                        ? () -> PdfFlateImages.decode(reader, entry) : null);
             }
             for (PdfMrcComposite composite : reader.mrcComposites()) {
                 if (!supportsMrc(reader, composite)) continue;
@@ -316,6 +324,11 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
         StreamArchive.Node node = stream.getFileSystem().entry(stream.entryPath());
         return node.rasterOpener == null
                 ? Optional.empty() : Optional.of(node.rasterOpener.open());
+    }
+
+    /** Whether this consumer can turn a single Flate PDF raster into a viewable image. */
+    public static boolean supportsPdfFlateRaster(PdfRasterDescriptor raster) {
+        return PdfFlateImages.supports(raster);
     }
 
     private Layer layer(StreamFileSystem fileSystem, int entryIndex) throws IOException {

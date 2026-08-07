@@ -58,3 +58,30 @@
     -fx-scale-x: 1.3;
     -fx-scale-y: 1.3;
 }
+
+/*
+ * Modena stripes ordinary TableView rows but omits the equivalent rule for
+ * TreeTableView. Metadata is the only striped tree table in the panel stack;
+ * use the same alternate-row lookup colour as Info and Diagnostics. Cupertino
+ * already supplies its own .tree-table-view.striped treatment.
+ */
+.tree-table-view.headerless-table.striped .tree-table-row-cell:filled:odd {
+    -fx-background: -fx-control-inner-background-alt;
+}
+
+/* Carry the bands through unused virtual rows below the last item. Cupertino
+ * normally makes empty table/tree-table rows transparent; the shared Modena
+ * lookup resolves to the same alternate colour each active theme uses. */
+.table-view.headerless-table.striped .table-row-cell:empty:odd,
+.tree-table-view.headerless-table.striped .tree-table-row-cell:empty:odd {
+    -fx-background-color: -fx-control-inner-background-alt;
+    -fx-background-insets: 0;
+}
+
+.tree-table-view.headerless-table.striped .tree-table-row-cell:filled:odd:selected {
+    -fx-background: -fx-selection-bar-non-focused;
+}
+
+.tree-table-view.headerless-table.striped:focused .tree-table-row-cell:filled:odd:selected {
+    -fx-background: -fx-selection-bar;
+}

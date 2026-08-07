@@ -614,8 +614,8 @@ public final class ViewerWindow implements AppShell.ShellView {
         fullScreenToggle.setTooltip(new Tooltip("Toggle full screen (Escape leaves)"));
         fullScreenToggle.selectedProperty().addListener(
                 (obs, was, sel) -> shell.setFullScreen(sel));
-        // Mirrors the shell's stage; also resyncs the toggle when the shell
-        // exits full screen on a view switch.
+        // Mirrors the shell's stage, including native window-manager changes
+        // (such as macOS's green full-screen button).
         shell.fullScreenProperty().addListener(
                 (obs, was, is) -> fullScreenToggle.setSelected(is));
 
@@ -1232,13 +1232,14 @@ public final class ViewerWindow implements AppShell.ShellView {
      * Leaves the viewer because Up/Down forwarded from it landed the host's
      * selection on a non-viewable entry (a folder, {@code ..}, or other file):
      * there is nothing left to show, so drop back to the view that forwarded
-     * the key. Unlike Escape, this goes back even from full-screen, since the
-     * shown item is no longer the host's selection. A no-op when the viewer is
-     * not the active view.
+     * the key. In the multi-window shell this leaves the viewer stage's full
+     * screen and goes back in the same invocation (unlike Escape's two-step
+     * behaviour); the single-window shell keeps the application full-screen.
+     * A no-op when the viewer is not the active view.
      */
     public void hideForNonViewableTarget() {
         if (!shell.isShowingNow(AppShell.AppView.VIEWER)) return;
-        if (shell.isFullScreen()) shell.setFullScreen(false);
+        shell.exitTransientViewerFullScreen();
         shell.back(AppShell.AppView.VIEWER);
     }
 
@@ -1490,16 +1491,15 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /**
      * Escape/Enter: goes back to the previous view (mosaic or browser) through
-     * the shell's back-stack. In full-screen mode the first press leaves full
-     * screen instead; a second press goes back. Leaving the viewer pauses any
-     * active playback via {@link #deactivate()}, keeping the session alive
+     * the shell's back-stack. In the multi-window shell, where full screen
+     * belongs to the separate viewer stage, the first press leaves full screen
+     * and a second press goes back. The single-window shell goes back directly
+     * and keeps its application window full-screen. Leaving the viewer pauses
+     * any active playback via {@link #deactivate()}, keeping the session alive
      * for {@link #open}.
      */
     private void goBack() {
-        if (shell.isFullScreen()) {
-            shell.setFullScreen(false);
-            return;
-        }
+        if (shell.exitTransientViewerFullScreen()) return;
         shell.back(AppShell.AppView.VIEWER);
     }
 
@@ -2642,9 +2642,10 @@ public final class ViewerWindow implements AppShell.ShellView {
         if (remaining.isEmpty() || focusPath == null) {
             siblings = List.of();
             index = -1;
-            // Nothing left to show: go back unconditionally (even from full
-            // screen, unlike Escape's two-press behaviour).
-            if (shell.isFullScreen()) shell.setFullScreen(false);
+            // Nothing left to show: go back unconditionally. A separate viewer
+            // leaves full screen in the same invocation; the single application
+            // window preserves it.
+            shell.exitTransientViewerFullScreen();
             shell.back(AppShell.AppView.VIEWER);
             return;
         }

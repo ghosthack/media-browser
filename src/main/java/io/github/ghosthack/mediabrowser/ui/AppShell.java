@@ -64,7 +64,12 @@ public abstract class AppShell {
     private final WindowMaximizer maximizer;
 
     protected AppShell(AppSettings settings) {
-        this.maximizer = new WindowMaximizer(settings.maximizeOverscan());
+        this(settings.maximizeOverscan());
+    }
+
+    /** Package-local seam for shell policy tests that need no persisted settings. */
+    AppShell(boolean maximizeOverscan) {
+        this.maximizer = new WindowMaximizer(maximizeOverscan);
     }
 
     /** Applies the packaged application artwork to a JavaFX window. */
@@ -161,4 +166,20 @@ public abstract class AppShell {
     abstract boolean isFullScreen();
 
     abstract ReadOnlyBooleanProperty fullScreenProperty();
+
+    /**
+     * Leaves full screen when it belongs to the transient viewer window.
+     * In the multi-window shell the viewer owns a separate stage, so closing
+     * it exits that stage's full-screen mode. In the single-window shell full
+     * screen belongs to the shared application window and must survive a view
+     * switch.
+     *
+     * @return whether full screen was exited, allowing an ordinary Back action
+     *         to consume its first invocation in the multi-window shell
+     */
+    final boolean exitTransientViewerFullScreen() {
+        if (singleWindow() || !isFullScreen()) return false;
+        setFullScreen(false);
+        return true;
+    }
 }

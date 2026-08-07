@@ -67,7 +67,7 @@ final class FfmpegAv {
 
     MediaProbe probe(Path file, long fileSize) {
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment ctxPtr = ff.openInput(arena, file);
+            MemorySegment ctxPtr = FfmpegInputFormats.open(ff, arena, file);
             try {
                 return describe(ff.derefFormatContext(ctxPtr), file, fileSize);
             } finally {
@@ -162,7 +162,7 @@ final class FfmpegAv {
     /** As above, decoding at a reduced {@code lowres} level (0 = full). */
     VisualResult firstFrameWithProbe(Path file, long fileSize, int lowres) {
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment ctxPtr = ff.openInput(arena, file);
+            MemorySegment ctxPtr = FfmpegInputFormats.open(ff, arena, file);
             try {
                 MemorySegment ctx = ff.derefFormatContext(ctxPtr);
                 MediaProbe probe = describe(ctx, file, fileSize);
@@ -189,7 +189,7 @@ final class FfmpegAv {
     /** As above, decoding at a reduced {@code lowres} level (0 = full). */
     Thumbnail thumbnail(Path file, int maxEdge, ThumbnailMode mode, int lowres) {
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment ctxPtr = ff.openInput(arena, file);
+            MemorySegment ctxPtr = FfmpegInputFormats.open(ff, arena, file);
             try {
                 MemorySegment ctx = ff.derefFormatContext(ctxPtr);
                 MediaProbe probe = describe(ctx, file, -1);

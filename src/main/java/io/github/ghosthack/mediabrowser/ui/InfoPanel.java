@@ -128,12 +128,12 @@ public final class InfoPanel extends VBox {
     }
 
     private static void configurePropertyTableChrome(TableView<?> table) {
-        table.getStyleClass().add("headerless-table");
+        table.getStyleClass().addAll("headerless-table", "striped");
         table.setFixedCellSize(INFO_TABLE_ROW_HEIGHT);
     }
 
     private static void configurePropertyTableChrome(TreeTableView<?> table) {
-        table.getStyleClass().add("headerless-table");
+        table.getStyleClass().addAll("headerless-table", "striped");
         table.setFixedCellSize(INFO_TABLE_ROW_HEIGHT);
     }
 

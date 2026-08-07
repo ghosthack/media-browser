@@ -27,7 +27,7 @@ final class FfmpegMetadata {
     Metadata read(Path file) {
         Metadata.Builder out = new Metadata.Builder(file);
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment ctxPtr = ff.openInput(arena, file);
+            MemorySegment ctxPtr = FfmpegInputFormats.open(ff, arena, file);
             try {
                 MemorySegment ctx = ff.derefFormatContext(ctxPtr);
                 readDict(arena, ff.containerMetadata(ctx), "Container", out);

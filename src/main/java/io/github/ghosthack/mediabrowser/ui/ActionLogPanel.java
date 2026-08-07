@@ -4,13 +4,16 @@ import io.github.ghosthack.mediabrowser.AppSettings;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
 import javafx.collections.ListChangeListener;
 import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
+import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.Separator;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.ColumnConstraints;
@@ -217,13 +220,46 @@ public final class ActionLogPanel extends VBox {
 
     /** One log row: a fixed-width timestamp column, then the summary. */
     private static final class EntryCell extends ListCell<ActionLogEntry> {
+        private static final double TIME_WIDTH = 56;
+        private static final double ROW_GAP = 8;
+        private static final double HORIZONTAL_PADDING = 12;
+
         private final Label time = new Label();
         private final Label summary = new Label();
-        private final HBox row = new HBox(8, time, summary);
+        private final HBox row = new HBox(ROW_GAP, time, summary);
+        private final Tooltip summaryTooltip = new Tooltip();
 
         EntryCell() {
-            time.setMinWidth(56);
+            setPadding(new Insets(0, HORIZONTAL_PADDING / 2, 0, HORIZONTAL_PADDING / 2));
+            setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
+
+            time.setMinWidth(TIME_WIDTH);
+            time.setPrefWidth(TIME_WIDTH);
+            time.setMaxWidth(TIME_WIDTH);
             time.setStyle("-fx-opacity: 0.7;");
+
+            summary.setMinWidth(0);
+            summary.setMaxWidth(Double.MAX_VALUE);
+            summary.setTextOverrun(OverrunStyle.ELLIPSIS);
+            summary.setTooltip(summaryTooltip);
+            HBox.setHgrow(summary, Priority.ALWAYS);
+
+            // A log row belongs to this compact viewport, rather than making
+            // VirtualFlow's preferred breadth follow an arbitrarily long path.
+            // Without this cap, the horizontal bar can steal one row of height,
+            // move the widest entry out of view, disappear, and repeat forever.
+            row.maxWidthProperty().bind(Bindings.max(0,
+                    widthProperty().subtract(HORIZONTAL_PADDING)));
+        }
+
+        @Override
+        protected double computePrefWidth(double height) {
+            // VirtualFlow uses cell.prefWidth(-1) to decide whether it needs a
+            // horizontal bar. Report the row's compressible width, not the full
+            // path width held by the summary label.
+            Insets insets = getInsets();
+            return insets.getLeft() + TIME_WIDTH + ROW_GAP
+                    + summary.minWidth(height) + insets.getRight();
         }
 
         @Override
@@ -231,10 +267,12 @@ public final class ActionLogPanel extends VBox {
             super.updateItem(entry, empty);
             if (empty || entry == null) {
                 setGraphic(null);
+                summaryTooltip.setText(null);
                 return;
             }
             time.setText(TIME_FORMAT.format(Instant.ofEpochMilli(entry.timestampMillis())));
             summary.setText(entry.summary());
+            summaryTooltip.setText(entry.summary());
             setGraphic(row);
         }
     }
