@@ -121,6 +121,7 @@ jobs:
           security add-certificates -k "$keychain" "$intermediate"
           security set-key-partition-list -S apple-tool:,apple: \
             -s -k actions "$keychain"
+          security list-keychains -d user -s "$keychain"
           valid_identity_count="$(security find-identity -v -p codesigning "$keychain" | \
             sed -n 's/^ *\([0-9][0-9]*\) valid identities found$/\1/p')"
           if [[ "$valid_identity_count" != "1" ]]; then
