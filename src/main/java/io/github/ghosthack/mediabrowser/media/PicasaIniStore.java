@@ -422,7 +422,11 @@ public final class PicasaIniStore {
         return dir.getAbsolutePath();
     }
 
-    /** Reads and parses a sidecar file, returning an empty document on any error. */
+    /**
+     * Reads and parses a sidecar file. A failed read returns a non-authoritative
+     * empty document: callers may display default adjustments, but no mutation
+     * may serialize that incomplete model over the existing user file.
+     */
     private static IniDocument parseDocument(File iniFile) {
         IniDocument doc = new IniDocument();
         if (iniFile == null || !iniFile.isFile()) {
@@ -432,7 +436,8 @@ public final class PicasaIniStore {
         try {
             lines = Files.readAllLines(iniFile.toPath(), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            return doc; // Unreadable / mid-write — treat as no recorded rotations.
+            doc.readFailure = e;
+            return doc;
         }
         LinkedHashMap<String, String> current = null;
         for (String raw : lines) {
@@ -464,6 +469,10 @@ public final class PicasaIniStore {
 
     /** Serializes a document and writes it atomically, or deletes it when empty. */
     private static void writeDocument(File iniFile, IniDocument doc) throws IOException {
+        if (doc.readFailure != null) {
+            throw new IOException("Refusing to replace unreadable sidecar: " + iniFile,
+                    doc.readFailure);
+        }
         if (doc.isEmpty()) {
             // Nothing left to persist — remove an existing (now-empty) sidecar.
             // This must propagate like the write branch below: the callers'
@@ -550,6 +559,7 @@ public final class PicasaIniStore {
     private static final class IniDocument {
         final LinkedHashMap<String, LinkedHashMap<String, String>> sections =
                 new LinkedHashMap<String, LinkedHashMap<String, String>>();
+        IOException readFailure;
 
         boolean isEmpty() {
             for (LinkedHashMap<String, String> section : sections.values()) {

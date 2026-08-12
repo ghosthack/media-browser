@@ -53,7 +53,7 @@ done
     exit 1
 }
 PACKAGED_MODULES="$(sed -n 's/^MODULES="\(.*\)"$/\1/p' "$RUNTIME_RELEASE" | tr ' ' '\n')"
-for required in java.desktop jdk.incubator.vector java.xml jdk.unsupported jdk.zipfs; do
+for required in java.desktop jdk.incubator.vector java.xml jdk.unsupported; do
     grep -Fxq "$required" <<<"$PACKAGED_MODULES" || {
         echo "error: packaged Java runtime is missing module: $required" >&2
         exit 1

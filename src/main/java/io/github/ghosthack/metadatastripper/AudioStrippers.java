@@ -31,7 +31,7 @@ final class AudioStrippers {
         }
     }
 
-    private static long leadingId3End(RandomAccessFile in) throws IOException {
+    static long leadingId3End(RandomAccessFile in) throws IOException {
         long position = 0;
         while (position + 10 <= in.length()) {
             byte[] header = readAt(in, position, 10);
@@ -98,10 +98,13 @@ final class AudioStrippers {
     }
 
     static void stripFlac(Path input, Path output) throws IOException {
-        try (InputStream in = new BufferedInputStream(Files.newInputStream(input));
+        try (RandomAccessFile in = new RandomAccessFile(input.toFile(), "r");
              RandomAccessFile out = new RandomAccessFile(output.toFile(), "rw")) {
             out.setLength(0);
-            byte[] signature = Binary.readExactly(in, 4);
+            long containerStart = leadingId3End(in);
+            in.seek(containerStart);
+            byte[] signature = new byte[4];
+            in.readFully(signature);
             if (!Binary.ascii(signature).equals("fLaC")) {
                 throw new IOException("Invalid FLAC signature");
             }
@@ -111,10 +114,11 @@ final class AudioStrippers {
             boolean sawStreamInfo = false;
             boolean last;
             do {
-                int header = readByte(in);
+                int header = in.readUnsignedByte();
                 last = (header & 0x80) != 0;
                 int type = header & 0x7f;
-                int length = (readByte(in) << 16) | (readByte(in) << 8) | readByte(in);
+                int length = (in.readUnsignedByte() << 16)
+                        | (in.readUnsignedByte() << 8) | in.readUnsignedByte();
                 if (type == 127) {
                     throw new IOException("Invalid FLAC metadata block type");
                 }
@@ -132,22 +136,30 @@ final class AudioStrippers {
                     out.write(length >>> 16);
                     out.write(length >>> 8);
                     out.write(length);
-                    Binary.copyExactly(in, out, length);
+                    copyRange(in, out, in.getFilePointer(), length);
                 } else {
-                    Binary.skipExactly(in, length);
+                    long next = in.getFilePointer() + length;
+                    if (next > in.length()) {
+                        throw new EOFException("Unexpected end of file");
+                    }
+                    in.seek(next);
                 }
             } while (!last);
 
             if (lastKeptHeader < 0) {
                 throw new IOException("FLAC has no STREAMINFO block");
             }
-            long audioStart = out.getFilePointer();
+            long audioStart = in.getFilePointer();
+            long audioEnd = trailingMetadataStart(in, audioStart);
+            if (audioEnd <= audioStart) {
+                throw new IOException("FLAC contains no audio payload after metadata removal");
+            }
             out.seek(lastKeptHeader);
             int finalHeader = out.readUnsignedByte() | 0x80;
             out.seek(lastKeptHeader);
             out.write(finalHeader);
-            out.seek(audioStart);
-            copyRemaining(in, out);
+            out.seek(out.length());
+            copyRange(in, out, audioStart, audioEnd - audioStart);
         } catch (EOFException e) {
             throw new IOException("Truncated FLAC", e);
         }
@@ -247,16 +259,6 @@ final class AudioStrippers {
         }
     }
 
-    private static void copyRemaining(InputStream in, RandomAccessFile out) throws IOException {
-        byte[] buffer = new byte[BUFFER_SIZE];
-        int count;
-        while ((count = in.read(buffer)) >= 0) {
-            if (count > 0) {
-                out.write(buffer, 0, count);
-            }
-        }
-    }
-
     private static byte[] readAt(RandomAccessFile in, long offset, int length) throws IOException {
         byte[] bytes = new byte[length];
         in.seek(offset);
@@ -284,4 +286,3 @@ final class AudioStrippers {
         return value;
     }
 }
-

@@ -2,6 +2,7 @@ package io.github.ghosthack.metadatastripper;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -18,6 +19,19 @@ final class FormatDetector {
         try (InputStream in = Files.newInputStream(path)) {
             count = in.readNBytes(header, 0, header.length);
         }
+        if (count >= 3 && startsWith(header, "ID3")) {
+            try (RandomAccessFile in = new RandomAccessFile(path.toFile(), "r")) {
+                long payload = AudioStrippers.leadingId3End(in);
+                in.seek(payload);
+                count = in.read(header);
+                if (count < 0) count = 0;
+            }
+        }
+        return detectHeader(header, count, path);
+    }
+
+    private static MediaFormat detectHeader(byte[] header, int count, Path path)
+            throws UnsupportedFormatException {
         if (count >= 3 && (header[0] & 0xff) == 0xff && (header[1] & 0xff) == 0xd8
                 && (header[2] & 0xff) == 0xff) {
             return MediaFormat.JPEG;
@@ -44,9 +58,6 @@ final class FormatDetector {
         if (count >= 12 && startsWith(header, "RIFF") && asciiAt(header, 8, "WAVE")) {
             return MediaFormat.WAV;
         }
-        if (count >= 3 && startsWith(header, "ID3")) {
-            return MediaFormat.MP3;
-        }
         if (count >= 2 && (header[0] & 0xff) == 0xff && (header[1] & 0xe0) == 0xe0) {
             return MediaFormat.MP3;
         }
@@ -69,4 +80,3 @@ final class FormatDetector {
         return true;
     }
 }
-

@@ -15,13 +15,16 @@ not a license text — each project's own license governs.
 | [jcodec](https://github.com/jcodec/jcodec) (core, javase) | 0.2.5 | BSD 2-Clause (FreeBSD) | pure-Java H.264/MPEG/ProRes video backend |
 | [media-inspection `iso9660` and `cue`](https://github.com/ghosthack/media-inspection) | 0.2.0 | MIT | bounded ISO inspection and normalized CUE/BIN data tracks |
 | [media-inspection `unrar`](https://github.com/ghosthack/media-inspection) | 0.2.0 | UnRAR License (source-available, not OSI-approved; cannot be used to recreate a RAR archiver) | read-only RAR/CBR browsing |
+| [media-inspection `zip`](https://github.com/ghosthack/media-inspection) | 0.4.0 | MIT | bounded read-only ZIP/Zip64 browsing and member streaming |
 | [media-inspection `seven`](https://github.com/ghosthack/media-inspection) | 0.2.0 | Apache-2.0 (Commons Compress portions) and 0BSD (XZ for Java portions) | read-only 7z/CB7 browsing |
 | [media-inspection `pdf-media`](https://github.com/ghosthack/media-inspection) | 0.2.0 | Apache-2.0 | read-only PDF attachment and raster-bitstream inspection, including relocated PDFBox mechanics |
 | [media-inspection `epub-media`](https://github.com/ghosthack/media-inspection) | 0.2.0 | MIT | read-only EPUB package/manifest media inspection |
 | [SLF4J](https://www.slf4j.org/) API + no-op provider | 2.0.17 | MIT | logging facade required by the RAR decoder |
-| [ffmpeg-ffm](https://github.com/ghosthack/ffmpeg-ffm) | 8.1.2-0.3.1 | MIT bindings; natives convey FFmpeg 8.1.2, LGPL v2.1+ (no GPL/version3/nonfree components) | bundled FFmpeg — stills + video for the default backend |
+| [ffmpeg-ffm](https://github.com/ghosthack/ffmpeg-ffm) | 8.1.2-0.3.5 | MIT bindings; natives convey FFmpeg 8.1.2, LGPL v2.1+ (no GPL/version3/nonfree components) | bundled FFmpeg — stills + video for the default backend |
 | [turbojpeg-ffm](https://github.com/ghosthack/turbojpeg-ffm) | 3.2.0-0.2.0 | MIT bindings; natives convey libjpeg-turbo 3.2.0 (BSD 3-Clause, IJG, zlib) | baseline-JPEG thumbnail fast path |
 | [libraw-ffm](https://github.com/ghosthack/libraw-ffm) | 0.22.2-0.2.0 | MIT bindings; natives convey LibRaw 0.22.2 (LGPL 2.1 or CDDL 1.0) | camera-RAW decoding |
+| [Upscayl ncnn](https://github.com/upscayl/upscayl-ncnn) *(optional first-use download)* | 20251207-174704 | AGPL-3.0; downloaded archive retains its upstream license | separate-process Vulkan/Metal inference for viewer super resolution |
+| [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) *(optional model download)* | x4plus / x4plus-anime-6B | BSD 3-Clause upstream | curated 4× photo and artwork super-resolution models |
 
 The three `*-ffm` artifacts ship natives as per-platform classifier jars
 (macos-arm64, windows-x64, linux-x64); each artifact's own repository

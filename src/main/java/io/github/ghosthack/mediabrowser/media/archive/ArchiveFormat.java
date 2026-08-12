@@ -28,7 +28,7 @@ import java.util.Set;
  */
 public enum ArchiveFormat {
 
-    /** ZIP and its comic-book alias, read through the JDK's zipfs provider. */
+    /** ZIP and its comic-book alias, read through bounded media-inspection mechanics. */
     ZIP(Set.of("zip", "cbz")),
 
     /** EPUB package media selected through its OPF manifest. */

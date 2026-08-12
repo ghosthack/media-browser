@@ -51,6 +51,11 @@ public record DirEntry(Path path, Type type, MediaKind mediaKind, long size,
         return type == Type.PARENT || type == Type.DIRECTORY || type == Type.ARCHIVE;
     }
 
+    /** Whether activation can either enter or view this entry in Media Browser. */
+    public boolean openable() {
+        return enterable() || viewable();
+    }
+
     public String displayName() {
         if (type == Type.PARENT) return "..";
         Path name = path.getFileName();

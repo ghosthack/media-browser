@@ -39,6 +39,11 @@ public final class FileOps {
             throw new IOException("Source does not exist: " + source);
         }
         String fileName = source.getFileName().toString();
+        Path directDestination = targetDir.resolve(fileName);
+        if (Files.exists(directDestination, LinkOption.NOFOLLOW_LINKS)
+                && Files.isSameFile(source, directDestination)) {
+            throw new IOException("Source is already in the target directory: " + source);
+        }
         Path destination = availableDestination(targetDir, fileName);
         Files.move(source, destination);
         return destination;

@@ -7,6 +7,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.NotDirectoryException;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,10 +47,16 @@ final class StreamArchive implements AutoCloseable {
 
     private final AutoCloseable reader;
     private final Node root = new Node("/", "", true);
-    private final Map<String, Node> byPath = new LinkedHashMap<>();
+    private final Map<String, Node> byPath;
 
     StreamArchive(AutoCloseable reader) {
+        this(reader, 16);
+    }
+
+    StreamArchive(AutoCloseable reader, int expectedEntries) {
         this.reader = reader;
+        long capacity = Math.max(16L, (long) expectedEntries * 4 / 3 + 1);
+        this.byPath = new HashMap<>((int) Math.min(Integer.MAX_VALUE, capacity));
         byPath.put("/", root);
     }
 
@@ -137,20 +144,30 @@ final class StreamArchive implements AutoCloseable {
 
     private static List<String> safeParts(String rawName) {
         if (rawName == null || rawName.isBlank() || rawName.indexOf('\0') >= 0) return List.of();
-        String name = rawName.replace('\\', '/');
-        if (name.startsWith("/") || name.matches("^[A-Za-z]:/.*")) return List.of();
+        if (separator(rawName.charAt(0)) || rawName.length() >= 3
+                && asciiLetter(rawName.charAt(0)) && rawName.charAt(1) == ':'
+                && separator(rawName.charAt(2))) return List.of();
         var result = new ArrayList<String>();
-        for (String part : name.split("/+")) {
+        int start = 0;
+        for (int at = 0; at <= rawName.length(); at++) {
+            if (at < rawName.length() && !separator(rawName.charAt(at))) continue;
+            String part = rawName.substring(start, at);
+            start = at + 1;
             if (part.isEmpty() || ".".equals(part)) continue;
             if ("..".equals(part)) return List.of();
             result.add(part);
         }
-        return List.copyOf(result);
+        return result;
     }
 
     private static String normalize(String rawPath) {
+        if (canonicalAbsolute(rawPath)) return rawPath;
         var parts = new ArrayList<String>();
-        for (String part : rawPath.replace('\\', '/').split("/+")) {
+        int start = 0;
+        for (int at = 0; at <= rawPath.length(); at++) {
+            if (at < rawPath.length() && !separator(rawPath.charAt(at))) continue;
+            String part = rawPath.substring(start, at);
+            start = at + 1;
             if (part.isEmpty() || ".".equals(part)) continue;
             if ("..".equals(part)) {
                 if (!parts.isEmpty()) parts.remove(parts.size() - 1);
@@ -159,6 +176,22 @@ final class StreamArchive implements AutoCloseable {
             }
         }
         return "/" + String.join("/", parts);
+    }
+
+    private static boolean canonicalAbsolute(String path) {
+        if (path.isEmpty() || path.charAt(0) != '/' || path.indexOf('\\') >= 0
+                || path.indexOf("//") >= 0 || path.indexOf("/./") >= 0
+                || path.indexOf("/../") >= 0 || path.endsWith("/.")
+                || path.endsWith("/..")) return false;
+        return path.length() == 1 || !path.endsWith("/");
+    }
+
+    private static boolean separator(char value) {
+        return value == '/' || value == '\\';
+    }
+
+    private static boolean asciiLetter(char value) {
+        return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z';
     }
 
     @Override

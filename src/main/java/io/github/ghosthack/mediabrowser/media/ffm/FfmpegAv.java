@@ -276,6 +276,7 @@ final class FfmpegAv {
 
     private boolean decodeOneFrame(MemorySegment ctx, MemorySegment cctx,
                                    MemorySegment pkt, MemorySegment frame, int vIdx) {
+        boolean packetPending = false;
         boolean draining = false;
         while (true) {
             int rr = ff.receiveFrame(cctx, frame);
@@ -287,15 +288,31 @@ final class FfmpegAv {
             if (draining) return false;
 
             // decoder wants more input
+            if (packetPending) {
+                int sr = ff.sendPacket(cctx, pkt);
+                if (sr >= 0) {
+                    packetPending = false;
+                    ff.packetUnref(pkt);
+                } else if (sr != ff.averrorEagain()) {
+                    packetPending = false;
+                    ff.packetUnref(pkt);
+                    throw new MediaException("ffmpeg: send packet failed: " + ff.errStr(sr));
+                }
+                continue;
+            }
             int r = ff.readFrame(ctx, pkt);
             if (r < 0) {
                 ff.sendPacket(cctx, MemorySegment.NULL);
                 draining = true;
                 continue;
             }
-            if (ff.packetStreamIndex(pkt) == vIdx) {
+            if (ff.packetStreamIndex(pkt) == vIdx && ff.packetHasPayload(pkt)) {
                 int sr = ff.sendPacket(cctx, pkt);
-                if (sr < 0 && sr != ff.averrorEagain() && sr != ff.averrorEof()) {
+                if (sr == ff.averrorEagain()) {
+                    packetPending = true;
+                    continue;
+                }
+                if (sr < 0 && sr != ff.averrorEof()) {
                     ff.packetUnref(pkt);
                     throw new MediaException("ffmpeg: send packet failed: " + ff.errStr(sr));
                 }
@@ -475,7 +492,7 @@ final class FfmpegAv {
                     continue;
                 }
                 int streamIndex = ff.packetStreamIndex(pkt);
-                if (!placements.containsKey(streamIndex)) {
+                if (!placements.containsKey(streamIndex) || !ff.packetHasPayload(pkt)) {
                     ff.packetUnref(pkt);
                     continue;
                 }

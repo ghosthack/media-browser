@@ -5,6 +5,7 @@ import io.github.ghosthack.mediabrowser.IconPack;
 import io.github.ghosthack.mediabrowser.LoadingIndicator;
 import io.github.ghosthack.mediabrowser.MosaicFolderGlyph;
 import io.github.ghosthack.mediabrowser.MosaicSelectionAnimation;
+import io.github.ghosthack.mediabrowser.album.Album;
 import io.github.ghosthack.mediabrowser.album.AlbumStore;
 import io.github.ghosthack.mediabrowser.StartupLayout;
 import io.github.ghosthack.mediabrowser.Theme;
@@ -186,6 +187,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final Typeahead typeahead = new Typeahead();
 
     private Path currentDir;
+    /** The flat album location currently shown, mutually exclusive with a directory. */
+    private Album currentAlbum;
+    /** Album members omitted because their paths no longer exist or cannot be resolved. */
+    private int currentAlbumUnavailable;
+    /** True while the album CSV and its member attributes are loading off-thread. */
+    private boolean currentAlbumLoading;
     /** Windows-only virtual location above the independent drive roots. */
     private boolean atComputerLocation;
     /** The current directory-listing failure, shown without removing its {@code ..} escape. */
@@ -453,13 +460,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 activateSelected();
                 e.consume();
             } else if (e.getCode() == KeyCode.F1) {
-                if (moveController.quickMove(0)) e.consume();
+                if (currentDir != null && moveController.quickMove(0)) e.consume();
             } else if (e.getCode() == KeyCode.F2) {
-                if (moveController.quickMove(1)) e.consume();
+                if (currentDir != null && moveController.quickMove(1)) e.consume();
             } else if (e.getCode() == KeyCode.F3) {
-                if (moveController.quickMove(2)) e.consume();
+                if (currentDir != null && moveController.quickMove(2)) e.consume();
             } else if (e.getCode() == KeyCode.F4) {
-                if (moveController.quickMove(3)) e.consume();
+                if (currentDir != null && moveController.quickMove(3)) e.consume();
             }
         });
         listView.addEventHandler(KeyEvent.KEY_TYPED, e -> {
@@ -735,11 +742,16 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         expandAndSelect(startDir);
         if (currentDir == null) navigate(startDir);
         if (settings.startupLayout().opensMosaic()) {
-            mosaic.open(visibleEntries, () -> currentDir);
+            openMosaic();
             return AppShell.AppView.MOSAIC;
         }
         listView.requestFocus(); // expandAndSelect leaves focus on the tree
         return AppShell.AppView.BROWSER;
+    }
+
+    /** Opens Mosaic over the shared listing, including an album's virtual label. */
+    private void openMosaic() {
+        mosaic.open(visibleEntries, () -> currentDir, this::albumLocationLabel);
     }
 
     /** The mosaic view this window constructed, for shell registration. */
@@ -896,20 +908,29 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     // --- navigation ------------------------------------------------------
 
-    /** A history entry is either a real directory or Windows' virtual Computer view. */
-    private record BrowserLocation(Path directory) {
-        private static final BrowserLocation COMPUTER = new BrowserLocation(null);
+    /** A history entry is a directory, an album, or Windows' virtual Computer view. */
+    private record BrowserLocation(Path directory, Album album) {
+        private static final BrowserLocation COMPUTER = new BrowserLocation(null, null);
 
         static BrowserLocation directory(Path directory) {
-            return new BrowserLocation(Objects.requireNonNull(directory));
+            return new BrowserLocation(Objects.requireNonNull(directory), null);
+        }
+
+        static BrowserLocation album(Album album) {
+            return new BrowserLocation(null, Objects.requireNonNull(album));
         }
 
         boolean isComputer() {
-            return directory == null;
+            return directory == null && album == null;
+        }
+
+        boolean isAlbum() {
+            return album != null;
         }
     }
 
     private BrowserLocation currentLocation() {
+        if (currentAlbum != null) return BrowserLocation.album(currentAlbum);
         if (atComputerLocation) return BrowserLocation.COMPUTER;
         return currentDir == null ? null : BrowserLocation.directory(currentDir);
     }
@@ -934,6 +955,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         updateHistoryItems();
         currentDir = target;
+        currentAlbum = null;
+        currentAlbumUnavailable = 0;
+        currentAlbumLoading = false;
         atComputerLocation = false;
         listingFailureMessage = null;
         addressField.setText(ArchivePaths.format(target));
@@ -1003,6 +1027,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         ++scanSequence;             // discard any real-directory scan still in flight
         reclassQueue.clear();
         currentDir = null;
+        currentAlbum = null;
+        currentAlbumUnavailable = 0;
+        currentAlbumLoading = false;
         atComputerLocation = true;
         listingFailureMessage = null;
         addressField.setText(COMPUTER_LOCATION_NAME);
@@ -1012,6 +1039,74 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         refreshComputerTreeRoots(roots);
         showListing(computerListing(roots), select);
         selectComputerInTree();
+    }
+
+    /** File ▸ Open Album…: choose one of the numbered CSV albums. */
+    private void chooseAlbum() {
+        new OpenAlbumDialog(stage(), albumStore).showAndWait().ifPresent(album -> {
+            navigateToAlbum(album);
+            shell.showView(AppShell.AppView.BROWSER);
+        });
+    }
+
+    /** Opens an album as one flat listing and records it as a history location. */
+    private void navigateToAlbum(Album album) {
+        if (album == null) return;
+        BrowserLocation previous = currentLocation();
+        BrowserLocation destination = BrowserLocation.album(album);
+        if (!traversingHistory && previous != null && !destination.equals(previous)) {
+            backStack.push(previous);
+            forwardStack.clear();
+        }
+        updateHistoryItems();
+
+        typeahead.reset();
+        int seq = ++scanSequence;
+        reclassQueue.clear();
+        currentDir = null;
+        currentAlbum = album;
+        currentAlbumUnavailable = 0;
+        currentAlbumLoading = true;
+        atComputerLocation = false;
+        listingFailureMessage = null;
+        String location = albumLocationLabel();
+        addressField.setText(location);
+        statusLabel.setText("Opening " + album.name() + "…");
+        countLabel.setText("");
+        showListing(List.of(), null);
+        tree.getSelectionModel().clearSelection();
+
+        settings.recordAlbumUse(album.fileName());
+        saveSettingsQuietly();
+
+        // Reading a scanner-sized CSV and statting/classifying its members are
+        // both background work. The sequence guard makes a superseded open a
+        // harmless no-op when the user navigates elsewhere before it finishes.
+        service.fileOp(() -> albumStore.entries(album))
+                .thenCompose(service::listPaths)
+                .whenComplete((listing, error) -> Platform.runLater(() -> {
+                    if (seq != scanSequence || !album.equals(currentAlbum)) return;
+                    currentAlbumLoading = false;
+                    if (error != null) {
+                        showListing(List.of(), null);
+                        statusLabel.setText("Cannot open " + album.name() + ": "
+                                + rootMessage(error));
+                        return;
+                    }
+                    currentAlbumUnavailable = listing.unavailable();
+                    showListing(listing.entries(), null);
+                    String message = album.name() + " · " + listing.entries().size()
+                            + (listing.entries().size() == 1 ? " item" : " items");
+                    if (listing.unavailable() > 0) {
+                        message += " · " + listing.unavailable() + " unavailable";
+                    }
+                    statusLabel.setText(message);
+                    listView.requestFocus();
+                }));
+    }
+
+    private String albumLocationLabel() {
+        return currentAlbum == null ? null : "Album: " + currentAlbum.name();
     }
 
     /**
@@ -1228,6 +1323,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         traversingHistory = true;
         try {
             if (target.isComputer()) navigateToComputer();
+            else if (target.isAlbum()) navigateToAlbum(target.album());
             else navigateAndSync(target.directory());
         } finally {
             traversingHistory = false;
@@ -1259,6 +1355,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     }
 
     private void updateCount() {
+        if (currentAlbumLoading) {
+            countLabel.setText("");
+            updateEmptyState();
+            return;
+        }
         long dirs = 0, media = 0, other = 0;
         for (DirEntry e : visibleEntries) {
             switch (e.type()) {
@@ -1270,6 +1371,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         String text = dirs + " folders · " + (media + other) + " files · "
                 + media + " viewable";
+        if (currentAlbum != null && currentAlbumUnavailable > 0) {
+            text += " · " + currentAlbumUnavailable + " unavailable";
+        }
         // Disclose what the opt-in filters removed — the user turned them on,
         // so the count is the receipt. Junk is not reported: a dropped
         // .DS_Store changes nothing about the folder, and a suffix on every
@@ -1323,6 +1427,16 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         if (listed > 0 && !offFilters.isEmpty()) {
             emptyStateLabel.setText(listed + (listed == 1 ? " item" : " items")
                     + " hidden by " + String.join(", ", offFilters));
+            return;
+        }
+        if (currentAlbum != null) {
+            String message;
+            if (currentAlbumLoading) message = "Opening album…";
+            else if (currentAlbumUnavailable > 0) {
+                message = "No available items in " + currentAlbum.name();
+            } else message = "Empty album";
+            emptyStateLabel.setText(message);
+            emptyStateLabel.setVisible(true);
             return;
         }
         var hidden = currentDir == null ? null : service.hiddenIn(currentDir);
@@ -1390,6 +1504,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // accelerators to whichever window is focused.
         var fileMenu = new Menu("_File", null,
                 action("_Open Folder\u2026", keys.mod1(KeyCode.O), this::chooseDirectory),
+                action("Open _Album\u2026", keys.mod1Shift(KeyCode.O), this::chooseAlbum),
+                new SeparatorMenuItem(),
                 buildMoveItem(owner),
                 buildTrashItem(owner),
                 buildExportMenu(owner),
@@ -1412,7 +1528,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 action("_Enclosing Folder", keys.mod1(KeyCode.UP), this::navigateToParent),
                 new SeparatorMenuItem(),
                 action("Go to _Location", keys.mod1(KeyCode.L), goToLocation),
-                action("_Reload Folder", keys.mod1(KeyCode.R), this::reloadFolder));
+                action("_Reload", keys.mod1(KeyCode.R), this::reloadLocation));
 
         // Show: panel visibility, then the listing filter and the detection mode.
         // (Panel toggles carry modifier-1 accelerators; the listing filter and
@@ -1550,7 +1666,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         mainItem.setAccelerator(keys.mod1Shift(KeyCode.B));
         var mosaicItem = windowSelect("_Mosaic",
                 shell.isActive(AppShell.AppView.MOSAIC), group,
-                () -> mosaic.open(visibleEntries, () -> currentDir));
+                this::openMosaic);
         // Open / switch to the Mosaic (modifier-1 + Shift + M). This is the single
         // home for the former View ▸ Open Mosaic accelerator, so it never double-binds.
         mosaicItem.setAccelerator(keys.mod1Shift(KeyCode.M));
@@ -1674,6 +1790,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 selectionAnimation,
                 new SeparatorMenuItem(),
                 boundCheck("Mark _Dead Ends", mosaic.emptyReticuleProperty()),
+                boundCheck("Mark Files That _Won't Open", mosaic.wontOpenReticuleProperty()),
                 boundCheck("Check Whole Su_btree", mosaic.barrenCheckProperty()),
                 new SeparatorMenuItem(),
                 autoOpen,
@@ -1708,6 +1825,14 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                         loadingProp, loadingGroup),
                 objRadio("_Now Loading", LoadingIndicator.NOW_LOADING,
                         loadingProp, loadingGroup));
+        var enhancePhoto = action("_Photo (Real-ESRGAN 4×)", null, viewer::enhancePhoto);
+        enhancePhoto.disableProperty().bind(viewer.superResolutionDisabledProperty());
+        var enhanceArtwork = action("_Artwork (Real-ESRGAN 4×)", null, viewer::enhanceArtwork);
+        enhanceArtwork.disableProperty().bind(viewer.superResolutionDisabledProperty());
+        var showEnhanced = boundCheck("Show _Enhanced", viewer.enhancedVisibleProperty());
+        showEnhanced.disableProperty().bind(viewer.enhancedAvailableProperty().not());
+        var enhanceMenu = new Menu("_Super Resolution", null,
+                enhancePhoto, enhanceArtwork, new SeparatorMenuItem(), showEnhanced);
         var menu = new Menu("_Viewer", null,
                 playPause,
                 boundCheck("_Repeat", viewer.repeatProperty()),
@@ -1722,6 +1847,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 objRadio("_Fit", ViewerWindow.ScaleMode.FIT, scaleProp, scaleGroup),
                 objRadio("_1:1", ViewerWindow.ScaleMode.ONE_TO_ONE, scaleProp, scaleGroup),
                 objRadio("_Crop to Fill", ViewerWindow.ScaleMode.CROP_TO_FILL, scaleProp, scaleGroup),
+                new SeparatorMenuItem(),
+                enhanceMenu,
                 new SeparatorMenuItem(),
                 boundCheck("Show P_ins", viewer.pinsVisibleProperty()),
                 loadingMenu,
@@ -1888,8 +2015,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         addressField.selectAll();
     }
 
-    private void reloadFolder() {
-        if (currentDir != null) navigate(currentDir);
+    private void reloadLocation() {
+        if (currentAlbum != null) navigateToAlbum(currentAlbum);
+        else if (currentDir != null) navigate(currentDir);
     }
 
     /** Sets the mosaic folder-preview grid edge, persists it, and repaints. */
@@ -1927,13 +2055,18 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         service.setDetectionMode(mode);
         settings.setDetectionMode(mode.settingsValue());
         saveSettingsQuietly();
-        if (currentDir != null) navigate(currentDir);
+        reloadCurrentListing();
     }
 
     /** Persists and re-lists after a listing filter changed what the scan keeps. */
     private void relist() {
         saveSettingsQuietly();
-        if (currentDir != null) navigate(currentDir);
+        reloadCurrentListing();
+    }
+
+    private void reloadCurrentListing() {
+        if (currentAlbum != null) navigateToAlbum(currentAlbum);
+        else if (currentDir != null) navigate(currentDir);
     }
 
     private void saveSettingsQuietly() {
@@ -2371,6 +2504,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     /** Cmd+M / menu / context-menu: open the Move dialog for the selection. */
     private void openMove() {
+        if (currentAlbum != null) {
+            statusLabel.setText("Open an item's folder before moving it");
+            return;
+        }
         if (atComputerLocation) {
             statusLabel.setText("Choose a folder before moving items");
             return;
@@ -2758,6 +2895,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         fillBox.setSelected(settings.mosaicFillTiles());
         var seamlessBox = new CheckBox("Seamless (no tile margins or borders)");
         seamlessBox.setSelected(settings.mosaicSeamless());
+        var wontOpenReticuleBox = new CheckBox(
+                "Mark files this media engine won't open");
+        wontOpenReticuleBox.setSelected(settings.mosaicWontOpenReticule());
 
         var renditionTitle = new Label("Preview renditions");
         renditionTitle.setStyle("-fx-font-weight: bold;");
@@ -2816,7 +2956,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 mosaicLocationBox,
                 new Separator(), layoutTitle, tileSetRow, tileSizeRow, marginRow, borderWidthRow,
                 borderColorRow, folderGridRow, folderGlyphRow, thumbnailsBox, fillBox,
-                seamlessBox,
+                seamlessBox, wontOpenReticuleBox,
                 new Separator(), renditionTitle, maxEdgeRow, budgetRow,
                 new Separator(), behaviourTitle, autoOpenBox, mosaicDragBox,
                 animationRow, animationPeriodRow, screensaverBox,
@@ -2948,6 +3088,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setMosaicThumbnailsVisible(thumbnailsBox.isSelected());
         settings.setMosaicFillTiles(fillBox.isSelected());
         settings.setMosaicSeamless(seamlessBox.isSelected());
+        settings.setMosaicWontOpenReticule(wontOpenReticuleBox.isSelected());
         settings.setThumbnailMaxEdge(maxEdgeSpinner.getValue());
         settings.setThumbnailMemoryBudgetMb(budgetSpinner.getValue());
         settings.setMosaicAutoOpen(autoOpenBox.isSelected());

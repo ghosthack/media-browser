@@ -113,11 +113,22 @@ public final class AlbumStore {
                 String trimmed = line.trim();
                 if (trimmed.isEmpty()) continue;
                 if (trimmed.contains(ArchivePaths.SEPARATOR)) {
-                    // A member inside an archive; mounting it is what
-                    // turns the locator back into a usable path. A container
-                    // that has since moved or gone unreadable drops out of the
-                    // listing, the same way a deleted member would.
-                    ArchivePaths.parse(trimmed).ifPresent(paths::add);
+                    // A member inside an archive; mounting it is what turns
+                    // the locator back into a usable path. When the prefix is
+                    // no openable archive, the line is not a locator after all
+                    // but a plain path through a directory whose name ends in
+                    // '!' (…/Help!/track.mp3): fall back to the literal path,
+                    // which then behaves like any other member that may or may
+                    // not still exist — the same way a stale locator whose
+                    // container moved behaves.
+                    ArchivePaths.parse(trimmed).ifPresentOrElse(paths::add, () -> {
+                        try {
+                            paths.add(Path.of(trimmed));
+                        } catch (InvalidPathException ignored) {
+                            // As for plain lines: one unparseable line drops
+                            // that member, not the whole album.
+                        }
+                    });
                 } else {
                     try {
                         paths.add(Path.of(trimmed));
@@ -148,27 +159,49 @@ public final class AlbumStore {
      *         duplicates
      */
     public AddResult addPaths(Album album, List<Path> paths) throws IOException {
-        LinkedHashSet<String> members = new LinkedHashSet<>();
-        for (Path existing : entries(album)) {
-            members.add(ArchivePaths.format(existing));
+        // Persistence must be seeded from the on-disk representation, not from
+        // entries(): that display model intentionally omits unparseable paths
+        // and archive locators whose container cannot be mounted right now.
+        // Rewriting from it would turn a transient offline drive into permanent
+        // album data loss.
+        LinkedHashSet<String> members = new LinkedHashSet<>(storedLines(album));
+        LinkedHashSet<String> knownMembers = new LinkedHashSet<>();
+        for (String member : members) {
+            knownMembers.add(member.trim());
         }
-        int before = members.size();
+        int added = 0;
         int skipped = 0;
         for (Path path : paths) {
             // Stored as a locator, so a member inside an archive names both the
             // container and the entry; identical to the plain path outside one.
             String absolute = ArchivePaths.format(path.toAbsolutePath().normalize());
-            if (!members.add(absolute)) {
+            if (!knownMembers.add(absolute)) {
                 skipped++;
+            } else {
+                members.add(absolute);
+                added++;
             }
         }
-        int added = members.size() - before;
         if (added > 0) {
             Files.createDirectories(dir);
             Files.writeString(album.file(), String.join("\n", members) + "\n",
                     StandardCharsets.UTF_8);
         }
         return new AddResult(added, skipped);
+    }
+
+    /** Every nonblank stored member, without resolving or mounting it. */
+    private static List<String> storedLines(Album album) throws IOException {
+        if (album == null || !Files.isRegularFile(album.file())) {
+            return List.of();
+        }
+        List<String> members = new ArrayList<>();
+        for (String line : Files.readAllLines(album.file(), StandardCharsets.UTF_8)) {
+            if (!line.trim().isEmpty()) {
+                members.add(line);
+            }
+        }
+        return members;
     }
 
     /** The lowest album number not yet present on disk. */

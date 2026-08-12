@@ -12,6 +12,9 @@ import io.github.ghosthack.seven.SevenArchive;
 import io.github.ghosthack.seven.SevenEntry;
 import io.github.ghosthack.unrar.RarArchive;
 import io.github.ghosthack.unrar.RarEntry;
+import io.github.ghosthack.zip.ZipArchive;
+import io.github.ghosthack.zip.ZipEntry;
+import io.github.ghosthack.zip.ZipOpenOptions;
 
 import java.awt.image.BufferedImage;
 import java.io.IOException;
@@ -53,7 +56,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.InflaterInputStream;
 
 /**
- * Consumer-owned NIO adapter over robust-unrar, robust-seven, pdf-media, and epub-media.
+ * Consumer-owned NIO adapter over robust-unrar, robust-seven, pdf-media, epub-media,
+ * and the bounded media-inspection ZIP reader.
  *
  * <p>The media-inspection readers retain parsing, decoding and resource-budget policy;
  * this layer owns filesystem concerns: safe path normalization, synthesized
@@ -75,7 +79,8 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
 
     /** Mounts a streaming source with the matching media-inspection reader. */
     public StreamFileSystem newFileSystem(Path source, ArchiveFormat format) throws IOException {
-        if (format != ArchiveFormat.RAR
+        if (format != ArchiveFormat.ZIP
+                && format != ArchiveFormat.RAR
                 && format != ArchiveFormat.SEVEN_Z
                 && format != ArchiveFormat.PDF
                 && format != ArchiveFormat.EPUB) {
@@ -85,6 +90,7 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
         if (mounts.containsKey(key)) throw new FileSystemAlreadyExistsException(key.toString());
 
         StreamArchive archive = switch (format) {
+            case ZIP -> openZip(key);
             case RAR -> openRar(key);
             case SEVEN_Z -> openSeven(key);
             case PDF -> openPdf(key);
@@ -101,10 +107,38 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
         return created;
     }
 
+    /**
+     * Adapts the bounded ZIP mechanics index to the consumer-owned path tree.
+     */
+    private static StreamArchive openZip(Path source) throws IOException {
+        // Match the former zipfs browse contract: member formats are validated
+        // by their media decoders, so do not add a second full CRC pass here.
+        ZipArchive reader = ZipArchive.open(source,
+                ZipOpenOptions.builder().verifyCrcOnRead(false)
+                        .verifySourceOnStreamOpen(false).build());
+        try {
+            StreamArchive archive = new StreamArchive(reader, reader.entries().size());
+            for (ZipEntry entry : reader.entries()) {
+                if (!entry.isRegularFile() && entry.kind() != ZipEntry.Kind.DIRECTORY) continue;
+                archive.add(entry.name(), entry.kind() == ZipEntry.Kind.DIRECTORY,
+                        entry.uncompressedSize(), entry.lastModifiedTime().orElse(null),
+                        entry, () -> reader.openStream(entry));
+            }
+            return archive;
+        } catch (RuntimeException e) {
+            try {
+                reader.close();
+            } catch (IOException closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw e;
+        }
+    }
+
     private static StreamArchive openRar(Path source) throws IOException {
         RarArchive reader = RarArchive.open(source);
         try {
-            StreamArchive archive = new StreamArchive(reader);
+            StreamArchive archive = new StreamArchive(reader, reader.entries().size());
             for (RarEntry entry : reader.entries()) {
                 archive.add(entry.name(), entry.kind() == RarEntry.Kind.DIRECTORY,
                         entry.uncompressedSize(), entry.lastModifiedTime().orElse(null),
@@ -120,7 +154,7 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
     private static StreamArchive openSeven(Path source) throws IOException {
         SevenArchive reader = SevenArchive.open(source);
         try {
-            StreamArchive archive = new StreamArchive(reader);
+            StreamArchive archive = new StreamArchive(reader, reader.entries().size());
             for (SevenEntry entry : reader.entries()) {
                 if (entry.kind() == SevenEntry.Kind.ANTI_ITEM) continue;
                 archive.add(entry.name(), entry.kind() == SevenEntry.Kind.DIRECTORY,
@@ -137,7 +171,7 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
     private static StreamArchive openEpub(Path source) throws IOException {
         EpubArchive reader = EpubArchive.open(source);
         try {
-            StreamArchive archive = new StreamArchive(reader);
+            StreamArchive archive = new StreamArchive(reader, reader.entries().size());
             Set<String> usedNames = new HashSet<>();
             for (EpubEntry entry : reader.entries()) {
                 String name = uniqueName(entry.packagePath(), usedNames);
@@ -175,7 +209,7 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
     private static StreamArchive openPdf(Path source) throws IOException {
         PdfArchive reader = PdfArchive.open(source);
         try {
-            StreamArchive archive = new StreamArchive(reader);
+            StreamArchive archive = new StreamArchive(reader, reader.entries().size());
             Set<String> usedNames = new HashSet<>();
             for (PdfEntry entry : reader.entries()) {
                 String name = uniquePdfName(entry, usedNames);
@@ -401,7 +435,8 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
     public StreamFileSystem newFileSystem(Path path, Map<String, ?> env) throws IOException {
         Object value = env.get("format");
         if (!(value instanceof ArchiveFormat format)) {
-            throw new IllegalArgumentException("env.format must be RAR, SEVEN_Z, PDF or EPUB");
+            throw new IllegalArgumentException(
+                    "env.format must be ZIP, RAR, SEVEN_Z, PDF or EPUB");
         }
         return newFileSystem(path, format);
     }

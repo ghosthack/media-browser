@@ -249,7 +249,7 @@ public final class SmokeTest {
             int gpuFrames = 0;
             try (renderer) {
                 ByteBuffer out = ByteBuffer.allocateDirect(stream.width() * stream.height() * 4);
-                for (int i = 0; i < 5 && stream.next(); i++) {
+                for (int i = 0; i < 10 && stream.next(); i++) {
                     var gpu = stream.gpuFrame();
                     boolean zeroCopy = gpu != null && renderer.renderSurface(
                             gpu.cvPixelBuffer(), gpu.codedWidth(), gpu.codedHeight(),
@@ -278,13 +278,13 @@ public final class SmokeTest {
      * Verifies the {@link VideoStream} contract directly, without the macOS-only
      * GL renderer: each decoded frame's BGRA buffer must be {@code width*height*4}
      * bytes and {@link VideoStream#ptsMicros()} must advance monotonically across
-     * the first ~5 frames. Used on non-macOS (e.g. Windows 11) so Phase 3 playback
+     * the first ~10 frames. Used on non-macOS (e.g. Windows 11) so Phase 3 playback
      * is exercised headless on the actual target OS.
      */
     private static void playbackSmokeNoGl(VideoStream stream) {
         long expected = (long) stream.width() * stream.height() * 4;
         long prevPts = Long.MIN_VALUE;
-        for (int i = 0; i < 5 && stream.next(); i++) {
+        for (int i = 0; i < 10 && stream.next(); i++) {
             MemorySegment bgra = stream.bgra();
             long size = bgra.byteSize();
             if (size != expected) {

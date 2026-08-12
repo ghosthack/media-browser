@@ -196,6 +196,13 @@ public interface FfmpegBindings {
 
     int packetStreamIndex(MemorySegment pkt);
 
+    /**
+     * Whether a demuxed packet contains data for {@code avcodec_send_packet}.
+     * A zero-sized packet must be skipped because libavcodec treats it as a
+     * decoder drain; use {@code MemorySegment.NULL} for an intentional drain.
+     */
+    boolean packetHasPayload(MemorySegment pkt);
+
     /** Allocates and right-sizes an {@code AVFrame}. */
     MemorySegment frameAlloc();
 

@@ -97,7 +97,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -174,8 +173,8 @@ import java.util.function.Supplier;
 public final class MosaicWindow
         implements AppShell.ShellView, ViewerHost, MosaicTilePaintContext.Host {
 
-    /** Floor on retained FX images; the live cap grows to cover the viewport. */
-    private static final int MIN_CACHED_IMAGES = 400;
+    /** A collage may contribute at most this much to the visible-cache floor. */
+    private static final int MAX_CACHE_IMAGES_PER_TILE = 4;
 
     // Draw-loop colours, parsed once rather than re-parsed from a hex string on
     // every tile of every frame (Color.web allocates and parses each call).
@@ -381,6 +380,8 @@ public final class MosaicWindow
      */
     /** Dead-end marking on folder tiles; the Mosaic menu binds here. */
     private final BooleanProperty emptyReticule = new SimpleBooleanProperty(true);
+    /** Opt-in availability marking for files Media Browser will not open. */
+    private final BooleanProperty wontOpenReticule = new SimpleBooleanProperty(false);
     /** The optional subtree check behind the reticule's EMPTY mark. */
     private final BooleanProperty barrenCheck = new SimpleBooleanProperty(false);
     /** Listings one barren check may spend before answering UNKNOWN. */
@@ -481,6 +482,8 @@ public final class MosaicWindow
      */
     private ObservableList<DirEntry> source;
     private Supplier<Path> dirSupplier;
+    /** Label for a non-directory flat location such as an album; null at Computer. */
+    private Supplier<String> virtualLocationSupplier = () -> null;
     /** Navigates the (shared) location into a folder or {@code ..}; set by the host. */
     private Consumer<Path> navigator = path -> { };
     /** Enters a virtual parent that cannot be expressed as a {@link Path}. */
@@ -492,6 +495,8 @@ public final class MosaicWindow
     private boolean attached;
     /** The directory currently mirrored; a change resets scroll/selection. */
     private Path mosaicDir;
+    /** The non-directory location identity currently mirrored, if any. */
+    private String mosaicVirtualLocation;
     /**
      * When navigating up via {@code ..}/Backspace, the folder we came from; the
      * next {@link #rebuild} selects (and reveals) it in the parent listing
@@ -529,14 +534,8 @@ public final class MosaicWindow
     /** Bumped on every directory change; stale async completions are ignored. */
     private int generation;
 
-    /** Loaded tile images (access-ordered, capped); misses are re-requested. */
-    private final LinkedHashMap<Path, Image> images =
-            new LinkedHashMap<>(64, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<Path, Image> e) {
-                    return size() > maxCachedImages;
-                }
-            };
+    /** Loaded tile images, access-ordered and byte-budgeted. */
+    private final FxImageCache<Path> images;
     /**
      * Display-scaled copies of {@link #images}, sized to the tile's on-screen
      * device pixels and reused across frames so a repaint just blits them rather
@@ -544,26 +543,18 @@ public final class MosaicWindow
      * on first draw and dropped whenever the on-screen tile size changes (slider,
      * fill mode, folder-grid, directory or monitor render scale).
      */
-    private final LinkedHashMap<Path, Image> scaled =
-            new LinkedHashMap<>(64, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<Path, Image> e) {
-                    return size() > maxCachedImages;
-                }
-            };
+    private final FxImageCache<Path> scaled;
     /** The HiDPI render scale {@link #scaled} was built for; a change rebuilds it. */
     private double scaledScale = 1.0;
     /**
-     * Live cap on retained FX images, applied to both {@link #images} and
-     * {@link #scaled}. Recomputed by {@link #relayout()} to comfortably exceed
-     * the number of tiles (and folder-collage sub-images) the viewport can show
-     * at once, so a tile that is currently on screen is never evicted. A fixed
-     * cap that is smaller than the visible tile count (e.g. 4K with small tiles)
-     * makes a loaded tile's eviction re-request it, evict another visible tile to
-     * make room, and loop forever — the mosaic flickers half its tiles out and
-     * reloads them endlessly.
+     * Visible working-set floor for the small display cache. Full renditions
+     * obey their byte ceiling strictly; their screen-sized derivatives keep
+     * visible tiles stable after a full image is evicted. Capping collage
+     * contribution avoids the former tiles × N² heap multiplier.
      */
-    private int maxCachedImages = MIN_CACHED_IMAGES;
+    private int maxCachedImages = 1;
+    private final long fullImageBudgetBytes;
+    private final long scaledImageBudgetBytes;
     /** Items already requested (in flight) — avoids duplicate fetches. */
     private final java.util.Set<Path> pending = new java.util.HashSet<>();
     /** Items known to have no visual (e.g. audio without cover art). */
@@ -654,6 +645,16 @@ public final class MosaicWindow
         this.rotationStore = rotationStore;
         this.aaeStore = aaeStore;
         this.tilePaintContext = new MosaicTilePaintContext(this);
+        long fxImageBudgetBytes = Math.max(1L, settings.thumbnailMemoryBudgetMb())
+                * 1024L * 1024L;
+        // One setting bounds the whole FX tier. Full renditions receive two
+        // thirds; display-scaled copies receive one third and may retain the
+        // visible working set even when a very small configured budget cannot
+        // hold one screen's device pixels.
+        this.fullImageBudgetBytes = Math.max(1, fxImageBudgetBytes * 2 / 3);
+        this.scaledImageBudgetBytes = Math.max(1, fxImageBudgetBytes - fullImageBudgetBytes);
+        this.images = new FxImageCache<>(fullImageBudgetBytes, 0);
+        this.scaled = new FxImageCache<>(scaledImageBudgetBytes, 1);
         this.tileSet.set(MosaicTileSets.resolve(settings.mosaicTileSetId()));
         this.tileSet.addListener((o, was, value) -> requestDraw());
         this.maxEdge = settings.thumbnailMaxEdge();
@@ -724,6 +725,12 @@ public final class MosaicWindow
             // has to drop the cache and ask.
             folderPreviews.clear();
             folderPending.clear();
+            requestDraw();
+        });
+        this.wontOpenReticule.set(settings.mosaicWontOpenReticule());
+        this.wontOpenReticule.addListener((o, was, v) -> {
+            settings.setMosaicWontOpenReticule(v);
+            saveSettingsQuietly();
             requestDraw();
         });
         this.barrenCheck.set(settings.mosaicBarrenCheck());
@@ -1358,6 +1365,11 @@ public final class MosaicWindow
         return emptyReticule;
     }
 
+    /** Whether file tiles Media Browser will not open carry the gray hatch. */
+    public BooleanProperty wontOpenReticuleProperty() {
+        return wontOpenReticule;
+    }
+
     /**
      * Whether folder tiles are additionally checked for a wholly media-free
      * subtree. Off by default — measured at roughly 1 in 35 media-bearing
@@ -1551,8 +1563,7 @@ public final class MosaicWindow
         } else if (lead != null) {
             statusLabel.setText(lead.displayName());
         } else {
-            statusLabel.setText(mosaicDir != null
-                    ? mosaicDir.toString() : MainWindow.COMPUTER_LOCATION_NAME);
+            statusLabel.setText(locationText(mosaicDir, mosaicVirtualLocation));
         }
         if (infoPanelVisible.get()) refreshInfoPanel(lead, count, gen);
         // Metadata panel (manual by default): reset to the new selection's
@@ -1829,6 +1840,7 @@ public final class MosaicWindow
         this.dirLabelsVisible.set(settings.mosaicDirLabelsVisible());
         this.fileLabelsVisible.set(settings.mosaicFileLabelsVisible());
         this.mediaLabelsVisible.set(settings.mosaicMediaLabelsVisible());
+        this.wontOpenReticule.set(settings.mosaicWontOpenReticule());
         this.tileSet.set(MosaicTileSets.resolve(settings.mosaicTileSetId()));
         this.folderGlyph.set(settings.mosaicFolderGlyph());
         this.selectionAnimation.set(settings.mosaicSelectionAnimation());
@@ -1929,6 +1941,7 @@ public final class MosaicWindow
                 new java.util.IdentityHashMap<Image, Boolean>());
         for (DirEntry item : items) {
             Image image = images.get(item.path());
+            if (image == null) image = scaled.get(item.path());
             if (image != null && seen.add(image)) result.add(image);
         }
         return result;
@@ -2045,13 +2058,26 @@ public final class MosaicWindow
      * they become visible.
      */
     public void open(ObservableList<DirEntry> source, Supplier<Path> dirSupplier) {
+        open(source, dirSupplier, () -> null);
+    }
+
+    /**
+     * Opens over either a real directory or a labelled virtual flat listing.
+     * A virtual location has no directory-only move/reload semantics, but keeps
+     * its own title and identity instead of masquerading as Windows Computer.
+     */
+    public void open(ObservableList<DirEntry> source, Supplier<Path> dirSupplier,
+                     Supplier<String> virtualLocationSupplier) {
         detachSource();
         this.source = source;
         this.dirSupplier = dirSupplier;
+        this.virtualLocationSupplier = virtualLocationSupplier == null
+                ? () -> null : virtualLocationSupplier;
         source.addListener(sourceListener);
         attached = true;
         // Force a full reset even when re-opening on the same directory.
         mosaicDir = null;
+        mosaicVirtualLocation = null;
         rebuild();
         shell.showView(AppShell.AppView.MOSAIC);
     }
@@ -2100,7 +2126,9 @@ public final class MosaicWindow
         // tiles, rather than flickering off and re-arming behind the delay gate.
         scanPending = false;
         Path dir = dirSupplier != null ? dirSupplier.get() : null;
-        boolean dirChanged = !Objects.equals(dir, mosaicDir);
+        String virtualLocation = currentVirtualLocation();
+        boolean dirChanged = !Objects.equals(dir, mosaicDir)
+                || !Objects.equals(virtualLocation, mosaicVirtualLocation);
         Path priorLead = (selected >= 0 && selected < items.size())
                 ? items.get(selected).path() : null;
         List<Path> priorPaths = new ArrayList<>();
@@ -2120,6 +2148,7 @@ public final class MosaicWindow
                 .toList();
         tileVisuals.clear();
         mosaicDir = dir;
+        mosaicVirtualLocation = virtualLocation;
         boolean reveal = false;
         // A pending focus path — set after navigating up via ../Backspace, or by
         // refreshAfterMove once a move completes — wins over selection-by-path in
@@ -2177,10 +2206,12 @@ public final class MosaicWindow
             selected = lead;
             anchor = lead;
         }
+        String locationText = locationText(dir, virtualLocation);
         title.set((dir != null ? dir.getFileName() != null
                 ? dir.getFileName().toString() : dir.toString()
+                : virtualLocation != null ? virtualLocation
                 : MainWindow.COMPUTER_LOCATION_NAME) + " — Mosaic");
-        locationField.setText(dir != null ? dir.toString() : MainWindow.COMPUTER_LOCATION_NAME);
+        locationField.setText(locationText);
         statusCountLabel.setText(countText());
         updateSelectionPanels();
         relayout();
@@ -2192,6 +2223,16 @@ public final class MosaicWindow
             autoOpenAfterRebuild = false;
             maybeAutoOpen();
         }
+    }
+
+    private String currentVirtualLocation() {
+        String label = virtualLocationSupplier == null ? null : virtualLocationSupplier.get();
+        return label == null || label.isBlank() ? null : label;
+    }
+
+    private static String locationText(Path dir, String virtualLocation) {
+        if (dir != null) return dir.toString();
+        return virtualLocation != null ? virtualLocation : MainWindow.COMPUTER_LOCATION_NAME;
     }
 
     /**
@@ -2270,6 +2311,7 @@ public final class MosaicWindow
         if (hidden != null && hidden.anyOptIn()) {
             return "Empty folder (" + hiddenSuffixBody(hidden) + ")";
         }
+        if (mosaicVirtualLocation != null) return "Empty album";
         return "Empty folder";
     }
 
@@ -2342,9 +2384,12 @@ public final class MosaicWindow
         // folder-collage sub-image count, plus two rows of scroll headroom.
         int strideY0 = outer + margin;
         int visibleRows = (int) Math.ceil(viewH / (double) strideY0) + 1;
-        int perTile = Math.max(1, folderPreviewGrid * folderPreviewGrid);
+        int perTile = Math.max(1, Math.min(MAX_CACHE_IMAGES_PER_TILE,
+                folderPreviewGrid * folderPreviewGrid));
         int visibleImages = columns * visibleRows * perTile;
-        maxCachedImages = Math.max(MIN_CACHED_IMAGES, visibleImages + columns * perTile * 2);
+        maxCachedImages = Math.max(1, visibleImages + columns * perTile * 2);
+        images.setLimits(fullImageBudgetBytes, 0);
+        scaled.setLimits(scaledImageBudgetBytes, maxCachedImages);
         double maxScroll = Math.max(0, contentHeight - viewH);
         vbar.setMax(maxScroll);
         vbar.setVisibleAmount(maxScroll <= 0 ? 1 : viewH / contentHeight * maxScroll);
@@ -2573,6 +2618,13 @@ public final class MosaicWindow
                 cx, cy, tileSize, dynamicModifiers);
         MosaicTileSet painter = tileSet.get();
         paintTileSet(painter == null ? MosaicTileSets.CURRENT : painter);
+        // Availability is host-owned rather than tile-set artwork, so every
+        // built-in and plugin uses the same mark. Restore the caption above the
+        // hatch; selection remains the final layer below.
+        if (wontOpenReticule.get() && needsWontOpenReticule(item)) {
+            drawReticule(g, Reticule.WONT_OPEN, cx, cy);
+            drawCaption(tilePaintContext);
+        }
 
         // The brightness pulse (PULSE style) tints the lead/cursor tile, painted
         // over the content but under the selection marker so the marker stays
@@ -2593,6 +2645,11 @@ public final class MosaicWindow
                     ? marchPhase : 0;
             drawSelectionBorder(g, x, y, outer, phase);
         }
+    }
+
+    /** Whether this tile is a file the current Media Browser policy won't open. */
+    static boolean needsWontOpenReticule(DirEntry entry) {
+        return entry != null && !entry.openable();
     }
 
     /**
@@ -2787,6 +2844,11 @@ public final class MosaicWindow
         if (!emptyReticule.get()) return;
         Reticule mark = reticuleFor(preview, dir);
         if (mark == null) return;
+        drawReticule(g, mark, cx, cy);
+    }
+
+    /** Paints one proportional reticule over a tile without changing layout. */
+    private void drawReticule(GraphicsContext g, Reticule mark, double cx, double cy) {
         // Smoothing would blur the pattern to flat grey, which is exactly the
         // mush that kills the read. The ImagePattern cell is proportional to
         // this fillRect's tile bounds, so its visual scale follows tileSize.
@@ -3312,6 +3374,9 @@ public final class MosaicWindow
     private Image imageFor(Path path) {
         if (!thumbnailsVisible.get()) return null;
         Image img = images.get(path);
+        // Once a full rendition has been evicted, its screen-sized derivative
+        // remains sufficient for Mosaic and prevents an eviction/reload loop.
+        if (img == null) img = scaled.get(path);
         if (img != null) return img;
         if (empties.contains(path) || pending.contains(path)) return null;
         pending.add(path);

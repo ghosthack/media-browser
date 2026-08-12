@@ -6,6 +6,8 @@ import io.github.ghosthack.mediabrowser.media.archive.ArchiveFormat;
 import io.github.ghosthack.mediabrowser.media.archive.ArchiveInfo;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.archive.stream.StreamFileSystemProvider.PdfMrcView;
+import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionEngine;
+import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionModel;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -144,6 +146,19 @@ public final class MediaService implements AutoCloseable {
     });
 
     /**
+     * Model preparation and Vulkan inference run independently of all decode
+     * queues. Serializing these jobs also prevents two native upscalers from
+     * competing for the GPU and exhausting its memory.
+     */
+    private final ExecutorService superResolutionExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "media-super-resolution");
+                t.setDaemon(true);
+                return t;
+            });
+    private final SuperResolutionEngine superResolution = new SuperResolutionEngine();
+
+    /**
      * Thumbnails run on their own bounded pool, separate from the single
      * {@code media-facade} thread that browse/probe use, so generating a
      * gallery of previews never stalls navigation. Each call is an independent
@@ -210,6 +225,31 @@ public final class MediaService implements AutoCloseable {
      */
     public CompletableFuture<List<DirEntry>> listEntries(Path dir) {
         return CompletableFuture.supplyAsync(() -> scan(dir), executor);
+    }
+
+    /**
+     * Builds one flat listing from arbitrary absolute paths, preserving their
+     * input order and omitting members that no longer exist. Unlike a directory
+     * scan this adds no synthetic {@code ..} row and deliberately ignores the
+     * folder-listing visibility filters: an explicitly curated album member
+     * remains visible even when it is hidden, empty or normally treated as a
+     * system file.
+     *
+     * <p>Classification and filesystem attributes are read on the media-facade
+     * executor, so opening a large scanner-produced album never blocks the FX
+     * thread.</p>
+     */
+    public CompletableFuture<PathListing> listPaths(List<Path> paths) {
+        List<Path> snapshot = paths == null ? List.of() : List.copyOf(paths);
+        return CompletableFuture.supplyAsync(() -> flatListing(snapshot), executor);
+    }
+
+    /** A flat arbitrary-path listing plus the members that disappeared. */
+    public record PathListing(List<DirEntry> entries, int unavailable) {
+        public PathListing {
+            entries = List.copyOf(entries);
+            unavailable = Math.max(0, unavailable);
+        }
     }
 
     /**
@@ -302,6 +342,38 @@ public final class MediaService implements AutoCloseable {
         long requestedNanos = System.nanoTime();
         return CompletableFuture.supplyAsync(
                 () -> loadVisualNow(file, requestedNanos), executor);
+    }
+
+    /**
+     * Enhances an already-decoded still with a local 4× Real-ESRGAN model.
+     * The dedicated worker keeps model download and GPU inference out of the
+     * latency-sensitive facade, thumbnail, and metadata queues.
+     */
+    public CompletableFuture<RasterFrame> superResolve(
+            RasterFrame frame, SuperResolutionModel model, Consumer<String> progress) {
+        return CompletableFuture.supplyAsync(
+                () -> superResolution.enhance(frame, model, progress),
+                superResolutionExecutor);
+    }
+
+    /** Stops the currently running native enhancement, if any. */
+    public void cancelSuperResolution() {
+        superResolution.cancelCurrent();
+    }
+
+    /** Whether this OS/architecture has a pinned local inference backend. */
+    public boolean supportsSuperResolution() {
+        return superResolution.isSupported();
+    }
+
+    /** Human-readable platform reason when super resolution is unsupported. */
+    public String superResolutionUnsupportedReason() {
+        return superResolution.unsupportedReason();
+    }
+
+    /** Fast first-use check used before offering the verified component download. */
+    public boolean superResolutionReady(SuperResolutionModel model) {
+        return superResolution.isReady(model);
     }
 
     private static VisualResult preserveVisual(Path source, VisualResult decoded) {
@@ -990,19 +1062,24 @@ public final class MediaService implements AutoCloseable {
     }
 
     /**
-     * A player for the file's video stream, not yet started. The player runs
-     * on its own thread (independent of this service's facade thread); sink
-     * and callbacks are invoked on that playback thread.
+     * Prepares a player off the caller's thread. For a plain file preparation
+     * is cheap; for an archive entry it may stream the complete member into the
+     * extraction cache, so it must never run on the JavaFX Application Thread.
+     * The returned player is not started. Its sink and callbacks run later on
+     * the dedicated playback thread.
      */
-    public VideoPlayer newVideoPlayer(Path file, VideoPlayer.FrameSink sink,
-                                      Runnable onEnded, Consumer<Throwable> onError) {
+    public CompletableFuture<VideoPlayer> newVideoPlayer(Path file, VideoPlayer.FrameSink sink,
+                                                         Runnable onEnded,
+                                                         Consumer<Throwable> onError) {
         long requestedNanos = System.nanoTime();
-        long inputStarted = System.nanoTime();
-        Path input = decodable(file);
-        long inputElapsedNanos = System.nanoTime() - inputStarted;
-        return new VideoPlayer(facade, mediaEngine, file, input, requestedNanos,
-                inputElapsedNanos, sink, onEnded, onError,
-                trace -> latestPlaybackTrace = trace);
+        return CompletableFuture.supplyAsync(() -> {
+            long inputStarted = System.nanoTime();
+            Path input = decodable(file);
+            long inputElapsedNanos = System.nanoTime() - inputStarted;
+            return new VideoPlayer(facade, mediaEngine, file, input, requestedNanos,
+                    inputElapsedNanos, sink, onEnded, onError,
+                    trace -> latestPlaybackTrace = trace);
+        }, fileOpExecutor);
     }
 
     /**
@@ -1072,6 +1149,50 @@ public final class MediaService implements AutoCloseable {
 
     private List<DirEntry> scan(Path dir) {
         return scan(dir, this::classify);
+    }
+
+    private PathListing flatListing(List<Path> paths) {
+        var entries = new ArrayList<DirEntry>(paths.size());
+        int unavailable = 0;
+        for (Path path : paths) {
+            DirEntry entry = flatEntry(path);
+            if (entry == null) unavailable++;
+            else entries.add(entry);
+        }
+        return new PathListing(entries, unavailable);
+    }
+
+    /** One album member, or {@code null} when it is no longer usable. */
+    private DirEntry flatEntry(Path path) {
+        if (path == null) return null;
+        try {
+            Path p = path.toAbsolutePath().normalize();
+            if (!Files.exists(p)) return null;
+            boolean junk = isJunk(p);
+            FileTraits traits = FileTraits.read(p, junk);
+            if (Files.isDirectory(p)) {
+                return new DirEntry(p, DirEntry.Type.DIRECTORY, null, 0, 0, traits);
+            }
+            long size = sizeOf(p);
+            long mtime = mtimeOf(p);
+            if (ArchivePaths.isArchiveFile(p)) {
+                return new DirEntry(
+                        p, DirEntry.Type.ARCHIVE, null, size, mtime, traits);
+            }
+            if (junk) {
+                return new DirEntry(
+                        p, DirEntry.Type.OTHER, null, size, mtime, traits);
+            }
+            return classify(p)
+                    .map(kind -> new DirEntry(
+                            p, DirEntry.Type.MEDIA, kind, size, mtime, traits))
+                    .orElseGet(() -> new DirEntry(
+                            p, DirEntry.Type.OTHER, null, size, mtime, traits));
+        } catch (RuntimeException ignored) {
+            // One stale, malformed or inaccessible member must not prevent the
+            // rest of a hand-edited album from opening.
+            return null;
+        }
     }
 
     /**
@@ -1333,9 +1454,11 @@ public final class MediaService implements AutoCloseable {
 
     @Override
     public void close() {
+        superResolution.cancelCurrent();
         executor.shutdownNow();
         fileOpExecutor.shutdownNow();
         metadataExecutor.shutdownNow();
+        superResolutionExecutor.shutdownNow();
         thumbnailExecutor.shutdownNow();
         thumbnailCache.clear();
         facade.close();

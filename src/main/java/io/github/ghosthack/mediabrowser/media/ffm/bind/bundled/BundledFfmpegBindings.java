@@ -350,6 +350,11 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     }
 
     @Override
+    public boolean packetHasPayload(MemorySegment pkt) {
+        return AVPacket.size(pkt) > 0;
+    }
+
+    @Override
     public MemorySegment frameAlloc() {
         return FFmpeg.av_frame_alloc().reinterpret(AVFrame.layout().byteSize());
     }

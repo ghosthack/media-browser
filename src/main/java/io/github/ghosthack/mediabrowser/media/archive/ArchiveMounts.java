@@ -4,7 +4,6 @@ import io.github.ghosthack.mediabrowser.media.archive.iso.IsoFileSystemProvider;
 import io.github.ghosthack.mediabrowser.media.archive.stream.StreamFileSystemProvider;
 
 import java.io.IOException;
-import java.net.URI;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystemAlreadyExistsException;
 import java.nio.file.FileSystems;
@@ -149,8 +148,7 @@ public final class ArchiveMounts {
             return switch (format) {
                 case ISO -> IsoFileSystemProvider.instance().newFileSystem(key, Map.of());
                 case CUE -> IsoFileSystemProvider.instance().newCueFileSystem(key);
-                case ZIP -> openZip(key);
-                case RAR, SEVEN_Z, PDF, EPUB ->
+                case ZIP, RAR, SEVEN_Z, PDF, EPUB ->
                         StreamFileSystemProvider.instance().newFileSystem(key, format);
             };
         } catch (FileSystemAlreadyExistsException e) {
@@ -158,23 +156,10 @@ public final class ArchiveMounts {
             // providers key globally, so ask for the one that won.
             FileSystem existing = format == ArchiveFormat.ISO || format == ArchiveFormat.CUE
                     ? IsoFileSystemProvider.instance().mounted(key)
-                    : format == ArchiveFormat.ZIP
-                            ? FileSystems.getFileSystem(URI.create("jar:" + key.toUri()))
-                            : StreamFileSystemProvider.instance().mounted(key);
+                    : StreamFileSystemProvider.instance().mounted(key);
             if (existing == null) throw new IOException("cannot open " + key, e);
             return existing;
         }
-    }
-
-    /**
-     * Opens a zip <em>read-only</em>. This is not a detail: zipfs defaults to
-     * read-write, so without {@code accessMode} a stray delete or write against
-     * a browsed path would silently rewrite the user's archive. The browser
-     * only ever reads, and the filesystem is made incapable of anything else so
-     * that stays true by construction rather than by discipline.
-     */
-    private static FileSystem openZip(Path archive) throws IOException {
-        return FileSystems.newFileSystem(archive, Map.of("accessMode", "readOnly"));
     }
 
     private static Path rootOf(FileSystem fs) {

@@ -3,21 +3,26 @@ package io.github.ghosthack.mediabrowser;
 import io.github.ghosthack.mediabrowser.media.MediaBackend;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Properties;
 
 /**
  * Persisted application settings, stored as a properties file at
  * {@code ~/.media-browser/app.properties}. Loaded once at startup;
- * {@link #save} writes the current values back. Settings that affect window
- * construction (such as {@link #windowDecorations()}) take effect on the
- * next start.
+ * {@link #save} merges the current values into the authoritative on-disk
+ * document and publishes it atomically. Unknown keys and intentionally ignored
+ * list entries survive unrelated saves. Settings that affect window construction
+ * (such as {@link #windowDecorations()}) take effect on the next start.
  */
 public final class AppSettings {
 
@@ -68,6 +73,7 @@ public final class AppSettings {
     private static final String LISTING_HIDE_EMPTY_FOLDERS_KEY = "listing.hideEmptyFolders";
     private static final String LISTING_COLLAPSE_CHAINS_KEY = "listing.collapseFolderChains";
     private static final String MOSAIC_EMPTY_RETICULE_KEY = "mosaic.emptyReticule";
+    private static final String MOSAIC_WONT_OPEN_RETICULE_KEY = "mosaic.wontOpenReticule";
     private static final String MOSAIC_BARREN_CHECK_KEY = "mosaic.barrenCheck";
     private static final String MOSAIC_BARREN_BUDGET_KEY = "mosaic.barrenCheck.budget";
     private static final String MOSAIC_FOLDER_GLYPH_KEY = "mosaic.folderGlyph";
@@ -248,6 +254,7 @@ public final class AppSettings {
     private boolean listingHideEmptyFolders;
     private boolean listingCollapseFolderChains;
     private boolean mosaicEmptyReticule;
+    private boolean mosaicWontOpenReticule;
     private boolean mosaicBarrenCheck;
     private int mosaicBarrenBudget;
     private MosaicFolderGlyph mosaicFolderGlyph;
@@ -293,6 +300,18 @@ public final class AppSettings {
      */
     private boolean quickMoveShortcutsEnabled;
 
+    /** Canonical app-owned values at the last successful load/save. */
+    private Properties baselineProperties = new Properties();
+    /** File this baseline describes; package-visible save(Path) may target tests. */
+    private Path persistencePath;
+    /** Whether the authoritative load observed a file rather than absence. */
+    private boolean loadedFileExisted;
+    /** A present file that could not be fully read must never be replaced. */
+    private IOException loadFailure;
+    /** Indexed families are replaced only after an explicit model mutation. */
+    private boolean moveHistoryFamilyDirty;
+    private boolean albumRecentsFamilyDirty;
+
     private AppSettings() {}
 
     /** Reads the default settings file; missing file or bad values mean defaults. */
@@ -302,15 +321,24 @@ public final class AppSettings {
 
     /** Reads {@code file}; missing file or unreadable values mean defaults. */
     static AppSettings load(Path file) {
-        var props = new Properties();
-        if (Files.isRegularFile(file)) {
-            try (var in = Files.newInputStream(file)) {
-                props.load(in);
+        Properties props = new Properties();
+        IOException loadFailure = null;
+        boolean existed = !Files.notExists(file);
+        if (existed) {
+            try {
+                if (!Files.isRegularFile(file)) {
+                    throw new IOException("Settings path is not a regular file");
+                }
+                props = readProperties(file);
             } catch (IOException e) {
+                loadFailure = e;
                 System.err.println("Cannot read " + file + ": " + e.getMessage());
             }
         }
         var settings = new AppSettings();
+        settings.persistencePath = normalizedPath(file);
+        settings.loadedFileExisted = existed;
+        settings.loadFailure = loadFailure;
         settings.windowDecorations = WindowDecorations.fromSettings(
                 props.getProperty(WINDOW_DECORATIONS_KEY), WindowDecorations.DEFAULT);
         settings.undecoratedResizable =
@@ -394,6 +422,8 @@ public final class AppSettings {
                 props.getProperty(LISTING_COLLAPSE_CHAINS_KEY, "true"));
         settings.mosaicEmptyReticule = Boolean.parseBoolean(
                 props.getProperty(MOSAIC_EMPTY_RETICULE_KEY, "true"));
+        settings.mosaicWontOpenReticule = Boolean.parseBoolean(
+                props.getProperty(MOSAIC_WONT_OPEN_RETICULE_KEY, "false"));
         settings.mosaicBarrenCheck = Boolean.parseBoolean(
                 props.getProperty(MOSAIC_BARREN_CHECK_KEY, "false"));
         settings.mosaicBarrenBudget = parseBoundedInt(
@@ -491,6 +521,7 @@ public final class AppSettings {
         settings.sidePanelWidth = parseBoundedInt(
                 props.getProperty(SIDE_PANEL_WIDTH_KEY), DEFAULT_SIDE_PANEL_WIDTH,
                 MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH);
+        settings.baselineProperties = settings.canonicalProperties();
         return settings;
     }
 
@@ -580,8 +611,56 @@ public final class AppSettings {
         save(FILE);
     }
 
-    /** Writes the current values to {@code file}, creating parent dirs. */
-    void save(Path file) throws IOException {
+    /**
+     * Writes the current values to {@code file}. The live file is re-read before
+     * every save so unknown/external keys are retained, then the replacement is
+     * fsynced and atomically published. A settings instance created from a failed
+     * read cannot overwrite the still-present source file.
+     */
+    synchronized void save(Path file) throws IOException {
+        Path target = normalizedPath(file);
+        boolean sameSource = Objects.equals(target, persistencePath);
+        boolean targetExists = !Files.notExists(target);
+        if (loadFailure != null && (!sameSource || targetExists)) {
+            throw new IOException("Refusing to replace settings after a failed read: "
+                    + persistencePath, loadFailure);
+        }
+        if (sameSource && !loadedFileExisted && targetExists) {
+            throw new IOException("Settings file appeared after startup; reload before saving: "
+                    + target);
+        }
+
+        Properties live = targetExists ? readProperties(target) : new Properties();
+        Properties current = canonicalProperties();
+        boolean writeAll = !sameSource || !loadedFileExisted || loadFailure != null;
+        if (writeAll) {
+            removeAppOwnedProperties(live, current);
+            live.putAll(current);
+        } else {
+            overlayChangedScalarProperties(live, current, baselineProperties);
+            if (moveHistoryFamilyDirty
+                    || !sameFamily(current, baselineProperties, MOVE_HISTORY_ENTRY_PREFIX)) {
+                replaceFamily(live, current, MOVE_HISTORY_ENTRY_PREFIX);
+            }
+            if (albumRecentsFamilyDirty
+                    || !sameFamily(current, baselineProperties, ALBUM_RECENT_ENTRY_PREFIX)) {
+                replaceFamily(live, current, ALBUM_RECENT_ENTRY_PREFIX);
+            }
+            migrateLegacyProperties(live, current);
+            removeRetiredProperties(live);
+        }
+
+        storeAtomically(target, live);
+        baselineProperties = current;
+        persistencePath = target;
+        loadedFileExisted = true;
+        loadFailure = null;
+        moveHistoryFamilyDirty = false;
+        albumRecentsFamilyDirty = false;
+    }
+
+    /** Canonical serialization of the app-owned in-memory model. */
+    private Properties canonicalProperties() {
         var props = new Properties();
         props.setProperty(WINDOW_DECORATIONS_KEY, windowDecorations.name());
         props.setProperty(UNDECORATED_RESIZABLE_KEY,
@@ -630,6 +709,8 @@ public final class AppSettings {
         props.setProperty(LISTING_COLLAPSE_CHAINS_KEY,
                 Boolean.toString(listingCollapseFolderChains));
         props.setProperty(MOSAIC_EMPTY_RETICULE_KEY, Boolean.toString(mosaicEmptyReticule));
+        props.setProperty(MOSAIC_WONT_OPEN_RETICULE_KEY,
+                Boolean.toString(mosaicWontOpenReticule));
         props.setProperty(MOSAIC_BARREN_CHECK_KEY, Boolean.toString(mosaicBarrenCheck));
         props.setProperty(MOSAIC_BARREN_BUDGET_KEY, Integer.toString(mosaicBarrenBudget));
         props.setProperty(MOSAIC_FOLDER_GLYPH_KEY, mosaicFolderGlyph.name());
@@ -673,9 +754,144 @@ public final class AppSettings {
         props.setProperty(ACTION_LOG_FILE_KEY, Boolean.toString(actionLogFileEnabled));
         props.setProperty(EXTENSION_FIX_KEY, Boolean.toString(extensionFixEnabled));
         props.setProperty(SIDE_PANEL_WIDTH_KEY, Integer.toString(sidePanelWidth));
-        Files.createDirectories(file.getParent());
-        try (var out = Files.newOutputStream(file)) {
-            props.store(out, "Media Browser settings");
+        return props;
+    }
+
+    /** Reads a complete properties document or fails without exposing a partial model. */
+    private static Properties readProperties(Path file) throws IOException {
+        Properties props = new Properties();
+        try (var in = Files.newInputStream(file)) {
+            props.load(in);
+        } catch (IllegalArgumentException malformed) {
+            throw new IOException("Malformed properties document", malformed);
+        }
+        return props;
+    }
+
+    private static Path normalizedPath(Path file) {
+        return file.toAbsolutePath().normalize();
+    }
+
+    /** Overlay only scalar values that actually changed since load/last save. */
+    private static void overlayChangedScalarProperties(Properties live, Properties current,
+                                                       Properties baseline) {
+        for (String key : current.stringPropertyNames()) {
+            if (key.startsWith(MOVE_HISTORY_ENTRY_PREFIX)
+                    || key.startsWith(ALBUM_RECENT_ENTRY_PREFIX)) {
+                continue;
+            }
+            String value = current.getProperty(key);
+            if (!Objects.equals(value, baseline.getProperty(key))) {
+                live.setProperty(key, value);
+            }
+        }
+    }
+
+    private static boolean sameFamily(Properties first, Properties second, String prefix) {
+        for (String key : first.stringPropertyNames()) {
+            if (key.startsWith(prefix)
+                    && !Objects.equals(first.getProperty(key), second.getProperty(key))) {
+                return false;
+            }
+        }
+        for (String key : second.stringPropertyNames()) {
+            if (key.startsWith(prefix)
+                    && !Objects.equals(first.getProperty(key), second.getProperty(key))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void replaceFamily(Properties destination, Properties source, String prefix) {
+        removeFamily(destination, prefix);
+        for (String key : source.stringPropertyNames()) {
+            if (key.startsWith(prefix)) {
+                destination.setProperty(key, source.getProperty(key));
+            }
+        }
+    }
+
+    private static void removeFamily(Properties props, String prefix) {
+        props.stringPropertyNames().stream()
+                .filter(key -> key.startsWith(prefix))
+                .toList()
+                .forEach(props::remove);
+    }
+
+    /** A new target receives the complete canonical model, but keeps unknown keys. */
+    private static void removeAppOwnedProperties(Properties destination, Properties current) {
+        current.stringPropertyNames().forEach(destination::remove);
+        removeFamily(destination, MOVE_HISTORY_ENTRY_PREFIX);
+        removeFamily(destination, ALBUM_RECENT_ENTRY_PREFIX);
+        removeRetiredProperties(destination);
+    }
+
+    /** Persist migrations before removing the legacy source keys. */
+    private static void migrateLegacyProperties(Properties live, Properties current) {
+        migrateIfPresent(live, current, STARTUP_LAYOUT_KEY,
+                STARTUP_MOSAIC_KEY, STARTUP_TWO_WINDOW_KEY);
+        migrateIfPresent(live, current, MOSAIC_SELECTION_ANIMATION_KEY,
+                MOSAIC_PULSE_SELECTION_KEY);
+        migrateIfPresent(live, current, MOSAIC_FOLDER_GLYPH_KEY,
+                MOSAIC_FOLDER_IMAGE_KEY);
+        migrateIfPresent(live, current, ACTION_LOG_VISIBLE_KEY,
+                "browser.actionLog.visible", "mosaic.actionLog.visible");
+    }
+
+    private static void migrateIfPresent(Properties live, Properties current,
+                                         String canonicalKey, String... legacyKeys) {
+        if (live.containsKey(canonicalKey)) return;
+        for (String legacyKey : legacyKeys) {
+            if (live.containsKey(legacyKey)) {
+                live.setProperty(canonicalKey, current.getProperty(canonicalKey));
+                return;
+            }
+        }
+    }
+
+    private static void removeRetiredProperties(Properties props) {
+        props.remove("window.undecorated");
+        props.remove(STARTUP_MOSAIC_KEY);
+        props.remove(STARTUP_TWO_WINDOW_KEY);
+        props.remove(MOSAIC_PULSE_SELECTION_KEY);
+        props.remove(MOSAIC_FOLDER_IMAGE_KEY);
+        props.remove("browser.actionLog.visible");
+        props.remove("mosaic.actionLog.visible");
+    }
+
+    /**
+     * Temp sibling + file sync + atomic rename. A failed serialization or move
+     * leaves the previous settings file untouched; filesystems without atomic
+     * rename fall back to a replace only after the temp file is fully durable.
+     */
+    private static void storeAtomically(Path target, Properties props) throws IOException {
+        Path parent = target.getParent();
+        if (parent == null) {
+            throw new IOException("Settings path has no parent: " + target);
+        }
+        Files.createDirectories(parent);
+        String name = target.getFileName() == null ? "settings" : target.getFileName().toString();
+        String prefix = name.length() >= 3 ? name + "." : "settings." + name + ".";
+        Path temp = Files.createTempFile(parent, prefix, ".tmp");
+        boolean published = false;
+        try {
+            try (FileOutputStream out = new FileOutputStream(temp.toFile())) {
+                props.store(out, "Media Browser settings");
+                out.flush();
+                out.getFD().sync();
+            }
+            try {
+                Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException unsupported) {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+            published = true;
+        } finally {
+            if (!published) {
+                Files.deleteIfExists(temp);
+            }
         }
     }
 
@@ -1135,6 +1351,18 @@ public final class AppSettings {
     }
 
     /**
+     * Whether Mosaic marks file tiles the active media-browser policy will not
+     * open. Off by default so existing galleries retain their current look.
+     */
+    public boolean mosaicWontOpenReticule() {
+        return mosaicWontOpenReticule;
+    }
+
+    public void setMosaicWontOpenReticule(boolean reticule) {
+        this.mosaicWontOpenReticule = reticule;
+    }
+
+    /**
      * Whether folder tiles are additionally checked for a wholly media-free
      * subtree. Off by default: measured at roughly 1 in 35 media-bearing
      * folders, which earns a setting rather than a default.
@@ -1216,7 +1444,11 @@ public final class AppSettings {
     }
 
     public void setMoveHistory(List<String> history) {
-        this.moveHistory = history == null ? new ArrayList<>() : new ArrayList<>(history);
+        List<String> replacement = history == null ? List.of() : history;
+        if (!this.moveHistory.equals(replacement)) {
+            this.moveHistory = new ArrayList<>(replacement);
+            this.moveHistoryFamilyDirty = true;
+        }
     }
 
     /** Maximum retained move-history entries (default 10, clamped to [1, 100]). */
@@ -1225,8 +1457,12 @@ public final class AppSettings {
     }
 
     public void setMoveHistoryLimit(int limit) {
-        this.moveHistoryLimit = Math.max(MIN_MOVE_HISTORY_LIMIT,
+        int replacement = Math.max(MIN_MOVE_HISTORY_LIMIT,
                 Math.min(MAX_MOVE_HISTORY_LIMIT, limit));
+        if (this.moveHistoryLimit != replacement) {
+            this.moveHistoryLimit = replacement;
+            this.moveHistoryFamilyDirty = true;
+        }
     }
 
     /**
@@ -1254,7 +1490,11 @@ public final class AppSettings {
     }
 
     public void setAlbumRecents(List<String> recents) {
-        this.albumRecents = recents == null ? new ArrayList<>() : new ArrayList<>(recents);
+        List<String> replacement = recents == null ? List.of() : recents;
+        if (!this.albumRecents.equals(replacement)) {
+            this.albumRecents = new ArrayList<>(replacement);
+            this.albumRecentsFamilyDirty = true;
+        }
     }
 
     /**
@@ -1266,11 +1506,16 @@ public final class AppSettings {
         if (fileName == null || fileName.isBlank()) {
             return;
         }
+        if (!albumRecents.isEmpty() && albumRecents.get(0).equals(fileName)
+                && albumRecents.size() <= ALBUM_RECENT_LIMIT) {
+            return;
+        }
         albumRecents.remove(fileName);
         albumRecents.add(0, fileName);
         while (albumRecents.size() > ALBUM_RECENT_LIMIT) {
             albumRecents.remove(albumRecents.size() - 1);
         }
+        albumRecentsFamilyDirty = true;
     }
 
     /**

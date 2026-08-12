@@ -51,7 +51,7 @@ final class FfmpegVideoStream implements VideoStream {
 
     private long ptsMicros = -1;
     private int srcW = -1, srcH = -1, srcFmt = -1;
-    private boolean draining, ended, closed;
+    private boolean packetPending, draining, ended, closed;
 
     // Hardware decode (HwDecode policy): the device reference, the hw pixel
     // format get_format prefers, the readback destination frame, and the
@@ -296,15 +296,34 @@ final class FfmpegVideoStream implements VideoStream {
             }
 
             // decoder wants more input
+            if (packetPending) {
+                int sr = ff.sendPacket(cctx, pkt);
+                if (sr >= 0) {
+                    packetPending = false;
+                    ff.packetUnref(pkt);
+                } else if (sr != ff.averrorEagain()) {
+                    packetPending = false;
+                    ff.packetUnref(pkt);
+                    throw new MediaException("ffmpeg: send packet failed: " + ff.errStr(sr));
+                }
+                continue;
+            }
             int r = ff.readFrame(ctx, pkt);
             if (r < 0) {
                 ff.sendPacket(cctx, MemorySegment.NULL);
                 draining = true;
                 continue;
             }
-            if (ff.packetStreamIndex(pkt) == videoIndex) {
+            if (ff.packetStreamIndex(pkt) == videoIndex && ff.packetHasPayload(pkt)) {
                 int sr = ff.sendPacket(cctx, pkt);
-                if (sr < 0 && sr != ff.averrorEagain() && sr != ff.averrorEof()) {
+                if (sr == ff.averrorEagain()) {
+                    // The decoder did not consume the packet. Keep it alive
+                    // while receiveFrame drains output, then retry this exact
+                    // packet before reading any more demux input.
+                    packetPending = true;
+                    continue;
+                }
+                if (sr < 0 && sr != ff.averrorEof()) {
                     ff.packetUnref(pkt);
                     throw new MediaException("ffmpeg: send packet failed: " + ff.errStr(sr));
                 }

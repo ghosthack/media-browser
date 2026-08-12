@@ -1,6 +1,9 @@
 package io.github.ghosthack.mediabrowser.media.move;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 /**
@@ -92,8 +95,8 @@ public final class MovePlanner {
         // create confirmation is equivalent to the predecessor's after-confirm order.
         if (!singleFileRename) {
             for (String source : sources) {
-                String sourceParent = new File(source).getParent();
-                if (sourceParent != null && sourceParent.equals(resolvedTarget)) {
+                File sourceParent = new File(source).getParentFile();
+                if (sourceParent != null && sameDirectory(sourceParent.toPath(), targetFile.toPath())) {
                     return Plan.invalid("Cannot move files to the same directory");
                 }
             }
@@ -106,5 +109,28 @@ public final class MovePlanner {
 
         return new Plan(true, null, resolvedTarget, singleFileRename, needsCreate,
                 renameTarget, historyPath);
+    }
+
+    /**
+     * Filesystem identity comparison for an existing source/target directory.
+     * {@link Files#isSameFile} handles aliases that lexical strings cannot:
+     * symlinks, {@code .}/{@code ..}, and case variants on case-insensitive
+     * filesystems. The normalized fallback keeps planning deterministic if a
+     * transient filesystem error prevents the identity query.
+     */
+    private static boolean sameDirectory(Path first, Path second) {
+        try {
+            return Files.isSameFile(first, second);
+        } catch (IOException | SecurityException ignored) {
+            return identityPath(first).equals(identityPath(second));
+        }
+    }
+
+    private static Path identityPath(Path path) {
+        try {
+            return path.toRealPath();
+        } catch (IOException | SecurityException ignored) {
+            return path.toAbsolutePath().normalize();
+        }
     }
 }

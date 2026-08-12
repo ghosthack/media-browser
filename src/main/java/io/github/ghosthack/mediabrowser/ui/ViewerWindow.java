@@ -16,6 +16,7 @@ import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.color.ColorPolicy;
+import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionModel;
 import io.github.ghosthack.mediabrowser.media.VideoPlayer;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 import io.github.ghosthack.mediabrowser.media.move.FileOps;
@@ -39,6 +40,7 @@ import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Parent;
+import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
@@ -197,6 +199,16 @@ public final class ViewerWindow implements AppShell.ShellView {
      * errored or video-playback states.
      */
     private RasterFrame lastUprightFrame;
+    /** Optional transient 4× AI rendition of {@link #lastUprightFrame}. */
+    private RasterFrame enhancedUprightFrame;
+    /** Original/enhanced comparison state; enhancement is deliberately session-only. */
+    private final BooleanProperty enhancedVisible = new SimpleBooleanProperty(false);
+    /** True once a rendition exists for the current still (gates comparison controls). */
+    private final BooleanProperty enhancedAvailable = new SimpleBooleanProperty(false);
+    /** Bound to Enhance actions in both viewer menus. */
+    private final BooleanProperty superResolutionDisabled = new SimpleBooleanProperty(true);
+    private boolean superResolutionBusy;
+    private boolean syncingEnhancedVisibility;
     // --- still-image color policy (docs/color-gamut-mapping.md) ---
     // Menu selection alone scopes to the shown image; "Apply always" promotes
     // it to the persisted AppSettings default. Overrides reset on navigation.
@@ -443,6 +455,18 @@ public final class ViewerWindow implements AppShell.ShellView {
         this.settings = settings;
         this.rotationStore = rotationStore;
         this.aaeStore = aaeStore;
+
+        enhancedVisible.addListener((obs, was, visible) -> {
+            if (syncingEnhancedVisibility) return;
+            if (enhancedUprightFrame == null && visible) {
+                enhancedVisible.set(false);
+                return;
+            }
+            if (lastUprightFrame != null && player == null
+                    && index >= 0 && index < siblings.size()) {
+                rebakeCurrentAdjustments(siblings.get(index));
+            }
+        });
 
         IconBinding.install(prevButton, AppIcon.PREVIOUS, "◀", "",
                 "Previous media");
@@ -1148,6 +1172,31 @@ public final class ViewerWindow implements AppShell.ShellView {
         return fullScreenToggle.selectedProperty();
     }
 
+    /** Disable state shared by the Photo/Artwork super-resolution actions. */
+    public ReadOnlyBooleanProperty superResolutionDisabledProperty() {
+        return superResolutionDisabled;
+    }
+
+    /** Whether the current still has a completed transient enhanced rendition. */
+    public ReadOnlyBooleanProperty enhancedAvailableProperty() {
+        return enhancedAvailable;
+    }
+
+    /** Original/enhanced comparison toggle exposed in both viewer menus. */
+    public BooleanProperty enhancedVisibleProperty() {
+        return enhancedVisible;
+    }
+
+    /** Viewer-menu action: general photography / natural imagery model. */
+    public void enhancePhoto() {
+        enhanceCurrent(SuperResolutionModel.PHOTO);
+    }
+
+    /** Viewer-menu action: animation, illustration, and clean line-art model. */
+    public void enhanceArtwork() {
+        enhanceCurrent(SuperResolutionModel.ARTWORK);
+    }
+
     /** True when no video is loaded, so Play / Pause should be disabled. */
     public ReadOnlyBooleanProperty playDisabledProperty() {
         return playButton.disableProperty();
@@ -1782,6 +1831,14 @@ public final class ViewerWindow implements AppShell.ShellView {
         // moments the automatic extension fix may run (the other: clean
         // end-of-stream) — the handle is being released anyway.
         stopPlayback(true);
+        service.cancelSuperResolution();
+        superResolutionBusy = false;
+        enhancedUprightFrame = null;
+        enhancedAvailable.set(false);
+        syncingEnhancedVisibility = true;
+        enhancedVisible.set(false);
+        syncingEnhancedVisibility = false;
+        updateSuperResolutionState();
         // Navigation ends a running flipbook (quietly: this load already
         // repaints the viewport, so the teardown must not reload on its own).
         if (flipbookToggle.isSelected()) {
@@ -1853,6 +1910,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                         if (player == null) {
                             hideLoadingIndicator();
                             lastUprightFrame = null;
+                            updateSuperResolutionState();
                             imageView.setImage(null);
                             placeholder.setText("Cannot display " + item.fileName()
                                     + "\n" + rootMessage(error));
@@ -1896,9 +1954,11 @@ public final class ViewerWindow implements AppShell.ShellView {
                         statusLabel.setText(item.fileName() + " — "
                                 + shown.width() + " × " + shown.height()
                                 + " — " + item.kind());
+                        updateSuperResolutionState();
                     } else {
                         hideLoadingIndicator();
                         lastUprightFrame = null;
+                        updateSuperResolutionState();
                         imageView.setImage(null);
                         placeholder.setText("♫ " + item.fileName()
                                 + "\n(audio — no visual)");
@@ -1913,9 +1973,9 @@ public final class ViewerWindow implements AppShell.ShellView {
                     maybeFixExtension(item.path());
                 }));
 
-        // Autoplay (on by default): a video starts playing on load instead of
-        // waiting for Play. Starting now sets player != null, so the loadVisual
-        // callback above skips drawing the still and playback takes over.
+        // Autoplay (on by default): a video starts preparing on the background
+        // file-operation executor instead of waiting for Play. The visual probe
+        // may still land first and show a poster while archive extraction runs.
         if (autoplayToggle.isSelected() && item.kind() == MediaKind.VIDEO) {
             playButton.setSelected(true);
             startPlayback(item);
@@ -2035,10 +2095,21 @@ public final class ViewerWindow implements AppShell.ShellView {
         var invert = new MenuItem("Invert");
         invert.setAccelerator(new KeyCodeCombination(KeyCode.F9, KeyCombination.SHIFT_DOWN));
         invert.setOnAction(e -> toggleAdjustment(Adjustment.INVERT));
+        var enhancePhoto = new MenuItem("Enhance 4× — Photo");
+        enhancePhoto.disableProperty().bind(superResolutionDisabled);
+        enhancePhoto.setOnAction(e -> enhancePhoto());
+        var enhanceArtwork = new MenuItem("Enhance 4× — Artwork");
+        enhanceArtwork.disableProperty().bind(superResolutionDisabled);
+        enhanceArtwork.setOnAction(e -> enhanceArtwork());
+        var showEnhanced = new CheckMenuItem("Show Enhanced");
+        showEnhanced.disableProperty().bind(enhancedAvailable.not());
+        showEnhanced.selectedProperty().bindBidirectional(enhancedVisible);
+        var superResolution = new Menu("Super Resolution…", null,
+                enhancePhoto, enhanceArtwork, new SeparatorMenuItem(), showEnhanced);
         var adjustMenu = new Menu("Adjust\u2026", null,
                 rotateLeft, rotateRight, new SeparatorMenuItem(),
                 mirrorH, mirrorV, new SeparatorMenuItem(),
-                blackWhite, invert);
+                blackWhite, invert, new SeparatorMenuItem(), superResolution);
 
         // The chrome toggles advertise their modifier1 chords for
         // discoverability; the keystrokes are handled in the scene key filter,
@@ -2083,6 +2154,89 @@ public final class ViewerWindow implements AppShell.ShellView {
         content.putString(path);
         Clipboard.getSystemClipboard().setContent(content);
         statusLabel.setText("Copied path: " + path);
+    }
+
+    /**
+     * Runs a transient, local 4× enhancement of the retained upright still.
+     * It is intentionally not a persisted adjustment: inference is expensive,
+     * and silently re-running a generative model on every open would violate the
+     * viewer's fast-navigation contract. The completed rendition stays in memory
+     * for this item and the Show Enhanced check toggles comparison instantly.
+     */
+    private void enhanceCurrent(SuperResolutionModel model) {
+        if (superResolutionBusy || player != null || lastUprightFrame == null) return;
+        if (index < 0 || index >= siblings.size()) return;
+        if (!service.supportsSuperResolution()) {
+            statusLabel.setText(service.superResolutionUnsupportedReason());
+            return;
+        }
+        if (!service.superResolutionReady(model) && !confirmSuperResolutionDownload(model)) {
+            return;
+        }
+
+        MediaItem item = siblings.get(index);
+        RasterFrame source = lastUprightFrame;
+        int seq = loadSequence;
+        superResolutionBusy = true;
+        updateSuperResolutionState();
+        statusLabel.setText("Preparing " + model.label() + " super resolution…");
+
+        service.superResolve(source, model, message -> Platform.runLater(() -> {
+            if (seq == loadSequence && index >= 0 && index < siblings.size()
+                    && siblings.get(index).path().equals(item.path())) {
+                statusLabel.setText(message);
+            }
+        })).whenComplete((enhanced, error) -> Platform.runLater(() -> {
+            // Navigation has already reset the busy/display state and cancelled
+            // the native process. Never let the old completion touch the new item.
+            if (seq != loadSequence || index < 0 || index >= siblings.size()
+                    || !siblings.get(index).path().equals(item.path())) return;
+            superResolutionBusy = false;
+            updateSuperResolutionState();
+            if (error != null) {
+                statusLabel.setText(item.fileName() + " — enhancement failed: "
+                        + rootMessage(error));
+                return;
+            }
+            enhancedUprightFrame = enhanced;
+            enhancedAvailable.set(true);
+            // set(true) rebakes through the listener. When a future model is run
+            // while enhanced is already selected, force the new rendition in.
+            if (enhancedVisible.get()) rebakeCurrentAdjustments(item);
+            else enhancedVisible.set(true);
+        }));
+    }
+
+    /** First-use disclosure for the optional downloaded inference component. */
+    private boolean confirmSuperResolutionDownload(SuperResolutionModel model) {
+        var download = new ButtonType("Download & Enhance", ButtonBar.ButtonData.OK_DONE);
+        var alert = new Alert(Alert.AlertType.CONFIRMATION);
+        alert.initOwner(stage());
+        alert.setTitle("Set Up Super Resolution");
+        alert.setHeaderText("Download the local " + model.label() + " enhancement model?");
+        alert.setContentText("Media Browser will download up to about 43 MB of SHA-256-verified "
+                + "runtime and model files from the Upscayl and Real-ESRGAN projects. "
+                + "Enhancement runs locally through the GPU; the image is never uploaded.\n\n"
+                + "The optional Upscayl backend is AGPL-3.0 and is kept as a separate "
+                + "command-line program under ~/.media-browser/super-resolution.");
+        alert.getButtonTypes().setAll(download, ButtonType.CANCEL);
+        return alert.showAndWait().orElse(ButtonType.CANCEL) == download;
+    }
+
+    /** Reconciles menu disabled state after load/playback/inference transitions. */
+    private void updateSuperResolutionState() {
+        superResolutionDisabled.set(superResolutionBusy || player != null
+                || lastUprightFrame == null || !service.supportsSuperResolution());
+        enhancedAvailable.set(enhancedUprightFrame != null);
+        if (enhancedUprightFrame == null && enhancedVisible.get()) {
+            enhancedVisible.set(false);
+        }
+    }
+
+    /** Upright bake source selected by the original/enhanced comparison toggle. */
+    private RasterFrame currentUprightFrame() {
+        return enhancedVisible.get() && enhancedUprightFrame != null
+                ? enhancedUprightFrame : lastUprightFrame;
     }
 
     private void rotateCurrent(int delta) {
@@ -2158,7 +2312,7 @@ public final class ViewerWindow implements AppShell.ShellView {
      * case too).
      */
     private void rebakeCurrentAdjustments(MediaItem item) {
-        RasterFrame shown = RasterFrames.apply(lastUprightFrame,
+        RasterFrame shown = RasterFrames.apply(currentUprightFrame(),
                 rotationStore.adjustments(item.path()));
         imageView.setImage(FxImages.toImage(shown));
         statusLabel.setText(item.fileName() + " — "
@@ -2374,7 +2528,11 @@ public final class ViewerWindow implements AppShell.ShellView {
         int h = session.frameHeight();
         flipbookPixels = new PixelBuffer<>(w, h, ByteBuffer.allocateDirect(w * h * 4),
                 PixelFormat.getByteBgraPreInstance());
+        service.cancelSuperResolution();
+        superResolutionBusy = false;
         lastUprightFrame = null;
+        enhancedUprightFrame = null;
+        updateSuperResolutionState();
         playButton.setDisable(true);
         hideLoadingIndicator();
         placeholder.setText("");
@@ -2669,10 +2827,18 @@ public final class ViewerWindow implements AppShell.ShellView {
                 player.play();
                 statusLabel.setText(item.fileName() + " — playing");
             }
-        } else if (player != null) {
-            player.pause();
-            statusLabel.setText(item.fileName() + " — paused at "
-                    + timecode(playPositionMicros));
+        } else {
+            if (player != null) {
+                player.pause();
+                statusLabel.setText(item.fileName() + " — paused at "
+                        + timecode(playPositionMicros));
+            } else {
+                // A preparation future may still be extracting an archive
+                // entry. Invalidate its session so completion cannot start a
+                // player after the user has switched Play off.
+                playSession++;
+                playbackPath = null;
+            }
         }
     }
 
@@ -2734,7 +2900,7 @@ public final class ViewerWindow implements AppShell.ShellView {
             }
         };
 
-        player = service.newVideoPlayer(item.path(), sink,
+        service.newVideoPlayer(item.path(), sink,
                 () -> Platform.runLater(() -> {
                     if (session != playSession) return;
                     if (repeatToggle.isSelected()) {
@@ -2745,15 +2911,34 @@ public final class ViewerWindow implements AppShell.ShellView {
                     }
                 }),
                 error -> Platform.runLater(() -> {
-                    if (session != playSession) return;
-                    hideLoadingIndicator();
-                    logError("Cannot play " + item.fileName(), error);
-                    stopPlayback();
-                    placeholder.setText("Cannot play " + item.fileName()
-                            + "\n" + rootMessage(error));
-                    statusLabel.setText(item.fileName() + " — playback error");
+                    finishPlaybackError(session, item, error);
+                }))
+                .whenComplete((prepared, error) -> Platform.runLater(() -> {
+                    if (session != playSession || !playButton.isSelected()) {
+                        if (prepared != null) prepared.close();
+                        sink.close();
+                        return;
+                    }
+                    if (error != null) {
+                        sink.close();
+                        finishPlaybackError(session, item, error);
+                        return;
+                    }
+                    player = prepared;
+                    updateSuperResolutionState();
+                    player.play();
                 }));
-        player.play();
+    }
+
+    /** Applies a preparation/playback failure on the FX thread. */
+    private void finishPlaybackError(int session, MediaItem item, Throwable error) {
+        if (session != playSession) return;
+        hideLoadingIndicator();
+        logError("Cannot play " + item.fileName(), error);
+        stopPlayback();
+        placeholder.setText("Cannot play " + item.fileName()
+                + "\n" + rootMessage(error));
+        statusLabel.setText(item.fileName() + " — playback error");
     }
 
     /**
@@ -2768,6 +2953,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         if (player != null) {
             player.close();
             player = null;
+            updateSuperResolutionState();
         }
         startPlayback(item);
     }
@@ -2777,8 +2963,13 @@ public final class ViewerWindow implements AppShell.ShellView {
      * the session stays alive so reopening the same item can resume it.
      */
     private void pausePlayback() {
-        if (player == null || !playButton.isSelected()) return;
+        if (!playButton.isSelected()) return;
         playButton.setSelected(false);
+        if (player == null) {
+            playSession++;
+            playbackPath = null;
+            return;
+        }
         player.pause();
         statusLabel.setText(siblings.get(index).fileName() + " — paused at "
                 + timecode(playPositionMicros));
@@ -2807,9 +2998,13 @@ public final class ViewerWindow implements AppShell.ShellView {
         playSession++;
         playButton.setSelected(false);
         presenterLabel.setText("");
-        if (player == null) return;
+        if (player == null) {
+            updateSuperResolutionState();
+            return;
+        }
         player.close();
         player = null;
+        updateSuperResolutionState();
         if (fixExtension && proven && played != null) {
             maybeFixExtension(played);
         }
