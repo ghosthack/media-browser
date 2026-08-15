@@ -7,6 +7,7 @@ import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.VideoStream;
+import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionEngine;
 
 import java.awt.image.BufferedImage;
 import java.lang.foreign.MemorySegment;
@@ -29,6 +30,7 @@ public final class SmokeTest {
 
     public static void main(String[] args) {
         verifyAwtRasterBridge();
+        verifySuperResolutionDownloader();
         var backend = MediaBackend.fromSettings(System.getProperty("media.backend"));
         // Playback decode policy, e.g. -Ddecode.device=hardware for the hw
         // playback smoke (FFM backends only; see media.ffm.HwDecode).
@@ -105,6 +107,18 @@ public final class SmokeTest {
             throw new IllegalStateException("AWT raster bridge produced invalid BGRA output");
         }
         System.out.println("AWT raster bridge: 1x1 BGRA OK");
+    }
+
+    /**
+     * Constructs the optional model downloader without making a request. This
+     * resolves its {@code java.net.http} client inside the trimmed runtime, so
+     * a package cannot pass smoke testing and then fail when a user accepts the
+     * first-use super-resolution download.
+     */
+    private static void verifySuperResolutionDownloader() {
+        SuperResolutionEngine engine = new SuperResolutionEngine();
+        System.out.println("Super-resolution downloader: java.net.http OK; platform supported: "
+                + engine.isSupported());
     }
 
     /**

@@ -131,6 +131,33 @@ public final class ArchiveMounts {
         return hostArchive(path).isPresent();
     }
 
+    /**
+     * Closes the mount on {@code target} when it is a mounted container — and,
+     * when it is a directory, every mount on a container under it. For a caller
+     * about to move, rename or trash the file itself: the reader's open handle
+     * blocks the rename on Windows, and on any platform the surviving mount
+     * would stay keyed on the old path, failing every later read. Releasing is
+     * survivable exactly like an eviction: paths handed out earlier still name
+     * their container, and a browse at the file's new location mounts afresh.
+     */
+    public void release(Path target) {
+        if (target == null) return;
+        Path key = target.toAbsolutePath().normalize();
+        List<FileSystem> victims = new ArrayList<>();
+        synchronized (tableLock) {
+            var mounts = byArchive.entrySet().iterator();
+            while (mounts.hasNext()) {
+                var mount = mounts.next();
+                if (mount.getKey().startsWith(key)) {
+                    victims.add(mount.getValue());
+                    mounts.remove();
+                }
+            }
+            // byFileSystem is left alone, exactly as after an eviction.
+        }
+        for (FileSystem victim : victims) closeQuietly(victim);   // I/O, unlocked
+    }
+
     /** Closes every mount; for shutdown and tests. */
     public void closeAll() {
         List<FileSystem> open;

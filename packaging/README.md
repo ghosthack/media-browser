@@ -30,6 +30,30 @@ preceding `app-image` run. Release CI uses this split on Windows so it can sign
 the native launcher before `jpackage` embeds that launcher in the installer
 and portable ZIP.
 
+## Minimal runtime module ledger
+
+The application is non-modular, so `jpackage` cannot discover every JDK module
+used by lazy or optional class-path code. `scripts/package.sh` therefore keeps
+an explicit list of root modules in `RUNTIME_MODULES`; `jlink` adds their
+transitive dependencies. `scripts/smoke-package.sh` must assert the same roots
+against the packaged runtime's `release` metadata. This is a release-safety
+ledger, not just `jdeps` output: reflective, native-library, and optional paths
+may not appear in a static dependency scan.
+
+| Root module | Status | Why it is explicit |
+| --- | --- | --- |
+| `jdk.incubator.vector` | current compatibility root; original packaging baseline | The original public decoder paths used the Vector API. Those implementations are now pruned from the OSS cut, so removal should be handled as a separate cross-platform runtime audit. |
+| `java.xml` | current; added 2026-07-27 | AAE sidecars and ImageIO metadata use the JDK DOM, SAX, and XML parser APIs. |
+| `jdk.unsupported` | current; added 2026-07-27 | LWJGL and native-memory dependencies use compatibility APIs such as `sun.misc.Unsafe`. |
+| `java.desktop` | current; added 2026-08-05 | Still-image decoding, color management, and the shared raster bridge use AWT and ImageIO. The package smoke exercises a synthetic BGRA conversion. |
+| `java.net.http` | current; added 2026-08-15 | The opt-in local super-resolution feature uses `HttpClient` to download its pinned runtime and models after first-use consent. The package smoke constructs the downloader without accessing the network. |
+| `jdk.zipfs` | removed 2026-08-09 | It was added 2026-07-29 for ZIP filesystem access, then became unnecessary when archive handling moved to the bounded `ZipInputStream` reader. |
+
+When a class-path feature starts using another non-transitive JDK module, add
+it to both script lists above, add or extend a package-smoke exercise where
+practical, and update this ledger. A successful Maven build is not sufficient:
+it runs on the full developer JDK rather than the trimmed release runtime.
+
 When testing a quarantined macOS app during development, clear the quarantine
 attribute from the installed bundle:
 

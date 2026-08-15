@@ -66,7 +66,7 @@ public final class ArchiveEntryCache {
         return SHARED;
     }
 
-    private record Copy(Path file, long bytes) {}
+    private record Copy(Path file, long bytes, Path host) {}
 
     /**
      * A real OS path suitable for decoding {@code path}: {@code path} itself
@@ -80,6 +80,7 @@ public final class ArchiveEntryCache {
      */
     public Path materialize(Path path) throws IOException {
         if (!ArchivePaths.inArchive(path)) return path;
+        Path host = ArchivePaths.hostArchive(path).orElse(null);
         String key = keyFor(path);
         synchronized (this) {
             Copy hit = copies.get(key);
@@ -99,7 +100,7 @@ public final class ArchiveEntryCache {
                 Path extracted = extract(path, key);
                 long bytes = Files.size(extracted);
                 synchronized (this) {
-                    copies.put(key, new Copy(extracted, bytes));
+                    copies.put(key, new Copy(extracted, bytes, host));
                     heldBytes += bytes;
                     evictDown();
                 }
@@ -201,6 +202,31 @@ public final class ArchiveEntryCache {
             try {
                 Files.deleteIfExists(victim.getValue().file());
                 Files.deleteIfExists(victim.getValue().file().getParent());
+            } catch (IOException e) {
+                // Still open in a decoder (Windows). The exit sweep gets it.
+            }
+        }
+    }
+
+    /**
+     * Drops the extracted copies of every entry hosted by {@code target} — or,
+     * for a directory, by any container under it. The copies hold no handle on
+     * the container, but once it moves they are keyed on its old path and would
+     * only pin the byte budget until eviction; a re-browse at the new location
+     * extracts afresh under new keys either way.
+     */
+    public synchronized void invalidateHostedUnder(Path target) {
+        if (target == null) return;
+        Path key = target.toAbsolutePath().normalize();
+        var entries = copies.entrySet().iterator();
+        while (entries.hasNext()) {
+            Copy copy = entries.next().getValue();
+            if (copy.host() == null || !copy.host().startsWith(key)) continue;
+            entries.remove();
+            heldBytes -= copy.bytes();
+            try {
+                Files.deleteIfExists(copy.file());
+                Files.deleteIfExists(copy.file().getParent());
             } catch (IOException e) {
                 // Still open in a decoder (Windows). The exit sweep gets it.
             }

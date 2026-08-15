@@ -236,7 +236,10 @@ public final class MoveController implements MoveDialogIntents {
         Path nextFocus = host.nextFocusAfterMove(moving);
         moveInFlight = true;
         host.releaseBeforeMove(moving);
-        service.fileOp(() -> TrashOps.moveToTrash(moving))
+        service.fileOp(() -> {
+                    releaseArchiveHandles(moving);
+                    return TrashOps.moveToTrash(moving);
+                })
                 .whenComplete((result, error) -> Platform.runLater(() ->
                         finishTrash(result, error, nextFocus)));
     }
@@ -576,6 +579,7 @@ public final class MoveController implements MoveDialogIntents {
     /** Off-FX-thread move execution. */
     private Execution execute(List<String> sources, String resolvedTarget, boolean rename,
                               String renameTarget, boolean createDir) {
+        releaseArchiveHandles(sources.stream().map(Path::of).toList());
         List<Moved> moved = new ArrayList<>();
         List<String> failures = new ArrayList<>();
 
@@ -660,6 +664,19 @@ public final class MoveController implements MoveDialogIntents {
     }
 
     // ---- Helpers ------------------------------------------------------------
+
+    /**
+     * The archive-layer counterpart of {@link Host#releaseBeforeMove}: a source
+     * may be a container the user has browsed into (or a directory holding
+     * one), whose mounted reader keeps the file itself open. Runs with the move
+     * on the fileOp thread — closing a mount is I/O that has no place on the
+     * FX thread.
+     */
+    private static void releaseArchiveHandles(List<Path> moving) {
+        for (Path source : moving) {
+            ArchivePaths.releaseForMutation(source);
+        }
+    }
 
     private void recordHistory(String historyPath) {
         MoveDialogLogic.addToMoveHistory(workingHistory, historyPath, settings.moveHistoryLimit());

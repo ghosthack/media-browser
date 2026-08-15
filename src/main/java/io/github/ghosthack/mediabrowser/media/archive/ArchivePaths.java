@@ -69,6 +69,21 @@ public final class ArchivePaths {
     }
 
     /**
+     * Releases everything the archive layer holds on {@code target} — the mount
+     * when it is a browsed container, the mounts on every container under it
+     * when it is a directory, and the extracted copies of their entries — so
+     * the file itself can be moved, renamed or trashed. Without this the
+     * reader's open handle blocks the rename on Windows, and on any platform
+     * the mount would survive keyed on the old path, failing every later read.
+     * A no-op for a target nothing is held on; a later browse at the new
+     * location mounts afresh.
+     */
+    public static void releaseForMutation(Path target) {
+        ArchiveMounts.shared().release(target);
+        ArchiveEntryCache.shared().invalidateHostedUnder(target);
+    }
+
+    /**
      * Names that do not count when deciding whether an archive holds a single
      * folder. {@code __MACOSX} is the one that matters: a zip made by the macOS
      * Finder carries it beside the real folder, so a plain "exactly one child"
