@@ -237,10 +237,10 @@ jobs:
             Sort-Object { [version]$_.tagName.Substring(1) } -Descending |
             Select-Object -First 1
 
-          $arguments = @(
-            "-Installer", $candidate,
-            "-ExpectedVersion", $env:RELEASE_VERSION
-          )
+          $scriptArguments = @{
+            Installer = $candidate
+            ExpectedVersion = $env:RELEASE_VERSION
+          }
           if ($previous) {
             $previousDir = Join-Path $env:RUNNER_TEMP "previous-release"
             New-Item -ItemType Directory -Path $previousDir | Out-Null
@@ -254,9 +254,9 @@ jobs:
             if ($previousInstallers.Count -ne 1) {
               throw "Expected one previous Windows installer; found $($previousInstallers.Count)"
             }
-            $arguments += @("-UpgradeFromInstaller", $previousInstallers[0].FullName)
+            $scriptArguments.UpgradeFromInstaller = $previousInstallers[0].FullName
           }
-          & "$env:GITHUB_WORKSPACE\scripts\smoke-windows-installer.ps1" @arguments
+          & "$env:GITHUB_WORKSPACE\scripts\smoke-windows-installer.ps1" @scriptArguments
 
       - name: Notarize and staple macOS DMG
         if: matrix.asset == 'macos-arm64'
