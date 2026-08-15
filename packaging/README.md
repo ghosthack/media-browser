@@ -30,6 +30,22 @@ preceding `app-image` run. Release CI uses this split on Windows so it can sign
 the native launcher before `jpackage` embeds that launcher in the installer
 and portable ZIP.
 
+### Windows installer identity and upgrade testing
+
+Every Windows installer uses the permanent upgrade UUID
+`4389e98a-22ca-3280-a990-734aa0cfed58`. `jpackage` derives a ProductCode from
+the vendor, application name, and `X.Y.Z` version, so a rebuilt package with
+the same version has the same Windows Installer identity even if its contents
+changed. Never replace a published release in place: increment at least the
+patch version. The release workflow rejects an existing tag/release for this
+reason.
+
+After signing, Windows release CI downloads the newest lower released version,
+installs it silently, upgrades it with the candidate installer, verifies the
+registered version, runs the installed launcher's package smoke, and then
+uninstalls it. This covers the transaction that signature checks and the
+portable app-image smoke cannot exercise.
+
 ## Minimal runtime module ledger
 
 The application is non-modular, so `jpackage` cannot discover every JDK module

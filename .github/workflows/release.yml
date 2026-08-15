@@ -48,6 +48,18 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      - name: Reject publishing an existing version
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists." >&2
+            echo "Windows Installer packages cannot be replaced in place; publish a higher X.Y.Z version." >&2
+            exit 1
+          fi
+
   package:
     needs: metadata
     name: Package ${{ matrix.asset }}
@@ -204,6 +216,48 @@ jobs:
             Write-Host "Valid signature and timestamp: $(Split-Path -Leaf $file)"
           }
 
+      - name: Smoke-test Windows install and upgrade
+        if: matrix.asset == 'windows-x64'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          $candidate = Join-Path $env:GITHUB_WORKSPACE `
+            "target\jpackage\release\media-browser-$env:RELEASE_VERSION-windows-x64.exe"
+          $expected = [version]$env:RELEASE_VERSION
+          $releases = gh release list --limit 100 `
+            --json tagName,isDraft,isPrerelease | ConvertFrom-Json
+          $previous = $releases |
+            Where-Object {
+              -not $_.isDraft -and -not $_.isPrerelease -and
+              $_.tagName -match '^v[0-9]+\.[0-9]+\.[0-9]+$' -and
+              [version]$_.tagName.Substring(1) -lt $expected
+            } |
+            Sort-Object { [version]$_.tagName.Substring(1) } -Descending |
+            Select-Object -First 1
+
+          $arguments = @(
+            "-Installer", $candidate,
+            "-ExpectedVersion", $env:RELEASE_VERSION
+          )
+          if ($previous) {
+            $previousDir = Join-Path $env:RUNNER_TEMP "previous-release"
+            New-Item -ItemType Directory -Path $previousDir | Out-Null
+            gh release download $previous.tagName `
+              --pattern "media-browser-*-windows-x64.exe" `
+              --dir $previousDir
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to download previous release $($previous.tagName)"
+            }
+            $previousInstallers = @(Get-ChildItem -LiteralPath $previousDir -Filter "*.exe")
+            if ($previousInstallers.Count -ne 1) {
+              throw "Expected one previous Windows installer; found $($previousInstallers.Count)"
+            }
+            $arguments += @("-UpgradeFromInstaller", $previousInstallers[0].FullName)
+          }
+          & "$env:GITHUB_WORKSPACE\scripts\smoke-windows-installer.ps1" @arguments
+
       - name: Notarize and staple macOS DMG
         if: matrix.asset == 'macos-arm64'
         shell: bash
@@ -298,10 +352,10 @@ jobs:
           RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/* --clobber
-          else
-            gh release create "$RELEASE_TAG" dist/* \
-              --target "$GITHUB_SHA" \
-              --title "Media Browser $RELEASE_VERSION" \
-              --generate-notes
+            echo "Release $RELEASE_TAG appeared after validation; refusing to replace its assets." >&2
+            exit 1
           fi
+          gh release create "$RELEASE_TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "Media Browser $RELEASE_VERSION" \
+            --generate-notes
