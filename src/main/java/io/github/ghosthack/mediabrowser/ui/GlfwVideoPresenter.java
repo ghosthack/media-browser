@@ -10,10 +10,12 @@ import java.lang.foreign.MemorySegment;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Cross-platform GL-primary sink (GAP 3): renders each frame through the GLFW
+ * Windows/Linux transformed-video sink: renders each frame through the GLFW
  * offscreen {@link GlfwVideoRenderer} and presents the readback in an
- * {@link ImageView}. This is the GL path used <b>off macOS</b> (Windows/Linux);
- * the {@link GlVideoPresenter} (Apple CGL) stays the GL path on macOS.
+ * {@link ImageView}. {@link FallbackVideoSink} selects it when a live GPU
+ * transform is required; untransformed frames use direct PixelBuffer
+ * presentation. The {@link GlVideoPresenter} (Apple CGL) remains the macOS GL
+ * path.
  *
  * <p>Structurally identical to {@link GlVideoPresenter}: it owns the
  * {@link VideoPresenter#SLOT_COUNT} pooled {@link VideoPresenter.Slot}s and the

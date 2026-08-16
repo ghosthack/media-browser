@@ -324,6 +324,7 @@ public final class MosaicWindow
      */
     private final MoveController moveController;
     private final MetadataStripController metadataStripController;
+    private final BakedPngExportController bakedPngExportController;
 
     /** On-screen tile size control (nudged by the Mosaic menu). */
     private Slider sizeSlider;
@@ -1116,6 +1117,20 @@ public final class MosaicWindow
                     }
                     @Override public void refreshAfterStrip(Path firstOutput) {
                         MosaicWindow.this.refreshAfterStrip(firstOutput);
+                    }
+                    @Override public void showStatus(String message) { statusLabel.setText(message); }
+                });
+        this.bakedPngExportController = new BakedPngExportController(
+                service, rotationStore, aaeStore, new BakedPngExportController.Host() {
+                    @Override public Stage owner() { return stage(); }
+                    @Override public Path currentStill() { return currentStillSelection(); }
+                    @Override public void refreshAfterExport(Path output) {
+                        Path dir = dirSupplier != null ? dirSupplier.get() : null;
+                        Path outputParent = output.toAbsolutePath().normalize().getParent();
+                        if (dir != null && outputParent != null
+                                && outputParent.equals(dir.toAbsolutePath().normalize())) {
+                            refreshAfterStrip(output);
+                        }
                     }
                     @Override public void showStatus(String message) { statusLabel.setText(message); }
                 });
@@ -1971,6 +1986,21 @@ public final class MosaicWindow
     public void exportZeroMetadataCopies() {
         if (dirSupplier == null || dirSupplier.get() == null) return;
         metadataStripController.createCopies();
+    }
+
+    /** File/context-menu action: export one selected still with edits baked in. */
+    public void exportBakedPng() {
+        bakedPngExportController.exportCurrent();
+    }
+
+    /** Exactly one selected image tile, or {@code null}. */
+    private Path currentStillSelection() {
+        if (selection.size() != 1) return null;
+        int selectedIndex = selection.first();
+        if (selectedIndex < 0 || selectedIndex >= items.size()) return null;
+        DirEntry entry = items.get(selectedIndex);
+        return entry.type() == DirEntry.Type.MEDIA && entry.mediaKind() == MediaKind.IMAGE
+                ? entry.path() : null;
     }
 
     /**
@@ -3863,7 +3893,12 @@ public final class MosaicWindow
             tileMenu.hide();
             Platform.runLater(this::exportZeroMetadataCopies);
         });
-        var exportMenu = new Menu("Export", null, zeroMetadata);
+        var bakedPng = new MenuItem("Export as Baked PNG\u2026");
+        bakedPng.setOnAction(e -> {
+            tileMenu.hide();
+            Platform.runLater(this::exportBakedPng);
+        });
+        var exportMenu = new Menu("Export", null, zeroMetadata, bakedPng);
         var rotateLeft = new MenuItem("Rotate Left");
         rotateLeft.setAccelerator(new KeyCodeCombination(KeyCode.F6));
         rotateLeft.setOnAction(e -> rotateSelection(-1));

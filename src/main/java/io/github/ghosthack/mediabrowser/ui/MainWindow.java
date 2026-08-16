@@ -141,6 +141,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final AaeStore aaeStore;
     private final MoveController moveController;
     private final MetadataStripController metadataStripController;
+    private final BakedPngExportController bakedPngExportController;
     /** Shared album store (numbered {@code album-NNN.csv} files in the app dir). */
     private final AlbumStore albumStore = new AlbumStore();
 
@@ -306,6 +307,19 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     }
                     @Override public void showStatus(String message) { statusLabel.setText(message); }
                 });
+        this.bakedPngExportController = new BakedPngExportController(
+                service, rotationStore, aaeStore, new BakedPngExportController.Host() {
+                    @Override public Stage owner() { return stage(); }
+                    @Override public Path currentStill() { return currentStillSelection(); }
+                    @Override public void refreshAfterExport(Path output) {
+                        Path outputParent = output.toAbsolutePath().normalize().getParent();
+                        if (currentDir != null && outputParent != null
+                                && outputParent.equals(currentDir.toAbsolutePath().normalize())) {
+                            refreshAfterMove(output);
+                        }
+                    }
+                    @Override public void showStatus(String message) { statusLabel.setText(message); }
+                });
 
         // --- navigation tree -------------------------------------------------
         Path fsRoot = Path.of(System.getProperty("user.home")).getRoot();
@@ -393,8 +407,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     targetThisCell();
                     Platform.runLater(MainWindow.this::exportZeroMetadataCopies);
                 });
+                var bakedPng = new MenuItem("Export as Baked PNG\u2026");
+                bakedPng.setOnAction(e -> {
+                    targetThisCell();
+                    Platform.runLater(MainWindow.this::exportBakedPng);
+                });
                 var exportMenu = new Menu("Export");
-                exportMenu.getItems().add(zeroMetadata);
+                exportMenu.getItems().addAll(zeroMetadata, bakedPng);
                 var albumMenu = new AlbumMenu(albumStore, settings,
                         () -> currentMoveSelection().sources(), stage(),
                         statusLabel::setText);
@@ -1916,16 +1935,23 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     /** Extensible export submenu scoped to the window owning the menu bar. */
     private Menu buildExportMenu(MenuOwner owner) {
-        Runnable action = switch (owner) {
+        Runnable zeroMetadataAction = switch (owner) {
             case MAIN -> this::exportZeroMetadataCopies;
             case MOSAIC -> mosaic::exportZeroMetadataCopies;
             case VIEWER -> viewer::exportZeroMetadataCopies;
         };
-        var item = action("As _Zero-Metadata Copy\u2026", null, action);
+        Runnable bakedPngAction = switch (owner) {
+            case MAIN -> this::exportBakedPng;
+            case MOSAIC -> mosaic::exportBakedPng;
+            case VIEWER -> viewer::exportBakedPng;
+        };
+        var item = action("As _Zero-Metadata Copy\u2026", null, zeroMetadataAction);
+        var bakedPng = action("As _Baked PNG\u2026", null, bakedPngAction);
         if (owner == MenuOwner.VIEWER) {
             item.disableProperty().bind(viewer.hasContentProperty().not());
+            bakedPng.disableProperty().bind(viewer.hasContentProperty().not());
         }
-        return new Menu("_Export", null, item);
+        return new Menu("_Export", null, item, bakedPng);
     }
 
     private static MenuItem action(String text, KeyCombination accel, Runnable handler) {
@@ -2531,6 +2557,24 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             return;
         }
         metadataStripController.createCopies();
+    }
+
+    /** Exports the selected still with its visible edits baked into a clean PNG. */
+    private void exportBakedPng() {
+        if (atComputerLocation) {
+            statusLabel.setText("Choose one still image before exporting");
+            return;
+        }
+        bakedPngExportController.exportCurrent();
+    }
+
+    /** Exactly one selected image, or {@code null} for mixed/multiple selections. */
+    private Path currentStillSelection() {
+        var selected = listView.getSelectionModel().getSelectedItems();
+        if (selected.size() != 1) return null;
+        DirEntry entry = selected.getFirst();
+        return entry != null && entry.type() == DirEntry.Type.MEDIA
+                && entry.mediaKind() == MediaKind.IMAGE ? entry.path() : null;
     }
 
     /**

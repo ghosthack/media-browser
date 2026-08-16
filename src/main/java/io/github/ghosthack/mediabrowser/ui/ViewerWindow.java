@@ -425,6 +425,7 @@ public final class ViewerWindow implements AppShell.ShellView {
      */
     private MoveController moveController;
     private MetadataStripController metadataStripController;
+    private BakedPngExportController bakedPngExportController;
 
 
     /** Active playback, if any. The session counter voids stale callbacks. */
@@ -1016,6 +1017,38 @@ public final class ViewerWindow implements AppShell.ShellView {
                         // Keep the viewer on the original while passively re-listing its host.
                         if (host != null && index >= 0 && index < siblings.size()) {
                             host.refreshAfterExtensionFix(siblings.get(index).path());
+                        }
+                    }
+                    @Override public void showStatus(String message) { statusLabel.setText(message); }
+                });
+        this.bakedPngExportController = new BakedPngExportController(
+                service, rotationStore, aaeStore, new BakedPngExportController.Host() {
+                    @Override public Stage owner() { return stage(); }
+                    @Override public Path currentStill() {
+                        if (index < 0 || index >= siblings.size()
+                                || siblings.get(index).kind() != MediaKind.IMAGE
+                                || lastUprightFrame == null || player != null) {
+                            return null;
+                        }
+                        return siblings.get(index).path();
+                    }
+                    @Override public RasterFrame currentRenderedFrame(Path source) {
+                        if (index < 0 || index >= siblings.size()
+                                || !siblings.get(index).path().equals(source)
+                                || lastUprightFrame == null || player != null) {
+                            return null;
+                        }
+                        return RasterFrames.apply(currentUprightFrame(),
+                                rotationStore.adjustments(source));
+                    }
+                    @Override public void refreshAfterExport(Path output) {
+                        if (host != null && index >= 0 && index < siblings.size()) {
+                            Path source = siblings.get(index).path();
+                            Path outputParent = output.toAbsolutePath().normalize().getParent();
+                            Path sourceParent = source.toAbsolutePath().normalize().getParent();
+                            if (outputParent != null && outputParent.equals(sourceParent)) {
+                                host.refreshAfterExtensionFix(source);
+                            }
                         }
                     }
                     @Override public void showStatus(String message) { statusLabel.setText(message); }
@@ -2074,7 +2107,12 @@ public final class ViewerWindow implements AppShell.ShellView {
             viewMenu.hide();
             Platform.runLater(this::exportZeroMetadataCopies);
         });
-        var exportMenu = new Menu("Export", null, zeroMetadata);
+        var bakedPng = new MenuItem("Export as Baked PNG\u2026");
+        bakedPng.setOnAction(e -> {
+            viewMenu.hide();
+            Platform.runLater(this::exportBakedPng);
+        });
+        var exportMenu = new Menu("Export", null, zeroMetadata, bakedPng);
         albumMenu = new AlbumMenu(albumStore, settings,
                 () -> currentMoveSelection().sources(), stage(), statusLabel::setText);
         var rotateLeft = new MenuItem("Rotate Left");
@@ -2725,6 +2763,11 @@ public final class ViewerWindow implements AppShell.ShellView {
     public void exportZeroMetadataCopies() {
         if (index < 0 || index >= siblings.size()) return;
         metadataStripController.createCopies();
+    }
+
+    /** Exports the visible original/enhanced still with all edits baked into PNG. */
+    public void exportBakedPng() {
+        bakedPngExportController.exportCurrent();
     }
 
     /** The directory the on-screen item lives in; relative paths resolve against it. */

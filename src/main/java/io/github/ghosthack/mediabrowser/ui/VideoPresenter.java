@@ -23,20 +23,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       pushed through the LWJGL offscreen {@link GlVideoRenderer} (windowless
  *       Apple <b>CGL</b> OpenGL context, offscreen FBO), read back into a pooled
  *       {@link PixelBuffer} and presented in an {@link ImageView}.</li>
- *   <li>{@link GlfwVideoPresenter} — the cross-platform GL path (Windows/Linux,
- *       GAP 3): the same offscreen-FBO readback, but the GL context comes from a
- *       <b>GLFW hidden window</b> ({@link GlfwVideoRenderer}) so it works off
- *       macOS where CGL cannot be constructed.</li>
- *   <li>{@link DirectVideoPresenter} — the guaranteed cross-platform fallback that
+ *   <li>{@link GlfwVideoPresenter} — the transformed-video GL path on
+ *       Windows/Linux: the same offscreen-FBO readback, but the GL context comes
+ *       from a <b>GLFW hidden window</b> ({@link GlfwVideoRenderer}).</li>
+ *   <li>{@link DirectVideoPresenter} — the normal Windows/Linux path for
+ *       untransformed BGRA video, as well as the guaranteed cross-platform fallback. It
  *       copies each BGRA frame <em>directly</em> into a pooled
  *       {@code PixelBuffer<ByteBuffer>} (byte-bgra-pre) backed {@link WritableImage}
  *       and updates the {@code ImageView} via {@link Platform#runLater} —
  *       <b>no OpenGL</b>.</li>
- *   <li>{@link FallbackVideoSink} — picks the GL presenter for the host OS
- *       (CGL on macOS, GLFW elsewhere), wraps its construction in a try/catch, and
- *       degrades to the direct presenter when the GL context cannot be created.
- *       This keeps a GL path primary on every platform while guaranteeing video
- *       actually plays everywhere.</li>
+ *   <li>{@link FallbackVideoSink} — keeps CGL primary on macOS for VideoToolbox
+ *       IOSurface ingestion, uses GLFW on Windows/Linux only when a user rotation
+ *       requires a GPU transform, and otherwise selects the direct presenter.
+ *       Any requested GL path still degrades to direct if its context cannot be
+ *       created.</li>
  * </ul>
  *
  * <p>All sinks except {@code FallbackVideoSink} are package-private; the viewer
@@ -270,19 +270,22 @@ final class DirectVideoPresenter implements VideoPlayer.FrameSink {
 }
 
 /**
- * Chooser sink: picks the right GL presenter per OS, and if the GL context
- * cannot be created, transparently falls back to the {@link DirectVideoPresenter}.
+ * Chooser sink: picks CGL, GLFW or direct presentation from the host OS and
+ * transforms required by this playback session. If a requested GL context
+ * cannot be created, it transparently falls back to the
+ * {@link DirectVideoPresenter}.
  *
- * <p>The per-OS choice (GAP 3) is made by the pure, testable
- * {@link #preferCgl(String)}: on macOS the GL path is {@link GlVideoPresenter}
- * (Apple CGL, which needs no GLFW and must run off the AppKit main thread);
- * everywhere else (Windows/Linux) it is {@link GlfwVideoPresenter} (an LWJGL
- * GLFW hidden-window context). Either way the GL context (and thus any failure)
- * is created in {@link #begin}, on the playback thread, so the try/catch lives
- * there and degrades to the pure-JavaFX {@link DirectVideoPresenter} — the
- * guaranteed cross-platform fallback that never uses OpenGL.</p>
+ * <p>macOS keeps {@link GlVideoPresenter} primary even without user rotation:
+ * its CGL context is what lets VideoToolbox NV12 IOSurfaces bypass a CPU
+ * readback and conversion. Windows/Linux decoded frames are CPU BGRA, so an
+ * identity GLFW pass would only upload, draw and read back unchanged pixels;
+ * those sessions go directly to JavaFX and let Prism perform all display
+ * resizing. GLFW is selected only for a non-zero user rotation. The route is
+ * pure and testable via {@link #preferredRoute(String, int)}.</p>
  */
 final class FallbackVideoSink implements VideoPlayer.FrameSink {
+
+    enum Route { CGL, GLFW, DIRECT }
 
     private final ImageView target;
     /** User rotation (90° clockwise quarter-turns) baked into every presented frame. */
@@ -313,8 +316,9 @@ final class FallbackVideoSink implements VideoPlayer.FrameSink {
     /**
      * Pure platform-selection logic: returns {@code true} iff the Apple CGL GL
      * path should be preferred (macOS), i.e. when {@code osName} (case-insensitive)
-     * contains {@code "mac"} or {@code "darwin"}. Off macOS this is {@code false}
-     * and the GLFW path is chosen instead. No GL/native work — safe to unit-test.
+     * contains {@code "mac"} or {@code "darwin"}. Off macOS this is
+     * {@code false}; {@link #preferredRoute(String, int)} then chooses between
+     * GLFW and direct presentation. No GL/native work — safe to unit-test.
      */
     static boolean preferCgl(String osName) {
         if (osName == null) return false;
@@ -322,30 +326,47 @@ final class FallbackVideoSink implements VideoPlayer.FrameSink {
         return os.contains("mac") || os.contains("darwin");
     }
 
+    /**
+     * Selects the presentation path without touching JavaFX or native code.
+     * Display resizing is deliberately absent: Prism owns both upscaling and
+     * downscaling and therefore never makes a Windows/Linux session use GLFW.
+     */
+    static Route preferredRoute(String osName, int quarterTurns) {
+        if (preferCgl(osName)) return Route.CGL;
+        return Math.floorMod(quarterTurns, 4) == 0 ? Route.DIRECT : Route.GLFW;
+    }
+
     @Override
     public void begin(int width, int height, long durationMicros) {
-        boolean mac = preferCgl(System.getProperty("os.name", ""));
+        Route route = preferredRoute(System.getProperty("os.name", ""), quarterTurns);
+        if (route == Route.DIRECT) {
+            useDirect(width, height, durationMicros);
+            return;
+        }
         try {
-            // macOS → CGL (GlVideoPresenter); off macOS → GLFW (GlfwVideoPresenter).
-            VideoPlayer.FrameSink gl = mac
+            VideoPlayer.FrameSink gl = route == Route.CGL
                     ? new GlVideoPresenter(target, quarterTurns)
                     : new GlfwVideoPresenter(target, quarterTurns);
             gl.begin(width, height, durationMicros); // creates the GL context — may throw
             delegate = gl;
             usedGl = true;
-            activePresenter = mac ? "GL · CGL" : "GL · GLFW";
+            activePresenter = route == Route.CGL ? "GL · CGL" : "GL · GLFW";
         } catch (Throwable glUnavailable) {
             // Any GL/native failure (no usable context, FBO incomplete, …) degrades
             // to the pure-JavaFX direct PixelBuffer presenter so video still plays —
             // no crash, no OpenGL. This is the guaranteed cross-platform fallback.
             System.err.println("[VideoPresenter] GL unavailable (" + glUnavailable
                     + "); using PixelBuffer fallback usedGl=false");
-            DirectVideoPresenter direct = new DirectVideoPresenter(target, quarterTurns);
-            direct.begin(width, height, durationMicros);
-            delegate = direct;
-            usedGl = false;
-            activePresenter = "PixelBuffer";
+            useDirect(width, height, durationMicros);
         }
+    }
+
+    private void useDirect(int width, int height, long durationMicros) {
+        DirectVideoPresenter direct = new DirectVideoPresenter(target, quarterTurns);
+        direct.begin(width, height, durationMicros);
+        delegate = direct;
+        usedGl = false;
+        activePresenter = "PixelBuffer";
     }
 
     @Override
