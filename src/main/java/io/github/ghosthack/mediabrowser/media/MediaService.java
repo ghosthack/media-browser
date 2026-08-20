@@ -1,6 +1,5 @@
 package io.github.ghosthack.mediabrowser.media;
 
-import io.github.ghosthack.mediabrowser.MosaicTelemetry;
 import io.github.ghosthack.mediabrowser.media.archive.ArchiveEntryCache;
 import io.github.ghosthack.mediabrowser.media.archive.ArchiveFormat;
 import io.github.ghosthack.mediabrowser.media.archive.ArchiveInfo;
@@ -566,18 +565,18 @@ public final class MediaService implements AutoCloseable {
      * generation. FIT and FILL renditions cache independently.
      */
     public CompletableFuture<Thumbnail> thumbnail(Path file, int maxEdge, ThumbnailMode mode) {
-        long queuedAt = MosaicTelemetry.now();
+        long queuedAt = MediaTelemetry.now();
         long requestedNanos = System.nanoTime();
         return CompletableFuture.supplyAsync(() -> {
-            MosaicTelemetry.recordThumbnailKeyQueue(MosaicTelemetry.elapsedSince(queuedAt));
+            MediaTelemetry.recordThumbnailKeyQueue(MediaTelemetry.elapsedSince(queuedAt));
 
-            long keyStart = MosaicTelemetry.now();
+            long keyStart = MediaTelemetry.now();
             ThumbnailKey key = keyFor(file, maxEdge, mode);
-            MosaicTelemetry.recordThumbnailKeyStat(MosaicTelemetry.elapsedSince(keyStart));
+            MediaTelemetry.recordThumbnailKeyStat(MediaTelemetry.elapsedSince(keyStart));
 
             Thumbnail hit = thumbnailCache.peek(key);
             if (hit != null) {
-                MosaicTelemetry.recordThumbnailCacheHit();
+                MediaTelemetry.recordThumbnailCacheHit();
                 thumbnailCacheHits.increment();
                 return CompletableFuture.completedFuture(hit);
             }
@@ -589,7 +588,7 @@ public final class MediaService implements AutoCloseable {
                     MediaEngineTrace.Recorder trace = MediaEngineTrace.Recorder.recording(
                             mediaEngine, file, "Thumbnail " + mode, requestedNanos);
                     Throwable failure = null;
-                    long loadStart = MosaicTelemetry.now();
+                    long loadStart = MediaTelemetry.now();
                     try {
                         Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
                         if (mrc.isPresent()) {
@@ -601,7 +600,7 @@ public final class MediaService implements AutoCloseable {
                                                 maxEdge, mode));
                                 trace.succeeded("PDF MRC composite", engineStarted,
                                         thumbnailDetail(result, maxEdge, mode));
-                                trace.engineWork(MosaicTelemetry.elapsedSince(loadStart));
+                                trace.engineWork(MediaTelemetry.elapsedSince(loadStart));
                                 return result;
                             } catch (RuntimeException | Error e) {
                                 trace.failed("PDF MRC composite", engineStarted, e);
@@ -629,8 +628,8 @@ public final class MediaService implements AutoCloseable {
                         }
                         throw e;
                     } finally {
-                        MosaicTelemetry.recordThumbnailLoad(
-                                MosaicTelemetry.elapsedSince(loadStart));
+                        MediaTelemetry.recordThumbnailLoad(
+                                MediaTelemetry.elapsedSince(loadStart));
                         latestThumbnailTrace = trace.finish(failure);
                     }
                 }, thumbnailExecutor);
@@ -641,7 +640,7 @@ public final class MediaService implements AutoCloseable {
                 return generated;
             });
             if (!created.get()) {
-                MosaicTelemetry.recordThumbnailInFlightJoin();
+                MediaTelemetry.recordThumbnailInFlightJoin();
                 thumbnailInFlightJoins.increment();
             }
             return future;
@@ -1135,7 +1134,7 @@ public final class MediaService implements AutoCloseable {
      * {@code media-file-op} thread, off the FX thread, completing the returned
      * future with its result (or its exception). The home for the move
      * feature's {@code Files.move}/{@code mkdir} work; marshal the result back
-     * to the FX thread with {@link javafx.application.Platform#runLater}.
+     * to the UI thread on completion.
      */
     public <T> CompletableFuture<T> fileOp(Supplier<T> task) {
         return CompletableFuture.supplyAsync(task, fileOpExecutor);

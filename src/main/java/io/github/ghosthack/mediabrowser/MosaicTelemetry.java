@@ -1,5 +1,7 @@
 package io.github.ghosthack.mediabrowser;
 
+import io.github.ghosthack.mediabrowser.media.MediaTelemetry;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -71,6 +73,35 @@ public final class MosaicTelemetry {
     }
 
     private MosaicTelemetry() {}
+
+    /**
+     * Bridges the media layer's {@link MediaTelemetry} seam to these
+     * counters, so the thumbnail pipeline's off-FX stages show up in the
+     * periodic report. Hosts call this once at startup; the media layer
+     * itself stays ignorant of this class.
+     */
+    public static void installMediaSink() {
+        MediaTelemetry.install(new MediaTelemetry.Sink() {
+            @Override public boolean enabled() {
+                return MosaicTelemetry.enabled();
+            }
+            @Override public void recordThumbnailKeyQueue(long nanos) {
+                MosaicTelemetry.recordThumbnailKeyQueue(nanos);
+            }
+            @Override public void recordThumbnailKeyStat(long nanos) {
+                MosaicTelemetry.recordThumbnailKeyStat(nanos);
+            }
+            @Override public void recordThumbnailCacheHit() {
+                MosaicTelemetry.recordThumbnailCacheHit();
+            }
+            @Override public void recordThumbnailInFlightJoin() {
+                MosaicTelemetry.recordThumbnailInFlightJoin();
+            }
+            @Override public void recordThumbnailLoad(long nanos) {
+                MosaicTelemetry.recordThumbnailLoad(nanos);
+            }
+        });
+    }
 
     public static boolean enabled() {
         return ENABLED;

@@ -50,6 +50,10 @@ public final class App extends Application {
         // backends — applied before the backend binds so the first playback
         // session already honours it.
         HwDecode.configure(settings.decodeDevice());
+        // Bridge the media layer's telemetry seam to the app-wide mosaic
+        // counters before the service exists, so -Dmosaic.telemetry reports
+        // include the thumbnail pipeline's off-FX stages from the start.
+        MosaicTelemetry.installMediaSink();
         // Still-image color policy — before the backend binds, so the very
         // first decode (thumbnails included) already honours the persisted
         // mode/gamut defaults.
