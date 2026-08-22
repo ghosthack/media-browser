@@ -20,7 +20,7 @@ not a license text — each project's own license governs.
 | [media-inspection `pdf-media`](https://github.com/ghosthack/media-inspection) | 0.2.0 | Apache-2.0 | read-only PDF attachment and raster-bitstream inspection, including relocated PDFBox mechanics |
 | [media-inspection `epub-media`](https://github.com/ghosthack/media-inspection) | 0.2.0 | MIT | read-only EPUB package/manifest media inspection |
 | [SLF4J](https://www.slf4j.org/) API + no-op provider | 2.0.17 | MIT | logging facade required by the RAR decoder |
-| [ffmpeg-ffm](https://github.com/ghosthack/ffmpeg-ffm) | 8.1.2-0.3.5 | MIT bindings; natives convey FFmpeg 8.1.2, LGPL v2.1+ (no GPL/version3/nonfree components) | bundled FFmpeg — stills + video for the default backend |
+| [ffmpeg-ffm](https://github.com/ghosthack/ffmpeg-ffm) | 8.1.2-0.3.6 | MIT bindings; natives convey FFmpeg 8.1.2, LGPL v2.1+ (no GPL/version3/nonfree components) | bundled FFmpeg — stills + video for the default backend, plus packet-preserving metadata-removal remuxing |
 | [turbojpeg-ffm](https://github.com/ghosthack/turbojpeg-ffm) | 3.2.0-0.2.0 | MIT bindings; natives convey libjpeg-turbo 3.2.0 (BSD 3-Clause, IJG, zlib) | baseline-JPEG thumbnail fast path |
 | [libraw-ffm](https://github.com/ghosthack/libraw-ffm) | 0.22.2-0.2.0 | MIT bindings; natives convey LibRaw 0.22.2 (LGPL 2.1 or CDDL 1.0) | camera-RAW decoding |
 | [Upscayl ncnn](https://github.com/upscayl/upscayl-ncnn) *(optional first-use download)* | 20251207-174704 | AGPL-3.0; downloaded archive retains its upstream license | separate-process Vulkan/Metal inference for viewer super resolution |

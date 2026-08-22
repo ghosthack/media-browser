@@ -39,6 +39,74 @@ final class AaeJson {
         return v;
     }
 
+    /** Serializes the conventional object graph produced by {@link #parse}. */
+    static String stringify(Object value) {
+        StringBuilder out = new StringBuilder();
+        write(value, out);
+        return out.toString();
+    }
+
+    private static void write(Object value, StringBuilder out) {
+        if (value == null) {
+            out.append("null");
+        } else if (value instanceof String s) {
+            string(s, out);
+        } else if (value instanceof Boolean b) {
+            out.append(b);
+        } else if (value instanceof Number n) {
+            double d = n.doubleValue();
+            if (!Double.isFinite(d)) {
+                throw new IllegalArgumentException("JSON numbers must be finite");
+            }
+            long integral = (long) d;
+            out.append(d == integral ? Long.toString(integral) : Double.toString(d));
+        } else if (value instanceof Map<?, ?> map) {
+            out.append('{');
+            boolean first = true;
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!(entry.getKey() instanceof String key)) {
+                    throw new IllegalArgumentException("JSON object key is not a string");
+                }
+                if (!first) out.append(',');
+                first = false;
+                string(key, out);
+                out.append(':');
+                write(entry.getValue(), out);
+            }
+            out.append('}');
+        } else if (value instanceof List<?> list) {
+            out.append('[');
+            for (int i = 0; i < list.size(); i++) {
+                if (i != 0) out.append(',');
+                write(list.get(i), out);
+            }
+            out.append(']');
+        } else {
+            throw new IllegalArgumentException("unsupported JSON value: " + value.getClass());
+        }
+    }
+
+    private static void string(String value, StringBuilder out) {
+        out.append('"');
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '"' -> out.append("\\\"");
+                case '\\' -> out.append("\\\\");
+                case '\b' -> out.append("\\b");
+                case '\f' -> out.append("\\f");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                default -> {
+                    if (c < 0x20) out.append("\\u%04x".formatted((int) c));
+                    else out.append(c);
+                }
+            }
+        }
+        out.append('"');
+    }
+
     private Object value() {
         if (i >= s.length()) {
             throw new IllegalArgumentException("unexpected end of JSON");

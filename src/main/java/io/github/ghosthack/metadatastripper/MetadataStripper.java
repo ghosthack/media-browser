@@ -9,7 +9,7 @@ import java.util.EnumMap;
 import java.util.Map;
 import java.util.Objects;
 
-/** Public API for stripping one file into its automatically derived output path. */
+/** Structural writers selected for formats whose metadata lives inside encoded packets/chunks. */
 public final class MetadataStripper {
     private static final Map<MediaFormat, ContainerStripper> STRIPPERS = strippers();
 
@@ -114,4 +114,3 @@ public final class MetadataStripper {
         return Map.copyOf(map);
     }
 }
-

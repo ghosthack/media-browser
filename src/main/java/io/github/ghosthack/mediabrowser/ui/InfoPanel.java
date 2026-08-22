@@ -3,10 +3,7 @@ package io.github.ghosthack.mediabrowser.ui;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 
-import javafx.beans.binding.Bindings;
 import javafx.beans.property.ReadOnlyStringWrapper;
-import javafx.geometry.Insets;
-import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Label;
 import javafx.scene.control.TableColumn;
@@ -15,7 +12,6 @@ import javafx.scene.control.TableView;
 import javafx.scene.control.TreeTableView;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
-import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
 import java.time.ZoneId;
@@ -25,16 +21,16 @@ import java.util.List;
 import java.util.OptionalInt;
 
 /**
- * Panel showing the probe result of a media item as a two-column table;
- * overlong values are clipped by their cells. Used by the main window (for
- * the selected item) and by the viewer window (for the shown item). Above
- * the table, an optional File section shows facts read straight from the
- * filesystem stat — file name/size/timestamps or folder name/timestamps — the
- * moment an item is selected, before (and independent of) the potentially slow
- * native probe. A folder also shows its direct item count when an existing
- * listing already supplied it. The section is the same two-column table
- * component, sized to its rows so it never scrolls and the probe table keeps
- * the remaining height.
+ * Panel showing everything known about the selected item as one two-column
+ * table; overlong values are clipped by their cells. Used by the main window
+ * (for the selected item) and by the viewer window (for the shown item). The
+ * leading rows are file facts read straight from the filesystem stat — file
+ * name/size/timestamps or folder name/timestamps — the moment an item is
+ * selected, before (and independent of) the potentially slow native probe,
+ * whose rows follow below once it lands. A folder also shows its direct item
+ * count when an existing listing already supplied it. While the probe half is
+ * pending or failed, its status message shows as the table placeholder when no
+ * rows exist yet, or as a trailing row under the file facts.
  */
 public final class InfoPanel extends VBox {
 
@@ -46,10 +42,9 @@ public final class InfoPanel extends VBox {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
 
     /**
-     * Both halves of the Info panel use the same compact row rhythm. Some
-     * themes give ordinary TableViews substantially taller rows (Cupertino
-     * uses 3em), which otherwise makes the probe rows below the File section
-     * appear roughly twice as tall as the filesystem rows above it.
+     * The Info panel's compact row rhythm. Some themes give ordinary
+     * TableViews substantially taller rows (Cupertino uses 3em), which would
+     * make these dense fact rows waste most of the panel.
      */
     private static final double INFO_TABLE_ROW_HEIGHT = 24;
 
@@ -63,39 +58,21 @@ public final class InfoPanel extends VBox {
     private final TableView<Row> table = new TableView<>();
     private final Label placeholder = new Label("No selection");
     private final HBox header;
-    private final TableView<Row> fileTable = new TableView<>();
-    /** The probe's rows as given, before the File section's duplicates are dropped. */
+    /** The filesystem-stat rows currently shown at the top of the table. */
+    private List<Row> fileRows = List.of();
+    /** The probe's rows as given, before the file facts' duplicates are dropped. */
     private List<Row> probeRows = List.of();
+    /** Status of the probe half (Probing…, error) while it has no rows; null once it does. */
+    private String message;
 
     public InfoPanel() {
-        var title = new Label("Info");
-        title.setStyle("-fx-font-weight: bold; -fx-padding: 6 8 6 8;");
-        var headerSpacer = new Region();
-        HBox.setHgrow(headerSpacer, Priority.ALWAYS);
-        header = new HBox(title, headerSpacer);
-        header.setAlignment(Pos.CENTER_LEFT);
-        header.getStyleClass().addAll("tool-bar", "side-panel-header");
-
-        configurePropertyValueTable(fileTable);
-        fileTable.setFocusTraversable(false);
-        // Exactly as tall as its rows (the column-header strip is hidden), so
-        // it never scrolls and the probe table below keeps the remaining height.
-        fileTable.prefHeightProperty().bind(Bindings.size(fileTable.getItems())
-                .multiply(INFO_TABLE_ROW_HEIGHT).add(2));
-        // The two tables stack flush and each draws its own 1px box, so their
-        // seam came out a doubled line. Overlap by exactly that pixel — the
-        // themes draw the box as a border (Cupertino) or as background layers
-        // showing through insets (Modena), so there is no one property to zero.
-        VBox.setMargin(fileTable, new Insets(0, 0, -1, 0));
-        fileTable.minHeightProperty().bind(fileTable.prefHeightProperty());
-        fileTable.maxHeightProperty().bind(fileTable.prefHeightProperty());
-        setFileSectionVisible(false);
+        header = SidePanelHeader.create("Info");
 
         configurePropertyValueTable(table);
         table.setPlaceholder(placeholder);
         VBox.setVgrow(table, Priority.ALWAYS);
 
-        getChildren().addAll(header, fileTable, table);
+        getChildren().addAll(header, table);
         setPrefWidth(280);
         setMinWidth(160);
     }
@@ -110,6 +87,11 @@ public final class InfoPanel extends VBox {
         var property = new TableColumn<Row, String>("Property");
         property.setCellValueFactory(d -> new ReadOnlyStringWrapper(d.getValue().property()));
         fixWidth(property);
+        // Free CSS hook (unstyled by every theme except the Compose pair, whose
+        // property-column-cell rule tints it with the kotlin design's
+        // textMuted role): lets a theme tell the leading column apart from
+        // the value column without a per-theme column-index hack.
+        property.getStyleClass().add("property-column-cell");
         var value = new TableColumn<Row, String>("Value");
         value.setCellValueFactory(d -> new ReadOnlyStringWrapper(d.getValue().value()));
         table.getColumns().setAll(List.of(property, value));
@@ -124,6 +106,7 @@ public final class InfoPanel extends VBox {
     static void configurePropertyValueTable(
             TreeTableView<?> table, TableColumnBase<?, ?> propertyColumn) {
         propertyColumn.setPrefWidth(PROPERTY_COLUMN_WIDTH);
+        propertyColumn.getStyleClass().add("property-column-cell");
         configurePropertyTableChrome(table);
     }
 
@@ -166,44 +149,47 @@ public final class InfoPanel extends VBox {
         probeRows = probe.describe().entrySet().stream()
                 .map(e -> new Row(e.getKey(), e.getValue()))
                 .toList();
-        showProbeRows();
-    }
-
-    public void showMessage(String message) {
-        probeRows = List.of();
-        table.getItems().clear();
-        placeholder.setText(message);
+        message = null;
+        render();
     }
 
     /**
-     * Shows arbitrary detail rows in the lower table, the same slot a probe
-     * fills. Used for a selected archive's format and volume identity, which is
-     * detail about the file rather than a media probe — the File section above
-     * is untouched and keeps showing the container's own name, size and
-     * timestamps.
+     * Replaces the probe half with a status message (Probing…, a decode error,
+     * "No selection"). Shown as the table placeholder while no file facts are
+     * up, otherwise as a trailing row so it stays visible under them.
+     */
+    public void showMessage(String message) {
+        probeRows = List.of();
+        this.message = message;
+        render();
+    }
+
+    /**
+     * Shows arbitrary detail rows in the probe slot. Used for a selected
+     * archive's format and volume identity, which is detail about the file
+     * rather than a media probe — the file-fact rows above are untouched and
+     * keep showing the container's own name, size and timestamps.
      */
     public void showDetailRows(List<Row> rows) {
         probeRows = List.copyOf(rows);
-        showProbeRows();
+        message = null;
+        render();
     }
 
     /**
-     * Populates the File section above the probe table; hidden while empty.
-     * Rows typically come from {@link #fileFactRows}. Independent of
-     * {@link #show}/{@link #showMessage}, which only touch the probe table —
-     * beyond hiding the probe rows this section already states.
+     * Replaces the file-fact rows at the top of the table; rows typically come
+     * from {@link #fileFactRows}. Independent of {@link #show}/
+     * {@link #showMessage}, which only touch the probe half below.
      */
     public void showFileFacts(List<Row> rows) {
-        fileTable.getItems().setAll(rows);
-        setFileSectionVisible(!rows.isEmpty());
-        showProbeRows();
+        fileRows = List.copyOf(rows);
+        render();
     }
 
-    /** Empties and hides the File section when there is no factual selection. */
+    /** Drops the file-fact rows when there is no factual selection. */
     public void clearFileFacts() {
-        fileTable.getItems().clear();
-        setFileSectionVisible(false);
-        showProbeRows();
+        fileRows = List.of();
+        render();
     }
 
     /**
@@ -212,7 +198,7 @@ public final class InfoPanel extends VBox {
      * listing supplied the count; this method performs no I/O.
      */
     public void showKnownFolderItemCount(int count) {
-        var rows = new ArrayList<>(fileTable.getItems());
+        var rows = new ArrayList<>(fileRows);
         rows.removeIf(row -> "Items".equals(row.property()));
         int afterName = !rows.isEmpty() && "Name".equals(rows.getFirst().property()) ? 1 : 0;
         rows.add(afterName, new Row("Items", Integer.toString(Math.max(0, count))));
@@ -220,21 +206,23 @@ public final class InfoPanel extends VBox {
     }
 
     /**
-     * Fills the probe table, dropping the facts the File section above already
-     * shows (Name, Size — the probe reports both). Re-run whenever either half
-     * changes, since the probe usually lands after the stat facts but a cleared
-     * File section has to hand its rows back.
+     * Rebuilds the table: file facts first, then the probe rows minus the
+     * facts already stated above (Name, Size — the probe reports both), then
+     * the pending/failed probe's status message as a trailing row. Re-run
+     * whenever any part changes, since the probe usually lands after the stat
+     * facts but cleared file facts have to hand their rows back.
      */
-    private void showProbeRows() {
-        var alreadyShown = fileTable.getItems().stream().map(Row::property).toList();
-        table.getItems().setAll(probeRows.stream()
+    private void render() {
+        var rows = new ArrayList<>(fileRows);
+        var alreadyShown = fileRows.stream().map(Row::property).toList();
+        probeRows.stream()
                 .filter(row -> !alreadyShown.contains(row.property()))
-                .toList());
-    }
-
-    private void setFileSectionVisible(boolean visible) {
-        fileTable.setVisible(visible);
-        fileTable.setManaged(visible);
+                .forEach(rows::add);
+        if (message != null && !rows.isEmpty()) {
+            rows.add(new Row("", message));
+        }
+        placeholder.setText(message == null ? "No selection" : message);
+        table.getItems().setAll(rows);
     }
 
     /** Display rows for a file: name, exact size and stat timestamps. */

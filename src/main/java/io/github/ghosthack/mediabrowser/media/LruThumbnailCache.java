@@ -1,5 +1,6 @@
 package io.github.ghosthack.mediabrowser.media;
 
+import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -51,6 +52,20 @@ public final class LruThumbnailCache implements ThumbnailCache {
             evictToBudget();
         }
         return loaded;
+    }
+
+    @Override
+    public synchronized void remove(Path path) {
+        if (path == null) return;
+        Path normalized = path.toAbsolutePath().normalize();
+        Iterator<Map.Entry<ThumbnailKey, Thumbnail>> it = map.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<ThumbnailKey, Thumbnail> entry = it.next();
+            if (entry.getKey().path().equals(normalized)) {
+                usedBytes -= entry.getValue().byteSize();
+                it.remove();
+            }
+        }
     }
 
     @Override

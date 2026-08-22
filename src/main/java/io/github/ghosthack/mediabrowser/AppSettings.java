@@ -46,6 +46,8 @@ public final class AppSettings {
     private static final String DETECTION_KEY = "media.detection";
     private static final String THEME_KEY = "ui.theme";
     private static final String ICON_PACK_KEY = "ui.iconPack";
+    private static final String UI_STYLE_KEY = "ui.style";
+    private static final String BUTTON_BORDERS_KEY = "ui.buttonBorders";
     private static final String THUMB_MAX_EDGE_KEY = "mosaic.thumbnail.maxEdge";
     private static final String THUMB_BUDGET_MB_KEY = "mosaic.thumbnail.memoryBudgetMb";
     private static final String MOSAIC_THUMBNAILS_VISIBLE_KEY = "mosaic.thumbnail.visible";
@@ -74,6 +76,7 @@ public final class AppSettings {
     private static final String LISTING_COLLAPSE_CHAINS_KEY = "listing.collapseFolderChains";
     private static final String MOSAIC_EMPTY_RETICULE_KEY = "mosaic.emptyReticule";
     private static final String MOSAIC_WONT_OPEN_RETICULE_KEY = "mosaic.wontOpenReticule";
+    private static final String MOSAIC_RETICULE_SCOPE_KEY = "mosaic.reticuleScope";
     private static final String MOSAIC_BARREN_CHECK_KEY = "mosaic.barrenCheck";
     private static final String MOSAIC_BARREN_BUDGET_KEY = "mosaic.barrenCheck.budget";
     private static final String MOSAIC_FOLDER_GLYPH_KEY = "mosaic.folderGlyph";
@@ -154,9 +157,10 @@ public final class AppSettings {
     private static final int DEFAULT_THUMB_BUDGET_MB = 256;
 
     /** Fresh-install visual defaults. Explicit persisted choices always win. */
-    private static final Theme DEFAULT_THEME = Theme.PLAIN_DARK;
+    private static final Theme DEFAULT_THEME = Theme.COMPOSE_DARK;
     private static final IconPack DEFAULT_ICON_PACK = IconPack.LUCID;
-    private static final String DEFAULT_MOSAIC_TILE_SET_ID = "xedge-xs";
+    private static final String DEFAULT_MOSAIC_TILE_SET_ID = "compose";
+    private static final UiStyle DEFAULT_UI_STYLE = UiStyle.COMPOSE;
 
     /** Defaults for the mosaic grid layout. */
     private static final int DEFAULT_MOSAIC_TILE_SIZE = 100;
@@ -231,6 +235,8 @@ public final class AppSettings {
     private String detectionMode;
     private Theme theme;
     private IconPack iconPack;
+    private UiStyle uiStyle;
+    private boolean buttonBorders;
     private int thumbnailMaxEdge;
     private int thumbnailMemoryBudgetMb;
     private boolean mosaicThumbnailsVisible;
@@ -255,6 +261,7 @@ public final class AppSettings {
     private boolean listingCollapseFolderChains;
     private boolean mosaicEmptyReticule;
     private boolean mosaicWontOpenReticule;
+    private MosaicReticuleScope mosaicReticuleScope;
     private boolean mosaicBarrenCheck;
     private int mosaicBarrenBudget;
     private MosaicFolderGlyph mosaicFolderGlyph;
@@ -319,6 +326,16 @@ public final class AppSettings {
         return load(FILE);
     }
 
+    /**
+     * The file this instance loads from and saves to — {@code
+     * ~/.media-browser/app.properties} for {@link #load()}, or a test path for
+     * {@link #load(Path)}. Surfaced in the Settings dialog's Compose footer so
+     * "why did my settings reset" has a visible answer.
+     */
+    public Path persistencePath() {
+        return persistencePath;
+    }
+
     /** Reads {@code file}; missing file or unreadable values mean defaults. */
     static AppSettings load(Path file) {
         Properties props = new Properties();
@@ -364,6 +381,10 @@ public final class AppSettings {
         settings.theme = Theme.fromSettings(props.getProperty(THEME_KEY), DEFAULT_THEME);
         settings.iconPack = IconPack.fromSettings(
                 props.getProperty(ICON_PACK_KEY), DEFAULT_ICON_PACK);
+        settings.uiStyle = UiStyle.fromSettings(
+                props.getProperty(UI_STYLE_KEY), DEFAULT_UI_STYLE);
+        settings.buttonBorders =
+                Boolean.parseBoolean(props.getProperty(BUTTON_BORDERS_KEY, "false"));
         settings.thumbnailMaxEdge = parseBoundedInt(
                 props.getProperty(THUMB_MAX_EDGE_KEY), DEFAULT_THUMB_MAX_EDGE, 32, 2048);
         settings.thumbnailMemoryBudgetMb = parseBoundedInt(
@@ -423,7 +444,9 @@ public final class AppSettings {
         settings.mosaicEmptyReticule = Boolean.parseBoolean(
                 props.getProperty(MOSAIC_EMPTY_RETICULE_KEY, "true"));
         settings.mosaicWontOpenReticule = Boolean.parseBoolean(
-                props.getProperty(MOSAIC_WONT_OPEN_RETICULE_KEY, "false"));
+                props.getProperty(MOSAIC_WONT_OPEN_RETICULE_KEY, "true"));
+        settings.mosaicReticuleScope = MosaicReticuleScope.fromSettings(
+                props.getProperty(MOSAIC_RETICULE_SCOPE_KEY), MosaicReticuleScope.DEFAULT);
         settings.mosaicBarrenCheck = Boolean.parseBoolean(
                 props.getProperty(MOSAIC_BARREN_CHECK_KEY, "false"));
         settings.mosaicBarrenBudget = parseBoundedInt(
@@ -455,12 +478,12 @@ public final class AppSettings {
                 MIN_ADJUSTMENTS_VOLATILE_MAX_DIRS, MAX_ADJUSTMENTS_VOLATILE_MAX_DIRS);
         settings.albumRecents = loadAlbumRecents(props);
         // Per-window chrome visibility. Defaults: all menu bars, the browser nav
-        // tree, both mosaic tool strips, and browser/mosaic status bars shown;
-        // browser and viewer toolbars remain hidden.
+        // tree, the Browser toolbar, both mosaic tool strips, and browser/mosaic
+        // status bars shown; only the Viewer toolbar remains hidden.
         settings.browserMenuBarVisible =
                 Boolean.parseBoolean(props.getProperty(BROWSER_MENU_BAR_KEY, "true"));
         settings.browserToolbarVisible =
-                Boolean.parseBoolean(props.getProperty(BROWSER_TOOLBAR_KEY, "false"));
+                Boolean.parseBoolean(props.getProperty(BROWSER_TOOLBAR_KEY, "true"));
         settings.browserStatusBarVisible =
                 Boolean.parseBoolean(props.getProperty(BROWSER_STATUS_BAR_KEY, "true"));
         settings.browserNavTreeVisible =
@@ -679,6 +702,8 @@ public final class AppSettings {
         props.setProperty(DETECTION_KEY, detectionMode);
         props.setProperty(THEME_KEY, theme.name());
         props.setProperty(ICON_PACK_KEY, iconPack.name());
+        props.setProperty(UI_STYLE_KEY, uiStyle.name());
+        props.setProperty(BUTTON_BORDERS_KEY, Boolean.toString(buttonBorders));
         props.setProperty(THUMB_MAX_EDGE_KEY, Integer.toString(thumbnailMaxEdge));
         props.setProperty(THUMB_BUDGET_MB_KEY, Integer.toString(thumbnailMemoryBudgetMb));
         props.setProperty(MOSAIC_THUMBNAILS_VISIBLE_KEY,
@@ -711,6 +736,7 @@ public final class AppSettings {
         props.setProperty(MOSAIC_EMPTY_RETICULE_KEY, Boolean.toString(mosaicEmptyReticule));
         props.setProperty(MOSAIC_WONT_OPEN_RETICULE_KEY,
                 Boolean.toString(mosaicWontOpenReticule));
+        props.setProperty(MOSAIC_RETICULE_SCOPE_KEY, mosaicReticuleScope.name());
         props.setProperty(MOSAIC_BARREN_CHECK_KEY, Boolean.toString(mosaicBarrenCheck));
         props.setProperty(MOSAIC_BARREN_BUDGET_KEY, Integer.toString(mosaicBarrenBudget));
         props.setProperty(MOSAIC_FOLDER_GLYPH_KEY, mosaicFolderGlyph.name());
@@ -1060,7 +1086,7 @@ public final class AppSettings {
 
     /**
      * The application look applied across every window (default
-     * {@link Theme#PLAIN_DARK}). Applied live by {@code ui.ThemeManager} when
+     * {@link Theme#COMPOSE_DARK}). Applied live by {@code ui.ThemeManager} when
      * changed in the Settings dialog.
      */
     public Theme theme() {
@@ -1081,6 +1107,33 @@ public final class AppSettings {
 
     public void setIconPack(IconPack iconPack) {
         this.iconPack = iconPack == null ? DEFAULT_ICON_PACK : iconPack;
+    }
+
+    /**
+     * The chrome preset (default {@link UiStyle#COMPOSE}) applied by the
+     * Settings dialog's "UI style" combo: a one-shot applier over theme, icon
+     * pack and mosaic tile set (each stays individually adjustable afterward),
+     * plus the Browser/Mosaic toolbar variant read once at startup.
+     */
+    public UiStyle uiStyle() {
+        return uiStyle;
+    }
+
+    public void setUiStyle(UiStyle uiStyle) {
+        this.uiStyle = uiStyle == null ? DEFAULT_UI_STYLE : uiStyle;
+    }
+
+    /**
+     * Whether buttons keep their outlines (default false — the Compose port's
+     * ghost-button look, whose Buttons.kt outlines only Normal-tone buttons).
+     * On restores button, toggle and menu-button borders on every theme.
+     */
+    public boolean buttonBorders() {
+        return buttonBorders;
+    }
+
+    public void setButtonBorders(boolean buttonBorders) {
+        this.buttonBorders = buttonBorders;
     }
 
     /** Longest-edge pixel cap for mosaic preview renditions (default 300). */
@@ -1257,7 +1310,7 @@ public final class AppSettings {
         this.mosaicFolderPreviewGrid = Math.max(0, Math.min(4, grid));
     }
 
-    /** ID of the generated-art tile set used by Mosaic; {@code xedge-xs} by default. */
+    /** ID of the generated-art tile set used by Mosaic; {@code compose} by default. */
     public String mosaicTileSetId() {
         return mosaicTileSetId;
     }
@@ -1352,7 +1405,8 @@ public final class AppSettings {
 
     /**
      * Whether Mosaic marks file tiles the active media-browser policy will not
-     * open. Off by default so existing galleries retain their current look.
+     * open. On by default, matching the diagonal hatch already used for
+     * unreadable folders; an explicit saved preference still wins.
      */
     public boolean mosaicWontOpenReticule() {
         return mosaicWontOpenReticule;
@@ -1360,6 +1414,15 @@ public final class AppSettings {
 
     public void setMosaicWontOpenReticule(boolean reticule) {
         this.mosaicWontOpenReticule = reticule;
+    }
+
+    /** One coverage choice shared by folder and file reticules. */
+    public MosaicReticuleScope mosaicReticuleScope() {
+        return mosaicReticuleScope;
+    }
+
+    public void setMosaicReticuleScope(MosaicReticuleScope scope) {
+        this.mosaicReticuleScope = scope == null ? MosaicReticuleScope.DEFAULT : scope;
     }
 
     /**

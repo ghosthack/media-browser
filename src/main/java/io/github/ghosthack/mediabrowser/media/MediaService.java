@@ -166,6 +166,8 @@ public final class MediaService implements AutoCloseable {
     private final ThreadPoolExecutor thumbnailExecutor;
     private final ThumbnailCache thumbnailCache;
     private final long thumbnailBudgetBytes;
+    /** Shared Apple edit lookup installed by the app after media-engine creation. */
+    private volatile AaeStore aaeStore;
     /** Renditions actually generated (decoded) so far; cache hits don't count. */
     private final LongAdder thumbnailsProcessed = new LongAdder();
     private final LongAdder thumbnailCacheHits = new LongAdder();
@@ -215,6 +217,24 @@ public final class MediaService implements AutoCloseable {
 
     public DetectionMode detectionMode() {
         return detectionMode;
+    }
+
+    /**
+     * Installs the shared AAE lookup used to bake recoverable geometry into
+     * cached thumbnails. Kept separate from construction because the media
+     * engine is initialized before application sidecar stores.
+     */
+    public void setAaeStore(AaeStore store) {
+        if (aaeStore != store) thumbnailCache.clear();
+        this.aaeStore = store;
+    }
+
+    /**
+     * Drops every cached FIT/FILL rendition for {@code file}. The next request
+     * regenerates it using the current AAE geometry signature.
+     */
+    public void invalidateThumbnail(Path file) {
+        thumbnailCache.remove(file);
     }
 
     /**
@@ -562,7 +582,8 @@ public final class MediaService implements AutoCloseable {
      * Runs entirely on the dedicated thumbnail pool: even the cache-key stat
      * stays off the caller thread, so thumbnail decoration cannot block JavaFX
      * navigation. Concurrent requests for the same rendition share one
-     * generation. FIT and FILL renditions cache independently.
+     * generation. FIT and FILL renditions cache independently; recoverable AAE
+     * geometry is part of their identity and baked into their cached pixels.
      */
     public CompletableFuture<Thumbnail> thumbnail(Path file, int maxEdge, ThumbnailMode mode) {
         long queuedAt = MediaTelemetry.now();
@@ -571,8 +592,14 @@ public final class MediaService implements AutoCloseable {
             MediaTelemetry.recordThumbnailKeyQueue(MediaTelemetry.elapsedSince(queuedAt));
 
             long keyStart = MediaTelemetry.now();
-            ThumbnailKey key = keyFor(file, maxEdge, mode);
+            AaeStore edits = aaeStore;
+            AaeSidecar aae = edits == null ? null : edits.forImage(file).orElse(null);
+            ThumbnailKey key = keyFor(file, maxEdge, mode, aae);
             MediaTelemetry.recordThumbnailKeyStat(MediaTelemetry.elapsedSince(keyStart));
+
+            boolean bakeAae = aae != null && aae.hasGeometry();
+            ThumbnailMode decodeMode = bakeAae ? ThumbnailMode.FIT : mode;
+            int decodeEdge = bakeAae ? aaeSourceEdge(maxEdge, mode, aae) : maxEdge;
 
             Thumbnail hit = thumbnailCache.peek(key);
             if (hit != null) {
@@ -595,9 +622,9 @@ public final class MediaService implements AutoCloseable {
                             long engineStarted = trace.beginAttempt();
                             try {
                                 Thumbnail result = thumbnailCache.get(k,
-                                        () -> PdfMrcMedia.thumbnail(
+                                        () -> applyAaeThumbnail(PdfMrcMedia.thumbnail(
                                                 mrc.get(), facade, MediaService::decodable,
-                                                maxEdge, mode));
+                                                decodeEdge, decodeMode), aae, maxEdge, mode));
                                 trace.succeeded("PDF MRC composite", engineStarted,
                                         thumbnailDetail(result, maxEdge, mode));
                                 trace.engineWork(MediaTelemetry.elapsedSince(loadStart));
@@ -617,7 +644,9 @@ public final class MediaService implements AutoCloseable {
                         long engineStarted = System.nanoTime();
                         try {
                             return thumbnailCache.get(k,
-                                    () -> facade.loadThumbnail(input, maxEdge, mode, trace));
+                                    () -> applyAaeThumbnail(facade.loadThumbnail(
+                                            input, decodeEdge, decodeMode, trace),
+                                            aae, maxEdge, mode));
                         } finally {
                             trace.engineWork(System.nanoTime() - engineStarted);
                         }
@@ -1047,8 +1076,9 @@ public final class MediaService implements AutoCloseable {
         return kind == MediaKind.IMAGE || kind == MediaKind.VIDEO;
     }
 
-    /** Builds the cache key, stamping the file's current mtime and size. */
-    private static ThumbnailKey keyFor(Path file, int maxEdge, ThumbnailMode mode) {
+    /** Builds the cache key, stamping the file and recoverable sidecar geometry. */
+    private static ThumbnailKey keyFor(Path file, int maxEdge, ThumbnailMode mode,
+                                       AaeSidecar aae) {
         long mtime = 0, size = -1;
         try {
             BasicFileAttributes attrs = Files.readAttributes(file, BasicFileAttributes.class);
@@ -1057,7 +1087,77 @@ public final class MediaService implements AutoCloseable {
         } catch (IOException ignored) {
             // unreadable stat: key on path + maxEdge + mode alone (mtime 0, size -1)
         }
-        return new ThumbnailKey(file, mtime, size, maxEdge, mode);
+        return new ThumbnailKey(file, mtime, size, maxEdge, mode, aaeSignature(aae));
+    }
+
+    /** Stable cache identity for precisely the AAE geometry this service bakes. */
+    private static String aaeSignature(AaeSidecar aae) {
+        if (aae == null || !aae.hasGeometry()) return "";
+        StringBuilder out = new StringBuilder(80)
+                .append(aae.masterWidth()).append('x').append(aae.masterHeight())
+                .append(':').append(Double.toHexString(aae.straightenAngleRadians()));
+        aae.crop().ifPresent(c -> out.append(':').append(c.x()).append(',').append(c.y())
+                .append(',').append(c.width()).append(',').append(c.height()));
+        return out.toString();
+    }
+
+    /**
+     * Requests enough of the master for a cropped result to remain sharp, while
+     * bounding pathological tiny crops to a 4096-pixel intermediate.
+     */
+    private static int aaeSourceEdge(int maxEdge, ThumbnailMode mode, AaeSidecar aae) {
+        if (maxEdge <= 0) return maxEdge;
+        AaeSidecar.Crop crop = aae.crop().orElse(null);
+        if (crop == null || aae.masterWidth() <= 0 || aae.masterHeight() <= 0) {
+            return maxEdge;
+        }
+        int cropBasis = mode == ThumbnailMode.FILL
+                ? Math.min(crop.width(), crop.height())
+                : Math.max(crop.width(), crop.height());
+        if (cropBasis <= 0) return maxEdge;
+        long wanted = ((long) maxEdge * Math.max(aae.masterWidth(), aae.masterHeight())
+                + cropBasis - 1) / cropBasis;
+        long cap = Math.max(maxEdge, 4096);
+        return (int) Math.max(maxEdge, Math.min(wanted, cap));
+    }
+
+    /**
+     * Bakes AAE straighten/crop into a FIT source rendition, then produces the
+     * caller's requested FIT or FILL thumbnail. The original media is untouched.
+     */
+    static Thumbnail applyAaeThumbnail(Thumbnail thumbnail, AaeSidecar aae,
+                                       int maxEdge, ThumbnailMode mode) {
+        if (thumbnail == null || thumbnail.frame().isEmpty()
+                || aae == null || !aae.hasGeometry()) {
+            return thumbnail;
+        }
+        RasterFrame src = thumbnail.frame().orElseThrow();
+        int mw = aae.masterWidth(), mh = aae.masterHeight();
+        long aspectError = mw > 0 && mh > 0
+                ? Math.abs((long) src.width() * mh - (long) src.height() * mw)
+                : Long.MAX_VALUE;
+        if (mw <= 0 || mh <= 0 || aspectError > Math.max(mw, mh)) {
+            RasterFrame scaled = Thumbnails.scale(src, maxEdge, mode);
+            return new Thumbnail(Optional.of(scaled), thumbnail.kind(), thumbnail.colorProfile());
+        }
+
+        RasterFrame edited = src;
+        if (aae.straightenAngleRadians() != 0) {
+            edited = RasterFrames.straighten(edited, aae.straightenAngleRadians());
+        }
+        AaeSidecar.Crop crop = aae.crop().orElse(null);
+        if (crop != null) {
+            int x0 = (int) Math.floor(crop.x() * edited.width() / (double) mw);
+            int y0 = (int) Math.floor(crop.y() * edited.height() / (double) mh);
+            int x1 = (int) Math.ceil((crop.x() + (long) crop.width())
+                    * edited.width() / (double) mw);
+            int y1 = (int) Math.ceil((crop.y() + (long) crop.height())
+                    * edited.height() / (double) mh);
+            edited = RasterFrames.crop(edited, x0, y0,
+                    Math.max(1, x1 - x0), Math.max(1, y1 - y0));
+        }
+        RasterFrame scaled = Thumbnails.scale(edited, maxEdge, mode);
+        return new Thumbnail(Optional.of(scaled), thumbnail.kind(), thumbnail.colorProfile());
     }
 
     /**

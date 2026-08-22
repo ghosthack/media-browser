@@ -85,3 +85,177 @@
 .tree-table-view.headerless-table.striped:focused .tree-table-row-cell:filled:odd:selected {
     -fx-background: -fx-selection-bar;
 }
+
+/*
+ * Cross-theme literal values — colors that must render identically
+ * regardless of which theme (or no theme, i.e. Default JavaFX) is active,
+ * because this sheet is loaded on every scene (SingleWindowShell /
+ * MultiWindowShell) after the theme overlay. Moving them here out of
+ * setStyle(...) calls keeps today's exact look while giving a future theme a
+ * class to override deliberately: since this sheet is added after the theme
+ * overlay, ties go to these rules, so an override needs a selector with
+ * higher specificity than the bare class below (e.g. ".root .settings-hint"),
+ * not just a same-specificity rule in the theme's own sheet.
+ */
+
+/* The Viewer's media surface — same near-black-in-every-theme role as the
+   Mosaic grid's .mosaic-root / .mosaic-canvas-holder (mosaic.css). */
+.viewer-root,
+.viewer-viewport {
+    -fx-background-color: black;
+}
+
+/* The Viewer's "no media selected" placeholder text. */
+.viewer-placeholder {
+    -fx-text-fill: #dddddd;
+}
+
+/* Shared by the Mosaic and Viewer's SidePanelSplit: both hosts paint black
+   behind their media surface, so the split itself must not draw a themed
+   frame around it. */
+.side-panel-split {
+    -fx-background-color: black;
+    -fx-padding: 0;
+}
+
+/* Muted explanatory text under a Settings-dialog control group. */
+.settings-hint {
+    -fx-text-fill: gray;
+}
+
+/* MetadataPanel's value column for binary (non-text) entries. */
+.metadata-binary-value {
+    -fx-font-style: italic;
+    -fx-text-fill: #b58900;
+}
+
+/*
+ * UiStyle.COMPOSE's Settings dialog: a left rail of pages instead of tabs
+ * (MainWindow.showSettings()'s composeRow/composeGroup/composeRailItem),
+ * transcribing kotlin-mosaic's SettingsDialog.kt + ModalDialog.kt. Defaults
+ * here use Modena's looked-up colors (-fx-base, -fx-text-background-color,
+ * -fx-accent) so every bundled theme remaps them without a dedicated rule;
+ * The Compose theme stylesheet adds its palette's own refinements below
+ * these. UiStyle.CLASSIC's plain TabPane never uses any of these
+ * classes.
+ */
+
+.settings-titlebar {
+    -fx-background-color: derive(-fx-base, 12%);
+    -fx-border-color: transparent transparent derive(-fx-base, -16%) transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 0 12 0 12;
+    -fx-pref-height: 38;
+    -fx-min-height: 38;
+}
+
+.settings-dialog-title {
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -fx-text-background-color;
+}
+
+.settings-rail {
+    -fx-background-color: derive(-fx-base, 12%);
+    -fx-padding: 8 0 8 0;
+    -fx-pref-width: 150;
+    -fx-min-width: 150;
+    -fx-max-width: 150;
+}
+
+.settings-rail-item {
+    -fx-alignment: CENTER_LEFT;
+    -fx-padding: 0 12 0 12;
+    -fx-pref-height: 34;
+    -fx-min-height: 34;
+    -fx-max-height: 34;
+    -fx-background-color: transparent;
+    -fx-background-radius: 0;
+    -fx-background-insets: 0;
+    -fx-border-width: 0;
+    -fx-text-fill: -fx-text-background-color;
+    -fx-font-size: 1em;
+}
+
+.settings-rail-item:hover {
+    -fx-background-color: derive(-fx-base, 20%);
+}
+
+.settings-rail-item:selected {
+    -fx-background-color: derive(-fx-accent, 75%);
+    -fx-text-fill: -fx-accent;
+}
+
+.settings-rail-divider {
+    -fx-background-color: derive(-fx-base, -16%);
+    -fx-pref-width: 1;
+    -fx-min-width: 1;
+    -fx-max-width: 1;
+}
+
+/* 13px semibold group title + a hairline divider below it. */
+.settings-group-title {
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -fx-text-background-color;
+}
+
+.settings-group-divider {
+    -fx-background-color: derive(-fx-base, -16%);
+    -fx-pref-height: 1;
+    -fx-min-height: 1;
+    -fx-max-height: 1;
+}
+
+.settings-footer {
+    -fx-background-color: derive(-fx-base, 12%);
+    -fx-border-color: derive(-fx-base, -16%) transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 0 12 0 12;
+    -fx-pref-height: 46;
+    -fx-min-height: 46;
+}
+
+.settings-footer-path {
+    -fx-font-family: monospace;
+    -fx-font-size: 11px;
+    -fx-text-fill: gray;
+}
+
+/* Borderless buttons (Settings > General > "Button borders" off): the Compose
+   port's ghost-button look. ThemeManager stamps .borderless-buttons on every
+   registered root. Hand-written themes outline via -fx-border-color and the
+   Cupertino sheets via the -color-button-border token (their hover/pressed
+   variants derive from it), so both go transparent; Cupertino's button drop
+   shadow goes with them. Focus rings are token-independent and survive. */
+.borderless-buttons .button,
+.borderless-buttons .toggle-button,
+.borderless-buttons .menu-button {
+    -fx-border-color: transparent;
+    -color-button-border: transparent;
+    -fx-effect: null;
+}
+
+/* Stock Modena has no theme sheet and draws its outline as layered
+   backgrounds, so it needs flattening to the body layer instead; hover and
+   armed tints survive because -fx-body-color re-derives from -fx-color.
+   ThemeManager stamps .theme-default only while the Default theme is active. */
+.theme-default.borderless-buttons .button,
+.theme-default.borderless-buttons .toggle-button,
+.theme-default.borderless-buttons .menu-button,
+.theme-default .borderless-buttons .button,
+.theme-default .borderless-buttons .toggle-button,
+.theme-default .borderless-buttons .menu-button {
+    -fx-background-color: -fx-body-color;
+    -fx-background-insets: 0;
+    -fx-background-radius: 3;
+}
+
+/* Ghost chrome also hides toolbar separator lines (spacing kept): every theme
+   draws them via -fx-border-color on .separator .line, Cupertino through its
+   -color-separator token — transparent covers both. Menu and panel
+   separators are unaffected. */
+.borderless-buttons .tool-bar .separator .line {
+    -fx-border-color: transparent;
+    -color-separator: transparent;
+}

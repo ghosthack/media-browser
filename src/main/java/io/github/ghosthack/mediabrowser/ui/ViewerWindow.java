@@ -3,6 +3,7 @@ package io.github.ghosthack.mediabrowser.ui;
 import io.github.ghosthack.mediabrowser.AppSettings;
 import io.github.ghosthack.mediabrowser.LoadingIndicator;
 import io.github.ghosthack.mediabrowser.album.AlbumStore;
+import io.github.ghosthack.mediabrowser.media.AaeSidecar;
 import io.github.ghosthack.mediabrowser.media.AaeStore;
 import io.github.ghosthack.mediabrowser.media.ColorProfile;
 import io.github.ghosthack.mediabrowser.media.ContentSniffer;
@@ -38,8 +39,11 @@ import javafx.beans.property.SimpleStringProperty;
 import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
+import javafx.scene.Cursor;
 import javafx.scene.Node;
 import javafx.scene.Parent;
+import javafx.scene.canvas.Canvas;
+import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonBar;
@@ -83,7 +87,11 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
+import javafx.scene.paint.Color;
 import javafx.scene.shape.Rectangle;
+import javafx.scene.text.Font;
+import javafx.scene.text.FontWeight;
+import javafx.scene.text.Text;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
@@ -156,9 +164,6 @@ import java.util.function.Consumer;
  */
 public final class ViewerWindow implements AppShell.ShellView {
 
-    /** Shared baseline for icon, text, menu, and separator controls in the toolbar. */
-    private static final double TOOLBAR_CONTROL_HEIGHT = 30;
-
     /** How the viewport scales the decoded visual. */
     public enum ScaleMode {
         /** Fit-to-window, preserving aspect ratio (letterboxed). The default. */
@@ -199,6 +204,8 @@ public final class ViewerWindow implements AppShell.ShellView {
      * errored or video-playback states.
      */
     private RasterFrame lastUprightFrame;
+    /** Untouched decoded master retained so a later crop can expand a prior crop. */
+    private RasterFrame lastMasterFrame;
     /** Optional transient 4× AI rendition of {@link #lastUprightFrame}. */
     private RasterFrame enhancedUprightFrame;
     /** Original/enhanced comparison state; enhancement is deliberately session-only. */
@@ -243,6 +250,27 @@ public final class ViewerWindow implements AppShell.ShellView {
     private final SimpleBooleanProperty hasContent = new SimpleBooleanProperty(false);
 
     private final ImageView imageView = new ImageView();
+    /** Mouse surface and chrome for the non-destructive master-space crop editor. */
+    private final Canvas cropCanvas = new Canvas();
+    private final Label cropInstructions = new Label(
+            "Drag to select an area · Enter applies · Esc cancels");
+    private final Button applyCropButton = new Button("Apply Crop");
+    private final Button cancelCropButton = new Button("Cancel");
+    private final HBox cropControls = new HBox(8, cropInstructions,
+            applyCropButton, cancelCropButton);
+    private final Text cropDimensionMeasure = new Text();
+    private boolean cropEditing;
+    private boolean cropDragging;
+    private double cropPointerX;
+    private double cropPointerY;
+    private ScaleMode scaleModeBeforeCrop = ScaleMode.FIT;
+    private RasterFrame cropPreviewFrame;
+    private AaeSidecar.Crop cropSelection;
+    private AaeSidecar.Crop cropDragStart;
+    private CropEditorGeometry.Handle cropDragHandle = CropEditorGeometry.Handle.NONE;
+    private int cropAnchorX;
+    private int cropAnchorY;
+    private static final double CROP_HANDLE_HIT_PX = 9;
     private StackPane viewport;
     /** How the viewport scales the visual; see {@link ScaleMode}. */
     private final ObjectProperty<ScaleMode> scaleMode = new SimpleObjectProperty<>(ScaleMode.FIT);
@@ -320,6 +348,11 @@ public final class ViewerWindow implements AppShell.ShellView {
      * behind another view).
      */
     private boolean flipbookQuietTeardown;
+    /** Non-destructive AAE crop actions exposed as a toolbar drop-down. */
+    private final MenuButton cropButton = new MenuButton("Crop");
+    private final MenuItem newCropItem = new MenuItem("Crop…");
+    private final MenuItem editCropItem = new MenuItem("Edit Crop…");
+    private final CheckMenuItem applyCropItem = new CheckMenuItem("Apply Crop");
     private final ToggleButton cropToggle = new ToggleButton("Crop to Fill");
     /**
      * Loading-indicator style; bound to the Viewer ▸ Loading Indicator submenu
@@ -542,6 +575,21 @@ public final class ViewerWindow implements AppShell.ShellView {
             }
         });
 
+        // Persisted crop actions are grouped separately from Crop to Fill,
+        // which is only a viewport scale mode. Apply Crop is a session-only
+        // preview switch: it never edits the AAE or original media.
+        IconBinding.install(cropButton, AppIcon.CROP, "Crop", "", "Crop actions");
+        cropButton.setTooltip(new Tooltip("Crop or edit this image ("
+                + shortcutShiftChord(KeyCode.C) + ")"));
+        newCropItem.setOnAction(e -> beginCrop());
+        editCropItem.setOnAction(e -> beginEditCrop());
+        applyCropItem.setSelected(true);
+        applyCropItem.setOnAction(e -> toggleCropApplied());
+        cropButton.getItems().setAll(newCropItem, editCropItem,
+                new SeparatorMenuItem(), applyCropItem);
+        cropButton.setOnShowing(e -> updateCropButtonState());
+        cropButton.setDisable(true);
+
         // The crop-to-fill toggle is a two-way mirror of the CROP_TO_FILL scale
         // mode: clicking it flips between fit and crop-to-fill, but is a no-op
         // while 1:1 is active (the toggle just snaps back). The scaleMode listener
@@ -648,19 +696,15 @@ public final class ViewerWindow implements AppShell.ShellView {
         this.toolBar = new ToolBar(toolbarPin, new Separator(),
                 prevButton, nextButton, new Separator(),
                 playButton, repeatToggle, autoplayToggle,
-                new Separator(), cropToggle, fullScreenToggle, new Separator(),
+                new Separator(), cropButton, cropToggle, fullScreenToggle, new Separator(),
                 colorButton, gamutButton, new Separator(),
                 pinsToggle);
-        for (Node item : toolBar.getItems()) {
-            if (item instanceof Control control) {
-                control.setMinHeight(TOOLBAR_CONTROL_HEIGHT);
-                control.setPrefHeight(TOOLBAR_CONTROL_HEIGHT);
-            }
-        }
+        ToolBars.applyControlBaseline(toolBar);
         toolBar.visibleProperty().bind(toolbarToggle.selectedProperty());
         toolBar.managedProperty().bind(toolbarToggle.selectedProperty());
 
-        placeholder.setStyle("-fx-text-fill: #dddddd;");
+        // Default styling lives in window-chrome.css's .viewer-placeholder rule.
+        placeholder.getStyleClass().add("viewer-placeholder");
         imageView.setPreserveRatio(true);
         imageView.setSmooth(true);
         // The pan scrollbars overlay the viewport edges (only shown in 1:1 mode
@@ -689,10 +733,94 @@ public final class ViewerWindow implements AppShell.ShellView {
         StackPane.setMargin(asciiMatrixBlackLabelOverlay, new Insets(0, 0, 6, 0));
         StackPane.setAlignment(nowLoadingOverlay, Pos.BOTTOM_LEFT);
         StackPane.setMargin(nowLoadingOverlay, new Insets(0, 0, 6, 0));
+
+        // Crop editing is a temporary overlay over the untouched master. The
+        // Canvas intercepts drags only while editing; the compact action strip
+        // remains above it and exposes the same Apply/Cancel paths as Enter/Esc.
+        cropCanvas.setVisible(false);
+        cropCanvas.setManaged(false);
+        cropControls.setVisible(false);
+        cropControls.setManaged(false);
+        cropControls.setAlignment(Pos.CENTER);
+        cropControls.setPadding(new Insets(8, 12, 8, 12));
+        // StackPane otherwise stretches a resizable HBox across the viewport;
+        // that turned this floating HUD's dark background into a full-screen
+        // veil and left its children centered over the photo.
+        cropControls.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        cropControls.setStyle("-fx-background-color: rgba(28,28,30,0.94);"
+                + "-fx-background-radius: 10;"
+                + "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.48), 18, 0.2, 0, 4);");
+        cropInstructions.setTextFill(Color.WHITE);
+        cropInstructions.setStyle("-fx-font-size: 13px;");
+        applyCropButton.setStyle("-fx-background-color: #0a84ff;"
+                + "-fx-text-fill: white; -fx-font-weight: 600; -fx-background-radius: 6;");
+        cancelCropButton.setStyle("-fx-background-radius: 6;");
+        StackPane.setAlignment(cropControls, Pos.BOTTOM_CENTER);
+        StackPane.setMargin(cropControls, new Insets(0, 0, 18, 0));
+        cropCanvas.setCursor(Cursor.CROSSHAIR);
+        applyCropButton.setOnAction(e -> applyCrop());
+        cancelCropButton.setOnAction(e -> cancelCrop());
+        cropCanvas.setOnMousePressed(e -> {
+            if (!cropEditing || e.getButton() != javafx.scene.input.MouseButton.PRIMARY) return;
+            CropEditorGeometry.Handle handle = cropHandleAt(e.getX(), e.getY());
+            int[] point = cropPoint(e.getX(), e.getY(), handle != CropEditorGeometry.Handle.NONE);
+            if (point == null) return;
+            if (handle == CropEditorGeometry.Handle.NONE) handle = CropEditorGeometry.Handle.NEW;
+            cropAnchorX = point[0];
+            cropAnchorY = point[1];
+            cropDragStart = cropSelection;
+            cropDragHandle = handle;
+            cropDragging = true;
+            cropPointerX = e.getX();
+            cropPointerY = e.getY();
+            cropSelection = CropEditorGeometry.drag(cropDragStart, cropDragHandle,
+                    cropAnchorX, cropAnchorY, point[0], point[1],
+                    cropPreviewFrame.width(), cropPreviewFrame.height());
+            applyCropButton.setDisable(false);
+            cropCanvas.setCursor(handle == CropEditorGeometry.Handle.MOVE
+                    ? Cursor.CLOSED_HAND : cropCursor(handle));
+            drawCropOverlay();
+            e.consume();
+        });
+        cropCanvas.setOnMouseDragged(e -> {
+            if (!cropEditing || !e.isPrimaryButtonDown()
+                    || cropDragHandle == CropEditorGeometry.Handle.NONE) return;
+            int[] point = cropPoint(e.getX(), e.getY(), true);
+            if (point == null) return;
+            cropPointerX = e.getX();
+            cropPointerY = e.getY();
+            cropSelection = CropEditorGeometry.drag(cropDragStart, cropDragHandle,
+                    cropAnchorX, cropAnchorY, point[0], point[1],
+                    cropPreviewFrame.width(), cropPreviewFrame.height());
+            drawCropOverlay();
+            e.consume();
+        });
+        cropCanvas.setOnMouseReleased(e -> {
+            if (!cropEditing || !cropDragging
+                    || e.getButton() != javafx.scene.input.MouseButton.PRIMARY) return;
+            cropDragging = false;
+            cropDragHandle = CropEditorGeometry.Handle.NONE;
+            cropDragStart = null;
+            updateCropCursor(e.getX(), e.getY());
+            drawCropOverlay();
+            e.consume();
+        });
+        cropCanvas.setOnMouseMoved(e -> updateCropCursor(e.getX(), e.getY()));
+        cropCanvas.setOnMouseEntered(e -> updateCropCursor(e.getX(), e.getY()));
+        cropCanvas.setOnMouseExited(e -> {
+            if (!cropDragging) cropCanvas.setCursor(Cursor.CROSSHAIR);
+        });
+        cropCanvas.setOnContextMenuRequested(e -> e.consume());
         viewport = new StackPane(imageView, placeholder, gameConsoleOverlay,
                 asciiMatrixOverlay, asciiMatrixBlackLabelOverlay, nowLoadingOverlay,
-                hScroll, vScroll);
-        viewport.setStyle("-fx-background-color: black;");
+                cropCanvas, cropControls, hScroll, vScroll);
+        cropCanvas.widthProperty().bind(viewport.widthProperty());
+        cropCanvas.heightProperty().bind(viewport.heightProperty());
+        cropCanvas.widthProperty().addListener((o, a, b) -> drawCropOverlay());
+        cropCanvas.heightProperty().addListener((o, a, b) -> drawCropOverlay());
+        // Default black lives in window-chrome.css's .viewer-viewport rule (the
+        // kotlin design's canvas role is near-black in every theme).
+        viewport.getStyleClass().add("viewer-viewport");
         // The viewport is the viewer's keyboard focus target. The scene key
         // filter drives navigation (siblings, Home/End, Escape…), but a focused
         // toolbar/panel control's own InputMap (e.g. the Metadata table's
@@ -726,6 +854,7 @@ public final class ViewerWindow implements AppShell.ShellView {
             lastImageWidth = w;
             lastImageHeight = h;
             refreshScale(sizeChanged);
+            drawCropOverlay();
         });
         applyScaleMode();
 
@@ -806,7 +935,8 @@ public final class ViewerWindow implements AppShell.ShellView {
         root.setTop(topBox);
         updateRightPanels();
         root.setBottom(new VBox(actionLogPanel, statusBar));
-        root.setStyle("-fx-background-color: black;");
+        // Default black lives in window-chrome.css's .viewer-root rule.
+        root.getStyleClass().add("viewer-root");
 
         // The flat 1:1 pan scrollbars share the mosaic window's styling. On the
         // root (not the shared scene): Parent stylesheets sit above the scene's
@@ -821,6 +951,14 @@ public final class ViewerWindow implements AppShell.ShellView {
             // The Metadata filter owns editing keys, especially Backspace/Delete;
             // none of the viewer's global shortcuts should fire while typing.
             if (e.getTarget() instanceof TextInputControl) return;
+            if (cropEditing) {
+                if (e.getCode() == KeyCode.ESCAPE) cancelCrop();
+                else if (e.getCode() == KeyCode.ENTER) applyCrop();
+                // Navigation and adjustment keys must not replace the image
+                // underneath an active master-space selection.
+                e.consume();
+                return;
+            }
             switch (e.getCode()) {
                 case ESCAPE -> { goBack(); e.consume(); }
                 // Command/Ctrl+W is the conventional "close window" chord and
@@ -924,10 +1062,13 @@ public final class ViewerWindow implements AppShell.ShellView {
                     }
                 }
                 case SLASH -> { toggleScaleMode(); e.consume(); }
+                // modifier1+Shift+C edits the saved crop when one exists, or
+                // opens a fresh non-destructive selection otherwise;
                 // modifier1+C copies the on-screen item's path (right-click ▸
                 // Copy Path); a bare C toggles crop-to-fill.
                 case C -> {
-                    if (e.isShortcutDown()) copyCurrentPath();
+                    if (e.isShortcutDown() && e.isShiftDown()) beginCropShortcut();
+                    else if (e.isShortcutDown()) copyCurrentPath();
                     else cropToggle.setSelected(!cropToggle.isSelected());
                     e.consume();
                 }
@@ -1114,6 +1255,7 @@ public final class ViewerWindow implements AppShell.ShellView {
     public void installMenuBar(MenuBar bar, KeyScheme keys) {
         this.keys = keys;
         this.menuBar = bar;
+        newCropItem.setAccelerator(keys.mod1Shift(KeyCode.C));
         topBox.getChildren().add(0, bar);
         // Runtime hide/show (Show ▸ Menu Bar, mod1+\) + modifier-2 peek; the last
         // arg hoists to the macOS system menu bar while visible (unless the
@@ -1859,6 +2001,10 @@ public final class ViewerWindow implements AppShell.ShellView {
     }
 
     private void loadCurrent() {
+        if (cropEditing) {
+            closeCropOverlay();
+            imageView.setImage(null);
+        }
         resetColorOverridesOnNavigation();
         // Navigating away from a video that played fine is one of the two
         // moments the automatic extension fix may run (the other: clean
@@ -1872,6 +2018,11 @@ public final class ViewerWindow implements AppShell.ShellView {
         enhancedVisible.set(false);
         syncingEnhancedVisibility = false;
         updateSuperResolutionState();
+        applyCropItem.setSelected(true);
+        cropButton.setDisable(true);
+        newCropItem.setDisable(true);
+        editCropItem.setDisable(true);
+        applyCropItem.setDisable(true);
         // Navigation ends a running flipbook (quietly: this load already
         // repaints the viewport, so the teardown must not reload on its own).
         if (flipbookToggle.isSelected()) {
@@ -1942,8 +2093,10 @@ public final class ViewerWindow implements AppShell.ShellView {
                         // still that itself failed to decode.
                         if (player == null) {
                             hideLoadingIndicator();
+                            lastMasterFrame = null;
                             lastUprightFrame = null;
                             updateSuperResolutionState();
+                            updateCropButtonState();
                             imageView.setImage(null);
                             placeholder.setText("Cannot display " + item.fileName()
                                     + "\n" + rootMessage(error));
@@ -1977,7 +2130,8 @@ public final class ViewerWindow implements AppShell.ShellView {
                         // invert) sit on top — and the upright frame is retained
                         // as the bake base so re-bakes need no re-decode (a no-op
                         // when there is no usable sidecar).
-                        lastUprightFrame = RasterFrames.applyAae(visual.get(),
+                        lastMasterFrame = visual.get();
+                        lastUprightFrame = RasterFrames.applyAae(lastMasterFrame,
                                 aaeStore.forImage(item.path()).orElse(null));
                         RasterFrame shown = RasterFrames.apply(lastUprightFrame,
                                 rotationStore.adjustments(item.path()));
@@ -1988,10 +2142,13 @@ public final class ViewerWindow implements AppShell.ShellView {
                                 + shown.width() + " × " + shown.height()
                                 + " — " + item.kind());
                         updateSuperResolutionState();
+                        updateCropButtonState();
                     } else {
                         hideLoadingIndicator();
+                        lastMasterFrame = null;
                         lastUprightFrame = null;
                         updateSuperResolutionState();
+                        updateCropButtonState();
                         imageView.setImage(null);
                         placeholder.setText("♫ " + item.fileName()
                                 + "\n(audio — no visual)");
@@ -2088,6 +2245,11 @@ public final class ViewerWindow implements AppShell.ShellView {
         return new KeyCodeCombination(code, KeyCombination.SHORTCUT_DOWN).getDisplayText();
     }
 
+    private static String shortcutShiftChord(KeyCode code) {
+        return new KeyCodeCombination(code, KeyCombination.SHIFT_DOWN,
+                KeyCombination.SHORTCUT_DOWN).getDisplayText();
+    }
+
     private ContextMenu viewContextMenu() {
         if (viewMenu != null) return viewMenu;
         var copyPath = new MenuItem("Copy Path");
@@ -2115,6 +2277,9 @@ public final class ViewerWindow implements AppShell.ShellView {
         var exportMenu = new Menu("Export", null, zeroMetadata, bakedPng);
         albumMenu = new AlbumMenu(albumStore, settings,
                 () -> currentMoveSelection().sources(), stage(), statusLabel::setText);
+        var crop = new MenuItem("Crop…");
+        if (keys != null) crop.setAccelerator(keys.mod1Shift(KeyCode.C));
+        crop.setOnAction(e -> beginCropShortcut());
         var rotateLeft = new MenuItem("Rotate Left");
         rotateLeft.setAccelerator(new KeyCodeCombination(KeyCode.F6));
         rotateLeft.setOnAction(e -> rotateCurrent(-1));
@@ -2145,7 +2310,8 @@ public final class ViewerWindow implements AppShell.ShellView {
         var superResolution = new Menu("Super Resolution…", null,
                 enhancePhoto, enhanceArtwork, new SeparatorMenuItem(), showEnhanced);
         var adjustMenu = new Menu("Adjust\u2026", null,
-                rotateLeft, rotateRight, new SeparatorMenuItem(),
+                crop, new SeparatorMenuItem(), rotateLeft, rotateRight,
+                new SeparatorMenuItem(),
                 mirrorH, mirrorV, new SeparatorMenuItem(),
                 blackWhite, invert, new SeparatorMenuItem(), superResolution);
 
@@ -2192,6 +2358,341 @@ public final class ViewerWindow implements AppShell.ShellView {
         content.putString(path);
         Clipboard.getSystemClipboard().setContent(content);
         statusLabel.setText("Copied path: " + path);
+    }
+
+    /** Opens a fresh non-destructive crop selection on the untouched master. */
+    public void beginCrop() {
+        beginCrop(false);
+    }
+
+    /** Reopens the current AAE rectangle while retaining the whole master. */
+    private void beginEditCrop() {
+        beginCrop(true);
+    }
+
+    /** Shortcut/context command: preserve and edit a valid saved rectangle. */
+    private void beginCropShortcut() {
+        boolean editExisting = false;
+        if (player == null && lastMasterFrame != null
+                && index >= 0 && index < siblings.size()
+                && siblings.get(index).kind() == MediaKind.IMAGE) {
+            AaeSidecar edit = aaeStore.forImage(siblings.get(index).path()).orElse(null);
+            editExisting = edit != null && edit.crop().isPresent()
+                    && edit.masterWidth() == lastMasterFrame.width()
+                    && edit.masterHeight() == lastMasterFrame.height();
+        }
+        beginCrop(editExisting);
+    }
+
+    private void beginCrop(boolean editExisting) {
+        if (cropEditing || player != null || lastMasterFrame == null) return;
+        if (index < 0 || index >= siblings.size()) return;
+        MediaItem item = siblings.get(index);
+        if (item.kind() != MediaKind.IMAGE) return;
+
+        // Freeze the item beneath the modal-in-place editor. Menu Previous/Next
+        // bind to these same disabled properties, and the key filter below
+        // consumes navigation until Apply or Cancel.
+        slideshowToggle.setSelected(false);
+        prevButton.setDisable(true);
+        nextButton.setDisable(true);
+
+        AaeSidecar existing = aaeStore.forImage(item.path()).orElse(null);
+        cropPreviewFrame = lastMasterFrame;
+        if (existing != null && existing.straightenAngleRadians() != 0
+                && existing.masterWidth() == lastMasterFrame.width()
+                && existing.masterHeight() == lastMasterFrame.height()) {
+            // Crop coordinates live after straighten in the same-size master
+            // canvas, so preview that geometry while leaving user adjustments
+            // (rotation/mirror/colour) above the editor.
+            cropPreviewFrame = RasterFrames.straighten(lastMasterFrame,
+                    existing.straightenAngleRadians());
+        }
+        boolean matchingMaster = existing != null
+                && existing.masterWidth() == lastMasterFrame.width()
+                && existing.masterHeight() == lastMasterFrame.height();
+        cropSelection = editExisting && matchingMaster
+                ? existing.crop().orElse(null) : null;
+        // A photo with no prior crop starts like macOS screen capture: a clean
+        // canvas and crosshair awaiting the first drag, rather than a subtle
+        // full-image rectangle that looks like the command did nothing.
+        applyCropButton.setDisable(cropSelection == null);
+
+        scaleModeBeforeCrop = scaleMode.get();
+        cropEditing = true;
+        cropDragging = false;
+        cropCanvas.setManaged(true);
+        cropCanvas.setVisible(true);
+        cropControls.setManaged(true);
+        cropControls.setVisible(true);
+        scaleMode.set(ScaleMode.FIT);
+        imageView.setImage(FxImages.toImage(cropPreviewFrame));
+        placeholder.setText("");
+        statusLabel.setText(item.fileName() + (editExisting
+                ? " — edit crop on the original; the media file will not be modified"
+                : " — draw a new crop; the media file will not be modified"));
+        drawCropOverlay();
+        cropCanvas.requestFocus();
+    }
+
+    /** Applies the selection by replacing only the AAE Crop adjustment. */
+    private void applyCrop() {
+        if (!cropEditing || cropSelection == null || lastMasterFrame == null) return;
+        if (index < 0 || index >= siblings.size()) return;
+        MediaItem item = siblings.get(index);
+        try {
+            aaeStore.setCrop(item.path(), lastMasterFrame.width(), lastMasterFrame.height(),
+                    cropSelection);
+            AaeSidecar edit = aaeStore.forImage(item.path()).orElseThrow(
+                    () -> new java.io.IOException("The written AAE could not be read back"));
+            applyCropItem.setSelected(true);
+            lastUprightFrame = RasterFrames.applyAae(lastMasterFrame, edit);
+
+            discardEnhancedAfterCropChange();
+
+            closeCropOverlay();
+            updateCropButtonState();
+            rebakeCurrentAdjustments(item);
+            statusLabel.setText(item.fileName() + " — cropped to "
+                    + lastUprightFrame.width() + " × " + lastUprightFrame.height()
+                    + " (original unchanged)");
+            if (host != null) host.mirrorViewerCrop(item.path());
+        } catch (java.io.IOException | RuntimeException e) {
+            statusLabel.setText(item.fileName() + " — crop not saved: " + rootMessage(e));
+        }
+    }
+
+    /** Synchronizes the toolbar drop-down with the currently decoded still. */
+    private void updateCropButtonState() {
+        boolean stillLoaded = player == null && lastMasterFrame != null
+                && index >= 0 && index < siblings.size()
+                && siblings.get(index).kind() == MediaKind.IMAGE;
+        AaeSidecar edit = stillLoaded
+                ? aaeStore.forImage(siblings.get(index).path()).orElse(null) : null;
+        boolean hasCrop = edit != null && edit.crop().isPresent()
+                && edit.masterWidth() == lastMasterFrame.width()
+                && edit.masterHeight() == lastMasterFrame.height();
+        cropButton.setDisable(!stillLoaded);
+        newCropItem.setDisable(!stillLoaded);
+        editCropItem.setDisable(!hasCrop);
+        applyCropItem.setDisable(!hasCrop);
+        if (!hasCrop) applyCropItem.setSelected(true);
+    }
+
+    /** Session-only show-original/show-crop switch; no sidecar write occurs. */
+    private void toggleCropApplied() {
+        if (player != null || lastMasterFrame == null
+                || index < 0 || index >= siblings.size()) return;
+        MediaItem item = siblings.get(index);
+        AaeSidecar edit = aaeStore.forImage(item.path()).orElse(null);
+        if (edit == null || edit.crop().isEmpty()) {
+            applyCropItem.setSelected(true);
+            updateCropButtonState();
+            return;
+        }
+        lastUprightFrame = RasterFrames.applyAae(lastMasterFrame, edit,
+                applyCropItem.isSelected());
+        discardEnhancedAfterCropChange();
+        rebakeCurrentAdjustments(item);
+        statusLabel.setText(item.fileName() + (applyCropItem.isSelected()
+                ? " — AAE crop applied"
+                : " — AAE crop preview off (sidecar unchanged)"));
+    }
+
+    private void discardEnhancedAfterCropChange() {
+        service.cancelSuperResolution();
+        superResolutionBusy = false;
+        enhancedUprightFrame = null;
+        syncingEnhancedVisibility = true;
+        enhancedVisible.set(false);
+        syncingEnhancedVisibility = false;
+        updateSuperResolutionState();
+    }
+
+    /** Cancels editing and restores the pre-editor rendition without a decode. */
+    private void cancelCrop() {
+        if (!cropEditing) return;
+        closeCropOverlay();
+        if (index >= 0 && index < siblings.size() && lastUprightFrame != null) {
+            rebakeCurrentAdjustments(siblings.get(index));
+        }
+    }
+
+    private void closeCropOverlay() {
+        cropEditing = false;
+        cropDragging = false;
+        cropDragHandle = CropEditorGeometry.Handle.NONE;
+        cropDragStart = null;
+        cropPreviewFrame = null;
+        cropSelection = null;
+        cropCanvas.getGraphicsContext2D().clearRect(0, 0,
+                cropCanvas.getWidth(), cropCanvas.getHeight());
+        cropCanvas.setVisible(false);
+        cropCanvas.setManaged(false);
+        cropControls.setVisible(false);
+        cropControls.setManaged(false);
+        boolean single = siblings.size() <= 1;
+        prevButton.setDisable(single);
+        nextButton.setDisable(single);
+        scaleMode.set(scaleModeBeforeCrop);
+        viewport.requestFocus();
+    }
+
+    /** Canvas → master-pixel coordinate, null when the pointer is letterboxed. */
+    private int[] cropPoint(double canvasX, double canvasY) {
+        return cropPoint(canvasX, canvasY, false);
+    }
+
+    /** During a drag, clamp beyond-image motion to the corresponding master edge. */
+    private int[] cropPoint(double canvasX, double canvasY, boolean clampToImage) {
+        CropView view = cropView();
+        if (view == null) return null;
+        if (!clampToImage && (canvasX < view.x() || canvasY < view.y()
+                || canvasX >= view.x() + view.width()
+                || canvasY >= view.y() + view.height())) {
+            return null;
+        }
+        int x = Math.max(0, Math.min(cropPreviewFrame.width() - 1,
+                (int) ((canvasX - view.x()) / view.scale())));
+        int y = Math.max(0, Math.min(cropPreviewFrame.height() - 1,
+                (int) ((canvasY - view.y()) / view.scale())));
+        return new int[] { x, y };
+    }
+
+    private record CropView(double x, double y, double width, double height, double scale) {}
+
+    private static double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private CropView cropView() {
+        if (!cropEditing || cropPreviewFrame == null) return null;
+        double vw = cropCanvas.getWidth();
+        double vh = cropCanvas.getHeight();
+        if (vw <= 0 || vh <= 0) return null;
+        double scale = Math.min(vw / cropPreviewFrame.width(),
+                vh / cropPreviewFrame.height());
+        double width = cropPreviewFrame.width() * scale;
+        double height = cropPreviewFrame.height() * scale;
+        return new CropView((vw - width) / 2, (vh - height) / 2,
+                width, height, scale);
+    }
+
+    private CropEditorGeometry.Handle cropHandleAt(double canvasX, double canvasY) {
+        CropView view = cropView();
+        if (view == null || cropSelection == null) return CropEditorGeometry.Handle.NONE;
+        return CropEditorGeometry.hitTest(cropSelection, view.x(), view.y(), view.scale(),
+                canvasX, canvasY, CROP_HANDLE_HIT_PX);
+    }
+
+    private void updateCropCursor(double canvasX, double canvasY) {
+        if (!cropEditing || cropDragging) return;
+        cropCanvas.setCursor(cropCursor(cropHandleAt(canvasX, canvasY)));
+    }
+
+    private static Cursor cropCursor(CropEditorGeometry.Handle handle) {
+        return switch (handle) {
+            case MOVE -> Cursor.OPEN_HAND;
+            case NORTH, SOUTH -> Cursor.V_RESIZE;
+            case EAST, WEST -> Cursor.H_RESIZE;
+            case NORTH_WEST, SOUTH_EAST -> Cursor.NW_RESIZE;
+            case NORTH_EAST, SOUTH_WEST -> Cursor.NE_RESIZE;
+            case NONE, NEW -> Cursor.CROSSHAIR;
+        };
+    }
+
+    /**
+     * Repaints the macOS-capture-style dimming, high-contrast selection edge,
+     * and live master-pixel dimensions. While dragging, the dimensions follow
+     * the crosshair; once released they settle just outside the selection.
+     */
+    private void drawCropOverlay() {
+        if (!cropEditing) return;
+        CropView view = cropView();
+        if (view == null) return;
+        GraphicsContext g = cropCanvas.getGraphicsContext2D();
+        double cw = cropCanvas.getWidth();
+        double ch = cropCanvas.getHeight();
+        g.clearRect(0, 0, cw, ch);
+        if (cropSelection == null) return;
+        double x = view.x() + cropSelection.x() * view.scale();
+        double y = view.y() + cropSelection.y() * view.scale();
+        double w = cropSelection.width() * view.scale();
+        double h = cropSelection.height() * view.scale();
+        g.setFill(Color.rgb(0, 0, 0, 0.52));
+        g.fillRect(0, 0, cw, ch);
+        g.clearRect(x, y, w, h);
+
+        // A dark under-stroke keeps the capture edge legible over snow-white
+        // photos; the one-pixel white stroke above it matches macOS's crisp
+        // selection treatment without implying draggable resize handles.
+        g.setStroke(Color.rgb(0, 0, 0, 0.72));
+        g.setLineWidth(3);
+        g.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+        g.setStroke(Color.WHITE);
+        g.setLineWidth(1);
+        g.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+
+        drawCropHandles(g, x, y, w, h);
+        drawCropDimensions(g, x, y, w, h, cw, ch);
+    }
+
+    /** Four corners plus four edge midpoints; hit targets are larger than the marks. */
+    private static void drawCropHandles(GraphicsContext g, double x, double y,
+                                        double width, double height) {
+        double[] xs = { x, x + width / 2, x + width };
+        double[] ys = { y, y + height / 2, y + height };
+        for (int ix = 0; ix < xs.length; ix++) {
+            for (int iy = 0; iy < ys.length; iy++) {
+                if (ix == 1 && iy == 1) continue;
+                g.setFill(Color.rgb(0, 0, 0, 0.8));
+                g.fillRect(xs[ix] - 4.5, ys[iy] - 4.5, 9, 9);
+                g.setFill(Color.WHITE);
+                g.fillRect(xs[ix] - 3, ys[iy] - 3, 6, 6);
+            }
+        }
+    }
+
+    private void drawCropDimensions(GraphicsContext g, double x, double y,
+                                    double w, double h, double canvasWidth,
+                                    double canvasHeight) {
+        String dimensions = cropSelection.width() + " × " + cropSelection.height();
+        Font font = Font.font("System", FontWeight.SEMI_BOLD, 13);
+        cropDimensionMeasure.setFont(font);
+        cropDimensionMeasure.setText(dimensions);
+        double badgeWidth = Math.ceil(cropDimensionMeasure.getLayoutBounds().getWidth()) + 18;
+        double badgeHeight = 24;
+        double badgeX;
+        double badgeY;
+
+        if (cropDragging) {
+            // The live badge rides beside the crosshair like Shift-Command-4,
+            // flipping inward as it approaches a window edge.
+            badgeX = cropPointerX + 14;
+            badgeY = cropPointerY + 14;
+            if (badgeX + badgeWidth > canvasWidth - 8) {
+                badgeX = cropPointerX - badgeWidth - 14;
+            }
+            if (badgeY + badgeHeight > canvasHeight - 8) {
+                badgeY = cropPointerY - badgeHeight - 14;
+            }
+        } else {
+            badgeX = x + (w - badgeWidth) / 2;
+            badgeY = y + h + 8;
+            if (badgeY + badgeHeight > canvasHeight - 8) {
+                badgeY = y - badgeHeight - 8;
+            }
+        }
+        badgeX = clamp(badgeX, 8, Math.max(8, canvasWidth - badgeWidth - 8));
+        badgeY = clamp(badgeY, 8, Math.max(8, canvasHeight - badgeHeight - 8));
+
+        g.setFill(Color.rgb(28, 28, 30, 0.92));
+        g.fillRoundRect(badgeX, badgeY, badgeWidth, badgeHeight, 8, 8);
+        g.setFill(Color.WHITE);
+        g.setFont(font);
+        g.fillText(dimensions,
+                badgeX + (badgeWidth - cropDimensionMeasure.getLayoutBounds().getWidth()) / 2,
+                badgeY + 16.5);
     }
 
     /**
@@ -2459,7 +2960,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         grid.add(runNow, 1, 2);
         var hint = new Label("Auto-advance through the current directory at the chosen "
                 + "interval. Changes apply live and are remembered.");
-        hint.setStyle("-fx-text-fill: gray;");
+        hint.getStyleClass().add("settings-hint");
         hint.setWrapText(true);
         hint.setMaxWidth(360);
         grid.add(hint, 0, 3, 2, 1);
@@ -2468,6 +2969,14 @@ public final class ViewerWindow implements AppShell.ShellView {
         dialog.setTitle("Slideshow");
         dialog.initOwner(stage());
         dialog.getDialogPane().setContent(grid);
+        // This dialog is not registered with ThemeManager (it has always
+        // rendered as plain Modena regardless of the active theme); add
+        // window-chrome.css directly so its literal-value classes (e.g.
+        // .settings-hint) still resolve without pulling in any theme overlay.
+        var slideshowCss = ViewerWindow.class.getResource("window-chrome.css");
+        if (slideshowCss != null) {
+            dialog.getDialogPane().getStylesheets().add(slideshowCss.toExternalForm());
+        }
         dialog.getDialogPane().getButtonTypes().add(
                 new ButtonType("Close", ButtonBar.ButtonData.OK_DONE));
         dialog.showAndWait();
@@ -2568,9 +3077,11 @@ public final class ViewerWindow implements AppShell.ShellView {
                 PixelFormat.getByteBgraPreInstance());
         service.cancelSuperResolution();
         superResolutionBusy = false;
+        lastMasterFrame = null;
         lastUprightFrame = null;
         enhancedUprightFrame = null;
         updateSuperResolutionState();
+        updateCropButtonState();
         playButton.setDisable(true);
         hideLoadingIndicator();
         placeholder.setText("");
@@ -2719,7 +3230,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                 + "video. Every frame is decoded once into a memory buffer before "
                 + "playback starts, so replay never touches the decoders. Changes "
                 + "apply live; frame rate and loop mode are remembered.");
-        hint.setStyle("-fx-text-fill: gray;");
+        hint.getStyleClass().add("settings-hint");
         hint.setWrapText(true);
         hint.setMaxWidth(360);
         grid.add(hint, 0, 4, 2, 1);
@@ -2728,6 +3239,12 @@ public final class ViewerWindow implements AppShell.ShellView {
         dialog.setTitle("Flipbook");
         dialog.initOwner(stage());
         dialog.getDialogPane().setContent(grid);
+        // See showSlideshowDialog(): not ThemeManager-registered, so add
+        // window-chrome.css directly for its literal-value classes.
+        var flipbookCss = ViewerWindow.class.getResource("window-chrome.css");
+        if (flipbookCss != null) {
+            dialog.getDialogPane().getStylesheets().add(flipbookCss.toExternalForm());
+        }
         dialog.getDialogPane().getButtonTypes().add(
                 new ButtonType("Close", ButtonBar.ButtonData.OK_DONE));
         dialog.showAndWait();
@@ -2969,6 +3486,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                     }
                     player = prepared;
                     updateSuperResolutionState();
+                    updateCropButtonState();
                     player.play();
                 }));
     }
@@ -2997,6 +3515,7 @@ public final class ViewerWindow implements AppShell.ShellView {
             player.close();
             player = null;
             updateSuperResolutionState();
+            updateCropButtonState();
         }
         startPlayback(item);
     }
@@ -3043,11 +3562,13 @@ public final class ViewerWindow implements AppShell.ShellView {
         presenterLabel.setText("");
         if (player == null) {
             updateSuperResolutionState();
+            updateCropButtonState();
             return;
         }
         player.close();
         player = null;
         updateSuperResolutionState();
+        updateCropButtonState();
         if (fixExtension && proven && played != null) {
             maybeFixExtension(played);
         }

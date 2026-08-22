@@ -3,3 +3,29 @@
  * scrollbar.css (imported here so both windows stay identical).
  */
 @import "scrollbar.css";
+
+/*
+ * The grid's own black surface — same role as the Viewer's .viewer-root /
+ * .viewer-viewport (window-chrome.css): the media canvas stays near-black in
+ * every theme by design (see the kotlin-mosaic port's Palette.canvas), so
+ * these are plain literals rather than theme palette rules. Scoped to this
+ * Mosaic-local sheet (a Parent stylesheet on .mosaic-root, so it already
+ * outranks the scene-level theme overlay) rather than window-chrome.css,
+ * since both classes only ever apply inside this window.
+ */
+.mosaic-root {
+    -fx-background-color: black;
+}
+
+.mosaic-canvas-holder {
+    -fx-background-color: black;
+}
+
+/* The centred "Loading…" pill shown over the grid while thumbnails decode. */
+.mosaic-loading-pill {
+    -fx-text-fill: #dddddd;
+    -fx-background-color: rgba(0, 0, 0, 0.55);
+    -fx-background-radius: 6;
+    -fx-padding: 8 16 8 16;
+    -fx-font-size: 14px;
+}

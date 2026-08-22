@@ -3,19 +3,27 @@ package io.github.ghosthack.mediabrowser.media;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.zip.DataFormatException;
+import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
 
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -163,11 +171,11 @@ public final class AaeSidecar {
     public static Optional<AaeSidecar> read(Path aaeFile) {
         try {
             byte[] xml = Files.readAllBytes(aaeFile);
-            byte[] adjustmentData = extractAdjustmentData(xml);
-            if (adjustmentData == null) {
+            PlistData plist = parsePlistData(xml);
+            if (plist == null) {
                 return Optional.empty();
             }
-            String json = inflateRawDeflate(adjustmentData);
+            String json = inflateRawDeflate(plist.adjustmentData());
             if (json == null || json.isBlank() || json.charAt(0) != '{') {
                 return Optional.empty(); // legacy binary-plist payload, or not JSON
             }
@@ -175,6 +183,113 @@ public final class AaeSidecar {
         } catch (IOException | RuntimeException e) {
             return Optional.empty();
         }
+    }
+
+    /**
+     * Creates or updates {@code aaeFile} with an axis-aligned crop in the
+     * upright master's pixel space. Only the sidecar is written: the image file
+     * is never opened for writing. An existing modern AAE keeps its other JSON
+     * adjustments and plist fields; an unreadable or legacy AAE is rejected so
+     * unknown edit data is never destroyed.
+     *
+     * <p>The replacement is written to a sibling temporary file and renamed
+     * over the sidecar atomically where the filesystem supports it.</p>
+     *
+     * @throws IOException if the sidecar cannot be safely read or written
+     */
+    @SuppressWarnings("unchecked")
+    public static void writeCrop(Path aaeFile, int masterWidth, int masterHeight,
+                                 Crop crop) throws IOException {
+        if (aaeFile == null || masterWidth <= 0 || masterHeight <= 0 || crop == null) {
+            throw new IllegalArgumentException("crop and positive master dimensions are required");
+        }
+        int x = Math.max(0, crop.x());
+        int y = Math.max(0, crop.y());
+        int right = Math.min(masterWidth, (int) Math.min(Integer.MAX_VALUE,
+                (long) crop.x() + crop.width()));
+        int bottom = Math.min(masterHeight, (int) Math.min(Integer.MAX_VALUE,
+                (long) crop.y() + crop.height()));
+        if (right <= x || bottom <= y) {
+            throw new IllegalArgumentException("crop does not intersect the master");
+        }
+        Crop bounded = new Crop(x, y, right - x, bottom - y);
+
+        Document existingDocument = null;
+        Map<String, Object> root;
+        if (Files.exists(aaeFile)) {
+            byte[] xml = Files.readAllBytes(aaeFile);
+            PlistData plist = parsePlistData(xml);
+            String json = plist == null ? null : inflateRawDeflate(plist.adjustmentData());
+            Object parsed;
+            try {
+                parsed = json == null ? null : AaeJson.parse(json);
+            } catch (RuntimeException e) {
+                throw new IOException("Refusing to replace an unreadable AAE sidecar: "
+                        + aaeFile, e);
+            }
+            if (!(parsed instanceof Map<?, ?> map)) {
+                throw new IOException("Refusing to replace an unsupported AAE sidecar: "
+                        + aaeFile);
+            }
+            root = (Map<String, Object>) map;
+            existingDocument = plist.document();
+        } else {
+            root = new LinkedHashMap<>();
+        }
+
+        Map<String, Object> metadata;
+        Object metadataValue = root.get("metadata");
+        if (metadataValue instanceof Map<?, ?> map) {
+            metadata = (Map<String, Object>) map;
+        } else {
+            metadata = new LinkedHashMap<>();
+            root.put("metadata", metadata);
+        }
+        metadata.put("masterWidth", masterWidth);
+        metadata.put("masterHeight", masterHeight);
+        metadata.putIfAbsent("orientation", 1);
+
+        List<Object> adjustments;
+        Object adjustmentsValue = root.get("adjustments");
+        if (adjustmentsValue instanceof List<?> list) {
+            adjustments = (List<Object>) list;
+        } else {
+            adjustments = new ArrayList<>();
+            root.put("adjustments", adjustments);
+        }
+        Map<String, Object> cropAdjustment = null;
+        for (Object value : adjustments) {
+            if (value instanceof Map<?, ?> map && "Crop".equals(map.get("identifier"))) {
+                cropAdjustment = (Map<String, Object>) map;
+            }
+        }
+        if (cropAdjustment == null) {
+            cropAdjustment = new LinkedHashMap<>();
+            cropAdjustment.put("identifier", "Crop");
+            adjustments.add(cropAdjustment);
+        }
+        cropAdjustment.put("enabled", true);
+        Map<String, Object> settings;
+        Object settingsValue = cropAdjustment.get("settings");
+        if (settingsValue instanceof Map<?, ?> map) {
+            settings = (Map<String, Object>) map;
+        } else {
+            settings = new LinkedHashMap<>();
+            cropAdjustment.put("settings", settings);
+        }
+        settings.put("xOrigin", bounded.x());
+        settings.put("yOrigin", bounded.y());
+        settings.put("width", bounded.width());
+        settings.put("height", bounded.height());
+        settings.putIfAbsent("straightenAngle", 0);
+        settings.putIfAbsent("pitch", 0);
+        settings.putIfAbsent("yaw", 0);
+
+        byte[] compressed = deflateRaw(AaeJson.stringify(root));
+        byte[] output = existingDocument == null
+                ? newPlist(compressed)
+                : updatePlist(existingDocument, compressed);
+        writeAtomically(aaeFile, output);
     }
 
     // --- plist (XML) → adjustmentData bytes ----------------------------------
@@ -185,7 +300,9 @@ public final class AaeSidecar {
      * the {@code DOCTYPE}'s apple.com URL is never fetched and the parser is not
      * an XXE vector.
      */
-    private static byte[] extractAdjustmentData(byte[] xml) {
+    private record PlistData(Document document, byte[] adjustmentData) {}
+
+    private static PlistData parsePlistData(byte[] xml) {
         try {
             DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
             f.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
@@ -216,7 +333,7 @@ public final class AaeSidecar {
                     return null;
                 }
                 String b64 = data.getTextContent().replaceAll("\\s+", "");
-                return Base64.getDecoder().decode(b64);
+                return new PlistData(doc, Base64.getDecoder().decode(b64));
             }
             return null;
         } catch (Exception e) {
@@ -270,6 +387,104 @@ public final class AaeSidecar {
             return null;
         } finally {
             inflater.end();
+        }
+    }
+
+    private static byte[] deflateRaw(String json) {
+        Deflater deflater = new Deflater(Deflater.DEFAULT_COMPRESSION, true);
+        try {
+            deflater.setInput(json.getBytes(StandardCharsets.UTF_8));
+            deflater.finish();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            while (!deflater.finished()) {
+                out.write(buf, 0, deflater.deflate(buf));
+            }
+            return out.toByteArray();
+        } finally {
+            deflater.end();
+        }
+    }
+
+    private static byte[] newPlist(byte[] adjustmentData) {
+        String b64 = Base64.getEncoder().encodeToString(adjustmentData);
+        return ("""
+                <?xml version="1.0" encoding="UTF-8"?>
+                <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+                <plist version="1.0">
+                <dict>
+                \t<key>adjustmentBaseVersion</key>
+                \t<integer>0</integer>
+                \t<key>adjustmentData</key>
+                \t<data>%s</data>
+                \t<key>adjustmentFormatIdentifier</key>
+                \t<string>com.apple.photo</string>
+                \t<key>adjustmentFormatVersion</key>
+                \t<string>1.11</string>
+                </dict>
+                </plist>
+                """).formatted(b64).getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[] updatePlist(Document document, byte[] adjustmentData)
+            throws IOException {
+        Element dict = firstElement(document.getDocumentElement(), "dict");
+        Element data = null;
+        if (dict != null) {
+            NodeList kids = dict.getChildNodes();
+            for (int n = 0; n < kids.getLength(); n++) {
+                Node node = kids.item(n);
+                if (node.getNodeType() == Node.ELEMENT_NODE && "key".equals(node.getNodeName())
+                        && "adjustmentData".equals(node.getTextContent().trim())) {
+                    data = nextElement(node);
+                    break;
+                }
+            }
+        }
+        if (data == null || !"data".equals(data.getNodeName())) {
+            throw new IOException("AAE plist has no writable adjustmentData field");
+        }
+        data.setTextContent(Base64.getEncoder().encodeToString(adjustmentData));
+        try {
+            TransformerFactory factory = TransformerFactory.newInstance();
+            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            var transformer = factory.newTransformer();
+            transformer.setOutputProperty(OutputKeys.ENCODING, StandardCharsets.UTF_8.name());
+            transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no");
+            if (document.getDoctype() != null) {
+                String publicId = document.getDoctype().getPublicId();
+                String systemId = document.getDoctype().getSystemId();
+                if (publicId != null) transformer.setOutputProperty(OutputKeys.DOCTYPE_PUBLIC, publicId);
+                if (systemId != null) transformer.setOutputProperty(OutputKeys.DOCTYPE_SYSTEM, systemId);
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            transformer.transform(new DOMSource(document), new StreamResult(out));
+            return out.toByteArray();
+        } catch (Exception e) {
+            throw new IOException("Could not serialize AAE sidecar", e);
+        }
+    }
+
+    private static void writeAtomically(Path target, byte[] bytes) throws IOException {
+        Path absolute = target.toAbsolutePath().normalize();
+        Path directory = absolute.getParent();
+        if (directory == null) {
+            throw new IOException("AAE sidecar has no parent directory: " + target);
+        }
+        Files.createDirectories(directory);
+        String prefix = absolute.getFileName().toString();
+        if (prefix.length() < 3) prefix = "aae" + prefix;
+        Path temp = Files.createTempFile(directory, prefix + ".", ".tmp");
+        try {
+            Files.write(temp, bytes);
+            try {
+                Files.move(temp, absolute, StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temp, absolute, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temp);
         }
     }
 

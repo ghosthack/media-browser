@@ -22,6 +22,7 @@ public final class MosaicTileSets {
     public static final MosaicTileSet DARKROOM = new DarkroomMosaicTileSet();
     public static final MosaicTileSet FACTORY = new FactoryMosaicTileSet();
     public static final MosaicTileSet BLACKLINE = new BlacklineMosaicTileSet();
+    public static final MosaicTileSet COMPOSE = new ComposeMosaicTileSet();
 
     private static final List<MosaicTileSet> SETS = discover();
 
@@ -39,7 +40,7 @@ public final class MosaicTileSets {
                 if (set.id().trim().toLowerCase(Locale.ROOT).equals(wanted)) return set;
             }
         }
-        return XEDGE_XS;
+        return COMPOSE;
     }
 
     private static List<MosaicTileSet> discover() {
@@ -55,6 +56,7 @@ public final class MosaicTileSets {
         add(byId, DARKROOM);
         add(byId, FACTORY);
         add(byId, BLACKLINE);
+        add(byId, COMPOSE);
         try {
             for (MosaicTileSet set : ServiceLoader.load(MosaicTileSet.class)) {
                 add(byId, set);

@@ -16,7 +16,24 @@ public enum AppIcon {
     PLAY("▶"),
     PAUSE("❚❚"),
     PIN("📌"),
-    MORE("...");
+    MORE("..."),
+    REFRESH("⟳"),
+    CROP("▣"),
+    SEAMLESS("▩"),
+    LABELS("🏷"),
+    FILTER("▽"),
+    SORT("⇵"),
+    SETTINGS("⚙"),
+    INFO("ℹ"),
+    METADATA("▤"),
+    DIAGNOSTICS("📊"),
+    ACTION_LOG("📜"),
+    NAV_TREE("▥"),
+    ADDRESS_BAR("▭"),
+    STATUS_BAR("⬓"),
+    FOCUS_MODE("◉"),
+    GRID("▦"),
+    SCREENSAVER("🌙");
 
     private final String originalGlyph;
 

@@ -4,11 +4,13 @@ import io.github.ghosthack.mediabrowser.AppSettings;
 import io.github.ghosthack.mediabrowser.IconPack;
 import io.github.ghosthack.mediabrowser.LoadingIndicator;
 import io.github.ghosthack.mediabrowser.MosaicFolderGlyph;
+import io.github.ghosthack.mediabrowser.MosaicReticuleScope;
 import io.github.ghosthack.mediabrowser.MosaicSelectionAnimation;
 import io.github.ghosthack.mediabrowser.album.Album;
 import io.github.ghosthack.mediabrowser.album.AlbumStore;
 import io.github.ghosthack.mediabrowser.StartupLayout;
 import io.github.ghosthack.mediabrowser.Theme;
+import io.github.ghosthack.mediabrowser.UiStyle;
 import io.github.ghosthack.mediabrowser.WindowDecorations;
 import io.github.ghosthack.mediabrowser.WindowMode;
 import io.github.ghosthack.mediabrowser.media.AaeStore;
@@ -283,6 +285,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         // Cmd+Left / Cmd+Right in the mosaic step the shared history.
         mosaic.setHistoryHandlers(this::goBack, this::goForward);
+        // The compose toolbar's Settings gear opens the same dialog Cmd+, does.
+        mosaic.setSettingsHandler(this::showSettings);
 
         // The Move dialog (Cmd+M): a window-agnostic controller driven by a host
         // that exposes this window's selection, current dir, post-move focus and
@@ -356,9 +360,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 e.consume();
             }
         });
-        var treeTitle = new Label("Folders");
-        treeTitle.setStyle("-fx-font-weight: bold; -fx-padding: 6 8 6 8;");
-        treePanel = new VBox(treeTitle, tree);
+        treePanel = new VBox(SidePanelHeader.create("Folders"), tree);
         VBox.setVgrow(tree, Priority.ALWAYS);
         treePanel.setPrefWidth(240);
         treePanel.setMinWidth(140);
@@ -516,24 +518,84 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // --- address bar -----------------------------------------------------
         addressField.setOnAction(e -> navigateFromAddress());
         HBox.setHgrow(addressField, Priority.ALWAYS);
-        var goButton = new Button("Go");
-        goButton.setOnAction(e -> navigateFromAddress());
         var drivesButton = new DriveMenuButton(root -> {
             navigateAndSync(root);
             listView.requestFocus();
         });
-        addressBar = new HBox(6, new Label("Location:"), drivesButton, addressField, goButton);
-        addressBar.setPadding(new Insets(4, 8, 4, 8));
+        var addressLabel = new Label("Location");
+        // Mirrors the mosaic's location bar exactly: the shared .tool-bar class
+        // supplies the strip inset and both labels add the same internal left
+        // padding, so the strip keeps one look (and one height) when the
+        // single-window shell switches views. .location-bar carries the themes'
+        // flat treatment for the bar's direct-child buttons, which a plain HBox
+        // misses (.tool-bar button rules target ToolBar's .container).
+        addressLabel.setPadding(new Insets(0, 0, 0, 10));
+        addressBar = new HBox(6, addressLabel, drivesButton, addressField);
+        addressBar.getStyleClass().addAll("tool-bar", "location-bar");
         addressBar.setStyle("-fx-alignment: center-left;");
+        ToolBars.applyControlBaseline(addressBar);
 
         // --- view toggles (toolbar buttons + menu items, kept in sync) -------
-        var addressToggle = panelToggle("Address Bar", addressVisibleProp);
-        var treeToggle = panelToggle("Nav Tree", treeVisibleProp);
-        var infoToggle = panelToggle("Info Panel", infoVisibleProp);
-        var metadataToggle = panelToggle("Metadata", metadataVisibleProp);
-        var diagnosticsToggle = panelToggle("Diagnostics", diagnosticsVisibleProp);
-        var statusToggle = panelToggle("Status Bar", statusVisibleProp);
-        var actionLogToggle = panelToggle("Action Log", actionLogVisibleProp);
+        boolean composeToolbar = settings.uiStyle() == UiStyle.COMPOSE;
+        var upButton = new Button("Up");
+        upButton.setTooltip(new Tooltip("Enclosing Folder"));
+        if (composeToolbar) {
+            ToolBars.iconify(upButton, AppIcon.UP, "Enclosing Folder");
+        }
+        upButton.setOnAction(e -> navigateToParent());
+        var refreshButton = new Button("Refresh");
+        refreshButton.setTooltip(new Tooltip("Reload Folder"));
+        if (composeToolbar) {
+            ToolBars.iconify(refreshButton, AppIcon.REFRESH, "Reload Folder");
+        }
+        refreshButton.setOnAction(e -> reloadLocation());
+
+        // Keep the Browser's primary listing controls in the same place as the
+        // Compose Mosaic toolbar: immediately after Up / Refresh. These bind to
+        // the same properties as Show and Sort in the menu bar, so neither
+        // surface maintains a second copy of the listing state.
+        var filterButton = new MenuButton("Filter");
+        filterButton.setTooltip(new Tooltip("Filter listed items"));
+        filterButton.getItems().addAll(
+                boundCheck("Viewable Media", showViewableProp),
+                boundCheck("Non-viewable Files", showNonViewableProp),
+                boundCheck("Folders", showDirsProp),
+                new SeparatorMenuItem(),
+                boundCheck("Hidden Files", showHiddenFilesProp),
+                inverseBoundCheck("System Files", ignoreJunkProp),
+                inverseBoundCheck("Empty Files", hideEmptyFilesProp),
+                inverseBoundCheck("Empty Folders", hideEmptyFoldersProp),
+                boundCheck("Collapse Folder Chains", collapseChainsProp));
+        if (composeToolbar) {
+            ToolBars.iconify(filterButton, AppIcon.FILTER, "Filter listed items");
+        }
+
+        var sortButton = new MenuButton("Sort");
+        sortButton.setTooltip(new Tooltip("Sort and order items"));
+        var toolbarSortKeyGroup = new ToggleGroup();
+        var toolbarSortDirectionGroup = new ToggleGroup();
+        sortButton.getItems().addAll(
+                objRadio("By Name", SortKey.NAME, sortKeyProp, toolbarSortKeyGroup),
+                objRadio("By Extension", SortKey.EXTENSION,
+                        sortKeyProp, toolbarSortKeyGroup),
+                objRadio("By Size", SortKey.SIZE, sortKeyProp, toolbarSortKeyGroup),
+                objRadio("By Date", SortKey.DATE, sortKeyProp, toolbarSortKeyGroup),
+                new SeparatorMenuItem(),
+                boolRadio("Ascending", false,
+                        sortDescendingProp, toolbarSortDirectionGroup),
+                boolRadio("Descending", true,
+                        sortDescendingProp, toolbarSortDirectionGroup));
+        if (composeToolbar) {
+            ToolBars.iconify(sortButton, AppIcon.SORT, "Sort and order items");
+        }
+
+        var addressToggle = panelToggle(
+                "Address Bar", AppIcon.ADDRESS_BAR, addressVisibleProp, composeToolbar);
+        var treeToggle = panelToggle(
+                "Nav Tree", AppIcon.NAV_TREE, treeVisibleProp, composeToolbar);
+        var panelToggles = ToolBars.panelToggles(composeToolbar,
+                infoVisibleProp, metadataVisibleProp, diagnosticsVisibleProp,
+                statusVisibleProp, actionLogVisibleProp);
 
         // Panel-visibility side-effects, fired by the shared props that these
         // toolbar toggles and the View-menu check items all bind to. The Info,
@@ -561,18 +623,25 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         });
 
         var keepFocusToggle = new ToggleButton("Keep Focus");
-        keepFocusToggle.setTooltip(new Tooltip(shell.singleWindow()
+        String keepFocusTooltip = shell.singleWindow()
                 ? "Inert in the single-window mode: opening media always "
                         + "switches to the viewer (see Settings ▸ Window mode)"
                 : "Keep this window focused when opening media, so browsing "
-                        + "continues while the viewer sits on another screen"));
+                        + "continues while the viewer sits on another screen";
+        keepFocusToggle.setTooltip(new Tooltip(keepFocusTooltip));
+        if (composeToolbar) {
+            ToolBars.iconify(keepFocusToggle, AppIcon.FOCUS_MODE, keepFocusTooltip);
+        }
         keepFocusToggle.selectedProperty().bindBidirectional(keepFocusProp);
 
-        this.toolBar = new ToolBar(addressToggle, treeToggle, infoToggle,
-                metadataToggle, diagnosticsToggle, statusToggle, actionLogToggle,
+        this.toolBar = new ToolBar(upButton, refreshButton, filterButton, sortButton,
+                new Separator());
+        toolBar.getItems().addAll(panelToggles);
+        toolBar.getItems().addAll(new Separator(), addressToggle, treeToggle,
                 new Separator(), keepFocusToggle);
-        // Hidden by default; View ▸ Toolbar (and the other bars' copies) toggle it.
-        // When undecorated, the in-window menu bar still serves as a drag handle.
+        ToolBars.applyControlBaseline(toolBar);
+        // View ▸ Toolbar (and the other bars' copies) toggle it. When undecorated,
+        // the in-window menu bar still serves as a drag handle.
         toolBar.visibleProperty().bind(toolbarVisibleProp);
         toolBar.managedProperty().bind(toolbarVisibleProp);
 
@@ -831,9 +900,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * View-menu check item (in both menu bars) binds to the same property, so
      * toolbar and menus stay in sync.
      */
-    private static ToggleButton panelToggle(String text, BooleanProperty prop) {
+    private static ToggleButton panelToggle(
+            String text, AppIcon icon, BooleanProperty prop, boolean iconFirst) {
         var button = new ToggleButton(text);
         button.setTooltip(new Tooltip("Show/hide the " + text.toLowerCase()));
+        if (iconFirst) ToolBars.iconify(button, icon, text);
         button.selectedProperty().bindBidirectional(prop);
         return button;
     }
@@ -1789,6 +1860,14 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 objRadio(MosaicSelectionAnimation.MARCHING_ANTS.label(),
                         MosaicSelectionAnimation.MARCHING_ANTS,
                         mosaic.selectionAnimationProperty(), animGroup));
+        var reticuleScopeGroup = new ToggleGroup();
+        var reticuleCoverage = new Menu("Reticule _Coverage", null,
+                objRadio("Entire _Tile", MosaicReticuleScope.TILE,
+                        mosaic.reticuleScopeProperty(), reticuleScopeGroup),
+                objRadio("_Icon Glyph Only", MosaicReticuleScope.GLYPH,
+                        mosaic.reticuleScopeProperty(), reticuleScopeGroup),
+                objRadio("Icon Glyph Only — _Black", MosaicReticuleScope.GLYPH_BLACK,
+                        mosaic.reticuleScopeProperty(), reticuleScopeGroup));
         var menu = new Menu("_Mosaic", null,
                 action("Open _Selected", null, mosaic::openSelectedItem),
                 new SeparatorMenuItem(),
@@ -1810,6 +1889,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 new SeparatorMenuItem(),
                 boundCheck("Mark _Dead Ends", mosaic.emptyReticuleProperty()),
                 boundCheck("Mark Files That _Won't Open", mosaic.wontOpenReticuleProperty()),
+                reticuleCoverage,
                 boundCheck("Check Whole Su_btree", mosaic.barrenCheckProperty()),
                 new SeparatorMenuItem(),
                 autoOpen,
@@ -1866,6 +1946,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 objRadio("_Fit", ViewerWindow.ScaleMode.FIT, scaleProp, scaleGroup),
                 objRadio("_1:1", ViewerWindow.ScaleMode.ONE_TO_ONE, scaleProp, scaleGroup),
                 objRadio("_Crop to Fill", ViewerWindow.ScaleMode.CROP_TO_FILL, scaleProp, scaleGroup),
+                new SeparatorMenuItem(),
+                action("_Crop…", keys.mod1Shift(KeyCode.C), viewer::beginCrop),
                 new SeparatorMenuItem(),
                 enhanceMenu,
                 new SeparatorMenuItem(),
@@ -2043,6 +2125,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     private void reloadLocation() {
         if (currentAlbum != null) navigateToAlbum(currentAlbum);
+        else if (atComputerLocation) navigateToComputer();
         else if (currentDir != null) navigate(currentDir);
     }
 
@@ -2244,6 +2327,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         } finally {
             mirroringSelection = false;
         }
+    }
+
+    /** A crop saved from the Browser-hosted viewer also replaces Mosaic's cache. */
+    @Override
+    public void mirrorViewerCrop(Path path) {
+        mosaic.mirrorViewerCrop(path);
     }
 
     /**
@@ -2675,6 +2764,131 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         };
     }
 
+    // --- Compose-style Settings dialog: row/group/rail primitives --------------
+    //
+    // Transcribes the shape of kotlin-mosaic's SettingsDialog.kt (Group /
+    // SettingRow / SettingsRail there) onto this dialog's existing controls.
+    // These are purely presentational: they reparent the same ComboBox /
+    // CheckBox / Spinner instances showSettings() already builds for
+    // UiStyle.CLASSIC's TabPane, so Save-time reads (control.getValue() /
+    // isSelected()) are unaffected by which style built the dialog. JavaFX
+    // reparents a Node automatically (removing it from its previous parent),
+    // which is exactly why the Compose assembly in showSettings() is built
+    // ONLY when that style is active: whichever assembly is built last strips
+    // the other's rows bare.
+
+    /**
+     * One Compose-style settings row: {@code label} (and optional wrapping
+     * {@code hint}) on the left, growing to fill; {@code control} right-aligned
+     * in a fixed 230px column, so every control on a page begins at the same x
+     * (kotlin's {@code DROPDOWN_WIDTH} column — what makes the form read as
+     * one thing). The label dims when {@code control} is disabled, mirroring
+     * the CLASSIC dialog's existing disable bindings.
+     */
+    static HBox composeRow(String label, String hint, Node control) {
+        var labelNode = new Label(label);
+        labelNode.setWrapText(true);
+        var labelBox = new VBox(2, labelNode);
+        if (hint != null) {
+            var hintLabel = new Label(hint);
+            hintLabel.getStyleClass().add("settings-hint");
+            hintLabel.setWrapText(true);
+            labelBox.getChildren().add(hintLabel);
+        }
+        HBox.setHgrow(labelBox, Priority.ALWAYS);
+        labelNode.opacityProperty().bind(
+                Bindings.when(control.disableProperty()).then(0.55).otherwise(1.0));
+
+        var controlBox = new HBox(control);
+        controlBox.getStyleClass().add("settings-row-control");
+        controlBox.setAlignment(Pos.CENTER_RIGHT);
+        controlBox.setMinWidth(230);
+        controlBox.setPrefWidth(230);
+        controlBox.setMaxWidth(230);
+
+        var row = new HBox(16, labelBox, controlBox);
+        row.getStyleClass().add("settings-row");
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.setMinHeight(38);
+        row.setPadding(new Insets(4, 0, 4, 0));
+        return row;
+    }
+
+    static HBox composeRow(String label, Node control) {
+        return composeRow(label, null, control);
+    }
+
+    /**
+     * A row built from an existing labelled {@link CheckBox}: the checkbox's
+     * own text becomes the row label (kotlin's {@code Checkbox(null, ...)} — an
+     * unlabelled control, with the label carried by {@code SettingRow}
+     * instead), and the checkbox itself — now textless — sits in the control
+     * column. Mutates {@code box}'s text, so only call this for the instance
+     * that is actually being displayed; UiStyle.COMPOSE never shows the
+     * CLASSIC tab that also parents {@code box}, so this is safe.
+     */
+    static HBox composeCheckRow(CheckBox box, String hint) {
+        String text = box.getText();
+        box.setText("");
+        return composeRow(text, hint, box);
+    }
+
+    static HBox composeCheckRow(CheckBox box) {
+        return composeCheckRow(box, null);
+    }
+
+    /**
+     * A titled group of rows: 13px semibold title, a 6px gap, a hairline
+     * divider, another 6px gap, then the rows — kotlin's {@code Group}.
+     */
+    static VBox composeGroup(String title, Node... rows) {
+        var titleLabel = new Label(title);
+        titleLabel.getStyleClass().add("settings-group-title");
+        var divider = new Region();
+        divider.getStyleClass().add("settings-group-divider");
+        divider.setMinHeight(1);
+        divider.setPrefHeight(1);
+        divider.setMaxHeight(1);
+        divider.setMaxWidth(Double.MAX_VALUE);
+
+        var rowsBox = new VBox(0, rows);
+
+        var group = new VBox(6, titleLabel, divider, rowsBox);
+        group.setPadding(new Insets(0, 0, 24, 0));
+        return group;
+    }
+
+    /** A page-rail item: a full-width toggle; selected/hover state is CSS-driven. */
+    static ToggleButton composeRailItem(String label, ToggleGroup group) {
+        var button = new ToggleButton(label);
+        button.getStyleClass().add("settings-rail-item");
+        button.setToggleGroup(group);
+        button.setMaxWidth(Double.MAX_VALUE);
+        button.setAlignment(Pos.CENTER_LEFT);
+        return button;
+    }
+
+    /**
+     * Wires a settings rail's {@link ToggleGroup} to swap {@code target}'s
+     * content by selection, selecting {@code initial} first. Also guards
+     * against every rail item going unselected — a {@link ToggleButton} in a
+     * {@link ToggleGroup} can otherwise deselect itself on a second click —
+     * by re-selecting the page that was already showing rather than leaving
+     * the pane blank.
+     */
+    static void wireSettingsRail(ToggleGroup group, ToggleButton initial,
+            ScrollPane target, Map<ToggleButton, Node> pages) {
+        group.selectedToggleProperty().addListener((obs, oldToggle, newToggle) -> {
+            if (newToggle == null) {
+                if (oldToggle != null) oldToggle.setSelected(true);
+                return;
+            }
+            target.setContent(pages.get(newToggle));
+        });
+        initial.setSelected(true);
+        target.setContent(pages.get(initial));
+    }
+
     private void showSettings() {
         // --- General tab: cross-window application settings --------------------
         var backendCombo = new ComboBox<MediaBackend>();
@@ -2720,6 +2934,23 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var decodeRow = new HBox(8, new Label("Video playback decode:"), decodeCombo);
         decodeRow.setAlignment(Pos.CENTER_LEFT);
 
+        // UI style preset (above Theme: it applies over Theme, Icon pack and
+        // Mosaic tile set, see the listener wired below once tileSetCombo
+        // exists). Its own value is read once at startup for the mosaic
+        // toolbar variant; setting it here only takes effect on Save.
+        var uiStyleCombo = new ComboBox<UiStyle>();
+        uiStyleCombo.getItems().setAll(UiStyle.values());
+        uiStyleCombo.setValue(settings.uiStyle());
+        uiStyleCombo.setAccessibleText("UI style");
+        var uiStyleRow = new HBox(8, new Label("UI style:"), uiStyleCombo);
+        uiStyleRow.setAlignment(Pos.CENTER_LEFT);
+        var uiStyleHint = new Label("Compose uses icon-first Browser and Mosaic toolbars; Classic "
+                + "keeps their text-labelled versions. Theme, icon pack and tile set are chosen "
+                + "independently below. Takes effect on the next start.");
+        uiStyleHint.getStyleClass().add("settings-hint");
+        uiStyleHint.setWrapText(true);
+        uiStyleHint.setMaxWidth(420);
+
         var themeCombo = new ComboBox<Theme>();
         themeCombo.getItems().setAll(Theme.values());
         themeCombo.setValue(settings.theme());
@@ -2741,6 +2972,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var iconPackRow = new HBox(8, new Label("Icon pack:"), iconPackCombo);
         iconPackRow.setAlignment(Pos.CENTER_LEFT);
 
+        var buttonBordersBox = new CheckBox("Button borders");
+        buttonBordersBox.setSelected(settings.buttonBorders());
+        // Live preview like the theme combo; reverted below if the user cancels.
+        buttonBordersBox.selectedProperty().addListener((obs, old, val) ->
+                ThemeManager.get().setBorderlessButtons(!val));
+
         var decorationsCombo = new ComboBox<WindowDecorations>();
         decorationsCombo.getItems().setAll(WindowDecorations.values());
         decorationsCombo.setValue(settings.windowDecorations());
@@ -2751,7 +2988,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 "Automatic uses JavaFX themed chrome when supported; Themed requests it; "
                 + "Native keeps the Windows title bar. Undecorated keeps the manual "
                 + "cross-platform chrome.");
-        decorationsHint.setStyle("-fx-text-fill: gray;");
+        decorationsHint.getStyleClass().add("settings-hint");
         decorationsHint.setWrapText(true);
         var resizeBox = new CheckBox("Resizable chromeless windows (drag the edges)");
         resizeBox.setSelected(settings.undecoratedResizable());
@@ -2819,8 +3056,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 new Label("Show after (ms, 0 = at once):"), loadingDelaySpinner);
         loadingDelayRow.setAlignment(Pos.CENTER_LEFT);
         var hint = new Label("Applies after restarting the application.");
-        hint.setStyle("-fx-text-fill: gray;");
-        var generalContent = new VBox(8, themeRow, iconPackRow, backendRow, decodeRow,
+        hint.getStyleClass().add("settings-hint");
+        var generalContent = new VBox(8, uiStyleRow, uiStyleHint,
+                themeRow, iconPackRow, buttonBordersBox, backendRow, decodeRow,
                 actionLogBox, actionLogFileBox, extensionFixBox,
                 new Separator(), loadingIndicatorRow, loadingDelayRow,
                 new Separator(),
@@ -2840,7 +3078,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         browserNavTreeBox.setSelected(settings.browserNavTreeVisible());
         var browserHint = new Label("Startup defaults for the file-browser window; "
                 + "also applied immediately.");
-        browserHint.setStyle("-fx-text-fill: gray;");
+        browserHint.getStyleClass().add("settings-hint");
         var browserContent = new VBox(8, browserMenuBox, browserToolbarBox,
                 browserStatusBox, browserNavTreeBox,
                 new Separator(), browserHint);
@@ -2857,7 +3095,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         viewerDragBox.setSelected(settings.viewerDragViewport());
         var viewerHint = new Label("Startup defaults for the viewer window; "
                 + "also applied immediately.");
-        viewerHint.setStyle("-fx-text-fill: gray;");
+        viewerHint.getStyleClass().add("settings-hint");
         var viewerContent = new VBox(8, viewerMenuBox, viewerToolbarBox,
                 viewerStatusBox, new Separator(), viewerDragBox, viewerHint);
         viewerContent.setPadding(new Insets(12));
@@ -2942,6 +3180,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var wontOpenReticuleBox = new CheckBox(
                 "Mark files this media engine won't open");
         wontOpenReticuleBox.setSelected(settings.mosaicWontOpenReticule());
+        var reticuleScopeCombo = new ComboBox<MosaicReticuleScope>();
+        reticuleScopeCombo.getItems().setAll(MosaicReticuleScope.values());
+        reticuleScopeCombo.setValue(settings.mosaicReticuleScope());
+        var reticuleScopeRow = new HBox(8,
+                new Label("Reticule coverage:"), reticuleScopeCombo);
+        reticuleScopeRow.setAlignment(Pos.CENTER_LEFT);
 
         var renditionTitle = new Label("Preview renditions");
         renditionTitle.setStyle("-fx-font-weight: bold;");
@@ -2992,7 +3236,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var mosaicHint = new Label("Layout, appearance, selection and behaviour apply "
                 + "immediately; the preview max edge applies to newly generated "
                 + "previews and the cache budget applies after restart.");
-        mosaicHint.setStyle("-fx-text-fill: gray;");
+        mosaicHint.getStyleClass().add("settings-hint");
         mosaicHint.setWrapText(true);
         mosaicHint.setMaxWidth(420);
 
@@ -3000,7 +3244,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 mosaicLocationBox,
                 new Separator(), layoutTitle, tileSetRow, tileSizeRow, marginRow, borderWidthRow,
                 borderColorRow, folderGridRow, folderGlyphRow, thumbnailsBox, fillBox,
-                seamlessBox, wontOpenReticuleBox,
+                seamlessBox, wontOpenReticuleBox, reticuleScopeRow,
                 new Separator(), renditionTitle, maxEdgeRow, budgetRow,
                 new Separator(), behaviourTitle, autoOpenBox, mosaicDragBox,
                 animationRow, animationPeriodRow, screensaverBox,
@@ -3024,7 +3268,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 + "Pick Control, Command/Meta or Alt/Option to override on every "
                 + "platform (e.g. map Modifier 1 to Command/Meta on Windows).\n"
                 + "Applies after restarting the application.");
-        keysHint.setStyle("-fx-text-fill: gray;");
+        keysHint.getStyleClass().add("settings-hint");
         var keysContent = new VBox(8, mod1Row, mod2Row, new Separator(), keysHint);
         keysContent.setPadding(new Insets(12));
 
@@ -3041,31 +3285,204 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var tabs = new TabPane(generalTab, browserTab, viewerTab, mosaicTab, keysTab);
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
+        // --- UiStyle.COMPOSE: left-rail pages over the same controls above ------
+        // Built ONLY when the Compose style is active: the row primitives
+        // reparent the very control instances the CLASSIC rows above hold, so
+        // building this assembly unconditionally would strip the TabPane's
+        // rows bare. Whichever assembly is built last owns the controls;
+        // Save-time reads (control.getValue()/isSelected()) work either way.
+        boolean compose = settings.uiStyle() == UiStyle.COMPOSE;
+        Node settingsContent = tabs;
+        if (compose) {
+            var generalPageCompose = new VBox(0,
+                    composeGroup("Appearance & engine",
+                            composeRow("UI style", "Compose uses icon-first Browser and Mosaic "
+                                    + "toolbars; Classic keeps their text-labelled versions. "
+                                    + "Takes effect on the next start.", uiStyleCombo),
+                            composeRow("Theme", "Applies to every window immediately.", themeCombo),
+                            composeRow("Icon pack", iconPackCombo),
+                            composeCheckRow(buttonBordersBox, "Off strips button, toggle and "
+                                    + "menu-button outlines on every theme — the Compose "
+                                    + "ghost-button look."),
+                            composeRow("Media engine", backendCombo),
+                            composeRow("Video playback decode", decodeCombo),
+                            composeCheckRow(actionLogBox),
+                            composeCheckRow(actionLogFileBox, "Appends every completed move/rename "
+                                    + "to ~/.media-browser/action-log.jsonl, one JSON object per line."),
+                            composeCheckRow(extensionFixBox, "Renames a sniffed file with no "
+                                    + "classifying extension to its content's canonical extension "
+                                    + "on open.")),
+                    composeGroup("Loading indicator (viewer & mosaic)",
+                            composeRow("Indicator", loadingIndicatorCombo),
+                            composeRow("Show after (ms)", "0 = at once.", loadingDelaySpinner)),
+                    composeGroup("Window & startup",
+                            composeRow("Window decorations", "Automatic uses JavaFX themed chrome "
+                                    + "when supported; Themed requests it; Native keeps the Windows "
+                                    + "title bar. Undecorated keeps the manual cross-platform chrome.",
+                                    decorationsCombo),
+                            composeCheckRow(resizeBox),
+                            composeCheckRow(overscanBox),
+                            composeCheckRow(inWindowMenuBox),
+                            composeRow("Window mode", windowModeCombo),
+                            composeRow("Startup window layout", "Applies after restarting the "
+                                    + "application.", startupLayoutCombo)));
+            generalPageCompose.setPadding(new Insets(12, 16, 12, 16));
+
+            var browserPageCompose = new VBox(0,
+                    composeGroup("Window chrome",
+                            composeCheckRow(browserMenuBox),
+                            composeCheckRow(browserToolbarBox),
+                            composeCheckRow(browserStatusBox),
+                            composeCheckRow(browserNavTreeBox, "Startup defaults for the "
+                                    + "file-browser window; also applied immediately.")));
+            browserPageCompose.setPadding(new Insets(12, 16, 12, 16));
+
+            var viewerPageCompose = new VBox(0,
+                    composeGroup("Window chrome",
+                            composeCheckRow(viewerMenuBox),
+                            composeCheckRow(viewerToolbarBox),
+                            composeCheckRow(viewerStatusBox, "Startup defaults for the viewer "
+                                    + "window; also applied immediately.")),
+                    composeGroup("Viewport",
+                            composeCheckRow(viewerDragBox)));
+            viewerPageCompose.setPadding(new Insets(12, 16, 12, 16));
+
+            var mosaicPageCompose = new VBox(0,
+                    composeGroup("Window chrome",
+                            composeCheckRow(mosaicMenuBox),
+                            composeCheckRow(mosaicToolbarBox),
+                            composeCheckRow(mosaicStatusBox),
+                            composeCheckRow(mosaicLocationBox)),
+                    composeGroup("Grid layout & appearance",
+                            composeRow("Tile set", "Generated artwork for folders and files "
+                                    + "without thumbnails. Current preserves the original Mosaic "
+                                    + "rendering.", tileSetCombo),
+                            composeRow("Tile size (px)", tileSizeSpinner),
+                            composeRow("Tile margin (px)", marginSpinner),
+                            composeRow("Tile border width (px)", borderWidthSpinner),
+                            composeRow("Tile border colour", borderColorPicker),
+                            composeRow("Folder preview grid", "N×N collage, 0 = folder glyph.",
+                                    folderGridSpinner),
+                            composeRow("Folder glyph", folderGlyphCombo),
+                            composeCheckRow(thumbnailsBox),
+                            composeCheckRow(fillBox),
+                            composeCheckRow(seamlessBox),
+                            composeCheckRow(wontOpenReticuleBox),
+                            composeRow("Reticule coverage", "Applies to both dead-end folders "
+                                    + "and files that won't open.", reticuleScopeCombo)),
+                    composeGroup("Preview renditions",
+                            composeRow("Preview max edge (px)", maxEdgeSpinner),
+                            composeRow("Preview cache budget (MB)", budgetSpinner)),
+                    composeGroup("Selection & behaviour",
+                            composeCheckRow(autoOpenBox),
+                            composeCheckRow(mosaicDragBox),
+                            composeRow("Selected-tile animation", animationCombo),
+                            composeRow("Animation cycle duration (ms)", "Lower = faster.",
+                                    animationPeriodSpinner),
+                            composeCheckRow(screensaverBox),
+                            composeRow("Screensaver idle delay (min)", screensaverDelaySpinner)));
+            mosaicPageCompose.setPadding(new Insets(12, 16, 12, 16));
+
+            var keysPageCompose = new VBox(0,
+                    composeGroup("Shortcuts",
+                            composeRow("Modifier 1 (primary)", mod1Combo),
+                            composeRow("Modifier 2 (secondary)", "Auto: Modifier 1 = Command on "
+                                    + "macOS / Control elsewhere; Modifier 2 = Option on macOS / "
+                                    + "Alt elsewhere. Applies after restarting the application.",
+                                    mod2Combo)));
+            keysPageCompose.setPadding(new Insets(12, 16, 12, 16));
+
+            var railGroup = new ToggleGroup();
+            var generalRailItem = composeRailItem("General", railGroup);
+            var browserRailItem = composeRailItem("Browser", railGroup);
+            var viewerRailItem = composeRailItem("Viewer", railGroup);
+            var mosaicRailItem = composeRailItem("Mosaic", railGroup);
+            var keysRailItem = composeRailItem("Keys", railGroup);
+            var rail = new VBox(generalRailItem, browserRailItem, viewerRailItem,
+                    mosaicRailItem, keysRailItem);
+            rail.getStyleClass().add("settings-rail");
+
+            var railDivider = new Region();
+            railDivider.getStyleClass().add("settings-rail-divider");
+            railDivider.setMinWidth(1);
+            railDivider.setPrefWidth(1);
+            railDivider.setMaxWidth(1);
+
+            Map<ToggleButton, Node> composePages = new HashMap<>();
+            composePages.put(generalRailItem, generalPageCompose);
+            composePages.put(browserRailItem, browserPageCompose);
+            composePages.put(viewerRailItem, viewerPageCompose);
+            composePages.put(mosaicRailItem, mosaicPageCompose);
+            composePages.put(keysRailItem, keysPageCompose);
+
+            var composeScroll = new ScrollPane();
+            composeScroll.setFitToWidth(true);
+            HBox.setHgrow(composeScroll, Priority.ALWAYS);
+            wireSettingsRail(railGroup, generalRailItem, composeScroll, composePages);
+
+            var composeBody = new HBox(rail, railDivider, composeScroll);
+            VBox.setVgrow(composeBody, Priority.ALWAYS);
+
+            // A dialog-internal title bar, matching kotlin ModalDialog's ChromeBar
+            // (13px semibold title). The dialog's own OS-drawn title (dialog.
+            // setTitle below) still carries "Settings" for the window/taskbar.
+            var composeTitle = new Label("Settings");
+            composeTitle.getStyleClass().add("settings-dialog-title");
+            var composeTitleBar = new HBox(composeTitle);
+            composeTitleBar.getStyleClass().add("settings-titlebar");
+            composeTitleBar.setAlignment(Pos.CENTER_LEFT);
+
+            var footerPath = new Label(settings.persistencePath().toString());
+            footerPath.getStyleClass().add("settings-footer-path");
+            var composeFooter = new HBox(footerPath);
+            composeFooter.getStyleClass().add("settings-footer");
+            composeFooter.setAlignment(Pos.CENTER_LEFT);
+
+            var composeRoot = new VBox(composeTitleBar, composeBody, composeFooter);
+            composeRoot.setPrefWidth(780);
+            composeRoot.setPrefHeight(580);
+            settingsContent = composeRoot;
+        }
+
         var dialog = new Dialog<ButtonType>();
         dialog.setTitle("Settings");
         dialog.initOwner(stage());
-        dialog.getDialogPane().setContent(tabs);
+        dialog.getDialogPane().setContent(settingsContent);
         // Theme the dialog itself so the live preview is visible while choosing.
         ThemeManager.get().register(dialog.getDialogPane());
+        // register(Parent) only manages the theme overlay; the dialog pane is
+        // not a Scene, so it never gets window-chrome.css's cross-theme
+        // constants (e.g. .settings-hint) the way SingleWindowShell/
+        // MultiWindowShell's scenes do. Add it directly, after the theme sheet,
+        // matching the same ordering.
+        var chromeCss = MainWindow.class.getResource("window-chrome.css");
+        if (chromeCss != null) dialog.getDialogPane().getStylesheets().add(chromeCss.toExternalForm());
         var save = new ButtonType("Save", ButtonBar.ButtonData.OK_DONE);
         dialog.getDialogPane().getButtonTypes().addAll(save, ButtonType.CANCEL);
 
         Theme themeBefore = settings.theme();
         IconPack iconPackBefore = settings.iconPack();
         MosaicTileSet tileSetBefore = mosaic.tileSetProperty().get();
+        boolean buttonBordersBefore = settings.buttonBorders();
         if (dialog.showAndWait().filter(b -> b == save).isEmpty()) {
             // Cancelled: revert all live appearance previews to their prior values.
             ThemeManager.get().setCurrent(themeBefore);
             IconPackManager.get().setCurrent(iconPackBefore);
+            ThemeManager.get().setBorderlessButtons(!buttonBordersBefore);
             mosaic.tileSetProperty().set(tileSetBefore);
             return;
         }
 
         // --- General -----------------------------------------------------------
+        // Read once at startup by the mosaic (see MosaicWindow's constructor);
+        // this Save is the only effect until the next start.
+        settings.setUiStyle(uiStyleCombo.getValue());
         settings.setTheme(themeCombo.getValue());
         ThemeManager.get().setCurrent(themeCombo.getValue());
         settings.setIconPack(iconPackCombo.getValue());
         IconPackManager.get().setCurrent(iconPackCombo.getValue());
+        settings.setButtonBorders(buttonBordersBox.isSelected());
+        ThemeManager.get().setBorderlessButtons(!buttonBordersBox.isSelected());
         settings.setMediaBackend(backendCombo.getValue().settingsValue());
         // Persist + apply live: the next playback session honours the policy.
         String decodeDevice = decodeCombo.getValue().name().toLowerCase(java.util.Locale.ROOT);
@@ -3133,6 +3550,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         settings.setMosaicFillTiles(fillBox.isSelected());
         settings.setMosaicSeamless(seamlessBox.isSelected());
         settings.setMosaicWontOpenReticule(wontOpenReticuleBox.isSelected());
+        settings.setMosaicReticuleScope(reticuleScopeCombo.getValue());
         settings.setThumbnailMaxEdge(maxEdgeSpinner.getValue());
         settings.setThumbnailMemoryBudgetMb(budgetSpinner.getValue());
         settings.setMosaicAutoOpen(autoOpenBox.isSelected());

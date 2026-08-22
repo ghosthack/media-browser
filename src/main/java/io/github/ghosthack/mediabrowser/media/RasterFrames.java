@@ -232,6 +232,15 @@ public final class RasterFrames {
      * {@code rotateCw(applyAae(upright, aae), userTurns)}.
      */
     public static RasterFrame applyAae(RasterFrame src, AaeSidecar aae) {
+        return applyAae(src, aae, true);
+    }
+
+    /**
+     * Variant used by the viewer's non-persistent Apply Crop preview toggle.
+     * Straighten remains part of the AAE edit while only the final crop may be
+     * bypassed; the sidecar itself is never changed.
+     */
+    public static RasterFrame applyAae(RasterFrame src, AaeSidecar aae, boolean applyCrop) {
         if (src == null || aae == null || !aae.hasGeometry()) {
             return src;
         }
@@ -243,7 +252,7 @@ public final class RasterFrames {
             out = straighten(out, aae.straightenAngleRadians());
         }
         var crop = aae.crop();
-        if (crop.isPresent()) {
+        if (applyCrop && crop.isPresent()) {
             AaeSidecar.Crop c = crop.get();
             out = crop(out, c.x(), c.y(), c.width(), c.height());
         }

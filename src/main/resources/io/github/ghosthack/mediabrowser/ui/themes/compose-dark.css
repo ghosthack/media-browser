@@ -1,0 +1,608 @@
+/*
+ * Compose Dark — transcribes the Kotlin/Compose port's PLAIN_DARK palette
+ * (../kotlin-mosaic src/main/kotlin/com/mediabrowser/kotlin/Theme.kt +
+ * ui/theme/Palette.kt) onto this app's JavaFX control set. Hand-written in
+ * the same flat, no-gradient structural style as plain-dark.css, not a
+ * vendored library like the Cupertino (AtlantaFX) themes.
+ *
+ * Rules below consume semantic looked-up colours. Compose Light imports this
+ * control coverage and replaces only those palette values with kotlin-mosaic's
+ * PAPER roles, keeping the two themes structurally identical.
+ * Metrics: control/toolbar height 30/38, row 24, propertyColumn 120,
+ *   radiusSmall 4 / radius 6 / radiusLarge 10, borderWidth 1, focusWidth 2,
+ *   scrollBar 10. Typography: body 12, small 11, title 13 SemiBold, mono 11.
+ */
+
+.root {
+    -compose-window: #121316;
+    -compose-surface: #17181C;
+    -compose-surface-raised: #1E2025;
+    -compose-surface-sunken: #0E0F12;
+    -compose-surface-alt: rgba(255, 255, 255, 0.022);
+    -compose-border: #2C2F36;
+    -compose-divider: #24262B;
+    -compose-accent: #4C8DF6;
+    -compose-accent-subtle: #1D3355;
+    -compose-faint-focus: rgba(76, 141, 246, 0.25);
+    -compose-text: #E6E8EC;
+    -compose-text-muted: #9AA0AA;
+    -compose-selection: #2F5FA8;
+    -compose-on-selection: #FFFFFF;
+    -compose-selection-inactive: #33363D;
+    -compose-on-selection-inactive: #C8CCD3;
+    -compose-hover: rgba(255, 255, 255, 0.06);
+    -compose-pressed: rgba(255, 255, 255, 0.11);
+    -compose-scroll-track: rgba(0, 0, 0, 0.25);
+    -compose-scroll-thumb: rgba(255, 255, 255, 0.16);
+    -compose-scroll-thumb-hover: rgba(255, 255, 255, 0.28);
+    -compose-slider-track: #262B33;
+    -compose-warning: #E0A33B;
+
+    /*
+     * Modena compatibility. This theme is a scene-stylesheet overlay on top
+     * of stock Modena (ThemeManager), not a setUserAgentStylesheet
+     * replacement, so any property this sheet leaves unset falls back to
+     * Modena's light defaults — the tree/table/list -fx-control-inner-
+     * background chain, column-header ladders, and window-chrome.css's own
+     * -fx-base / -fx-text-background-color lookups would otherwise render
+     * light. Remap them onto the palette (see the ~16-line block added to
+     * themes/cupertino-dark.css in 9ca4ef9 for the same fix on AtlantaFX).
+     */
+    -fx-base: -compose-window;
+    -fx-background: -compose-window;
+    -fx-color: -compose-surface;
+    -fx-control-inner-background: -compose-surface;
+    -fx-control-inner-background-alt: -compose-surface-alt;
+    -fx-accent: -compose-accent;
+    -fx-default-button: -compose-accent;
+    -fx-focus-color: -compose-accent;
+    -fx-faint-focus-color: -compose-faint-focus;
+    -fx-text-background-color: -compose-text;
+    -fx-text-inner-color: -compose-text;
+    -fx-text-fill: -compose-text;
+    -fx-mark-color: -compose-text;
+    -fx-mark-highlight-color: -compose-text;
+    /* Cell / selection looked-up colours (see plain-dark.css's identical
+       comment): pinning these to flat values keeps the cell and
+       combo-box-popup rules that reference them from ever hitting an
+       unresolved link in a popup. */
+    -fx-selection-bar: -compose-selection;
+    -fx-selection-bar-non-focused: -compose-selection-inactive;
+    -fx-selection-bar-text: -compose-on-selection;
+    -fx-cell-focus-inner-border: -compose-accent;
+    -fx-cell-hover-color: -compose-hover;
+    -fx-font-family: "System";
+    -fx-font-size: 12px;
+}
+
+.label {
+    -fx-text-fill: -compose-text;
+}
+
+#addressBarBox {
+    -fx-padding: 0 1 0 1;
+}
+
+.text-field {
+    -fx-text-fill: -compose-text;
+    /* Keep the existing 1px content inset as a transparent, constant border,
+       but paint the visible outline as the outer background layer. Background
+       insets do not participate in layout, so widening the blue focus ring
+       below cannot move neighbouring controls. */
+    -fx-background-color: -compose-border, -compose-surface-sunken;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 4, 3;
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+    -fx-highlight-fill: -compose-selection;
+    -fx-highlight-text-fill: -compose-on-selection;
+}
+
+.text-field:focused {
+    -fx-background-color: -compose-accent, -compose-surface-sunken;
+    -fx-background-insets: 0, 2;
+    -fx-background-radius: 4, 2;
+}
+
+/* Include MenuButton in the same treatment as the other flat themes.
+   Mosaic's Filter, Sort, Labels, and Location Drives controls are
+   MenuButtons rather than Buttons, so leaving this type out gives them
+   Modena's differing toolbar sizing and surface. Buttons.kt's Normal tone
+   (visible surface + border) is used uniformly here, matching how the other
+   flat themes give every button one unified treatment rather than the
+   Compose port's separate Ghost/Normal/Accent tones. */
+.button, .toggle-button, .menu-button {
+    -fx-background-color: -compose-surface-raised;
+    -fx-background-radius: 4;
+    -fx-text-fill: -compose-text;
+    -fx-border-color: -compose-border;
+    -fx-border-radius: 4;
+    -fx-border-width: 1;
+}
+
+.button:hover, .toggle-button:hover, .menu-button:hover {
+    -fx-background-color: -compose-surface-raised, -compose-hover;
+    -fx-background-insets: 0, 0;
+    -fx-background-radius: 4, 4;
+    -fx-text-fill: -compose-text;
+}
+
+.button:armed, .toggle-button:armed {
+    -fx-background-color: -compose-surface-raised, -compose-pressed;
+    -fx-background-insets: 0, 0;
+    -fx-background-radius: 4, 4;
+}
+
+/* Selected = accentSubtle background + accent text, no border (Buttons.kt:
+   "a toggled-on ghost control ... gets none [outline]"). */
+.toggle-button:selected {
+    -fx-background-color: -compose-accent-subtle;
+    -fx-text-fill: -compose-accent;
+    -fx-border-color: transparent;
+}
+
+.toggle-button:selected:hover {
+    -fx-background-color: -compose-accent-subtle, -compose-hover;
+    -fx-background-insets: 0, 0;
+    -fx-background-radius: 4, 4;
+    -fx-text-fill: -compose-accent;
+}
+
+/* Open popup state, matching .toggle-button:selected. */
+.menu-button:showing {
+    -fx-background-color: -compose-accent-subtle;
+    -fx-border-color: transparent;
+}
+
+/* MenuButton renders its text through an inner label, so retint it directly
+   in the hover/open states just as the other flat themes do. */
+.menu-button:hover .label {
+    -fx-text-fill: -compose-text;
+}
+
+.menu-button:showing .label {
+    -fx-text-fill: -compose-accent;
+}
+
+/* An open toolbar dropdown keeps the chrome's normal foreground; only its
+   subtle selected background marks the popup as active. */
+.tool-bar .menu-button:showing .label {
+    -fx-text-fill: -compose-text;
+}
+
+.menu-bar {
+    -fx-background-color: -compose-surface-raised;
+}
+
+.menu-bar .label {
+    -fx-text-fill: -compose-text;
+}
+
+.menu {
+    -fx-background-color: -compose-surface-raised;
+}
+
+.menu:hover, .menu:focused, .menu:showing {
+    -fx-background-color: -compose-hover;
+}
+
+.context-menu {
+    -fx-background-color: -compose-surface-raised;
+    -fx-background-radius: 4;
+    -fx-border-color: -compose-border;
+    -fx-border-radius: 4;
+    -fx-border-width: 1;
+}
+
+.menu-item {
+    -fx-background-color: transparent;
+}
+
+.menu-item:focused {
+    -fx-background-color: -compose-hover;
+}
+
+.menu-item .label {
+    -fx-text-fill: -compose-text;
+}
+
+.menu-item:focused .label {
+    -fx-text-fill: -compose-text;
+}
+
+/* Toolbars (Surfaces.kt's ChromeBar): surfaceRaised background, 38px pref
+   height, a 1px divider hairline below — no gradient. */
+.tool-bar, .location-bar {
+    -fx-background-color: -compose-surface-raised;
+    -fx-border-color: -compose-divider;
+    -fx-border-width: 0 0 1 0;
+    -fx-pref-height: 38;
+    -fx-min-height: 38;
+}
+
+.separator .line {
+    -fx-border-color: -compose-border;
+}
+
+.split-pane {
+    -fx-background-color: -compose-window;
+}
+
+.split-pane-divider {
+    -fx-background-color: -compose-divider;
+    -fx-padding: 0 1 0 1;
+}
+
+.tree-view {
+    -fx-background-color: -compose-surface;
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+}
+
+.tree-view:focused {
+    -fx-border-color: -compose-accent;
+}
+
+.tree-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: -compose-text;
+}
+
+/* Modena paints disclosure arrows through the looked-up
+   -fx-text-background-color; a transient lookup miss during a popup restyle
+   can otherwise log a harmless String-to-Paint warning. Use the theme's
+   concrete arrow colour directly, as the other flat themes do. */
+.tree-cell > .tree-disclosure-node > .arrow,
+.tree-table-row-cell > .tree-disclosure-node > .arrow {
+    -fx-background-color: -compose-text;
+}
+
+.tree-cell:filled:selected:focused {
+    -fx-background-color: -compose-selection;
+    -fx-text-fill: -compose-on-selection;
+}
+
+.tree-cell:filled:selected:not(:focused) {
+    -fx-background-color: -compose-selection-inactive;
+    -fx-text-fill: -compose-on-selection-inactive;
+}
+
+.list-view {
+    -fx-background-color: -compose-surface;
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+}
+
+.list-view:focused {
+    /* Match the panel background rather than the usual focus ring, so the
+       file list shows no focus border (mirrors the other flat themes). */
+    -fx-border-color: -compose-surface;
+}
+
+.list-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: -compose-text;
+}
+
+.list-cell:filled:selected:focused {
+    -fx-background-color: -compose-selection;
+    -fx-text-fill: -compose-on-selection;
+}
+
+.list-cell:filled:selected:not(:focused) {
+    -fx-background-color: -compose-selection-inactive;
+    -fx-text-fill: -compose-on-selection-inactive;
+}
+
+.list-cell:odd {
+    -fx-background-color: -compose-surface-alt;
+}
+
+.list-cell:odd:filled:selected:focused {
+    -fx-background-color: -compose-selection;
+}
+
+.list-cell:odd:filled:selected:not(:focused) {
+    -fx-background-color: -compose-selection-inactive;
+}
+
+/* ComboBox / ChoiceBox — see plain-dark.css's identical comment: driving
+   every popup colour from flat values keeps the fragile Modena
+   selection-bar/cell-focus-inner-border chains from ever being evaluated. */
+.combo-box-base,
+.choice-box {
+    /* As with text fields, keep the layout border constant and transparent;
+       the first background layer is the outline and the second is the surface. */
+    -fx-background-color: -compose-border, -compose-surface-sunken;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 4, 3;
+    -fx-border-color: transparent;
+    -fx-border-width: 1;
+    -fx-mark-color: -compose-text;
+}
+
+.combo-box-base:hover,
+.choice-box:hover {
+    -fx-background-color: -compose-border, -compose-surface-sunken, -compose-hover;
+    -fx-background-insets: 0, 1, 1;
+    -fx-background-radius: 4, 3, 3;
+}
+
+.combo-box-base:focused,
+.choice-box:focused {
+    -fx-background-color: -compose-accent, -compose-surface-sunken;
+    -fx-background-insets: 0, 2;
+    -fx-background-radius: 4, 2;
+}
+
+.combo-box .list-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: -compose-text;
+    -fx-padding: 2 6 2 6;
+}
+
+.combo-box-popup > .list-view {
+    -fx-background-color: -compose-border, -compose-surface-raised;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 4, 3;
+    -fx-effect: null;
+}
+
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell {
+    -fx-background-color: -compose-surface-raised;
+    -fx-text-fill: -compose-text;
+    -fx-padding: 4 8 4 8;
+}
+
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell:filled:hover {
+    -fx-background-color: -compose-hover;
+    -fx-text-fill: -compose-text;
+}
+
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell:filled:selected,
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell:filled:selected:hover {
+    -fx-background-color: -compose-selection;
+    -fx-text-fill: -compose-on-selection;
+}
+
+.scroll-pane {
+    -fx-background-color: -compose-surface;
+}
+
+.scroll-pane > .viewport {
+    -fx-background-color: -compose-surface;
+}
+
+/* Ordinary (non-.flat-scroll-bar) scrollbars — the side panels' table
+   scrollbars. 10px wide, fully rounded thumb, per Metrics.scrollBar. The
+   canvas-panning .flat-scroll-bar (scrollbar.css) is a deliberately
+   unthemed literal, out of scope here. */
+.scroll-bar {
+    -fx-background-color: transparent;
+    -fx-padding: 0 1 0 0;
+}
+
+.scroll-bar:horizontal, .scroll-bar:vertical {
+    -fx-pref-width: 10;
+    -fx-pref-height: 10;
+}
+
+.scroll-bar .thumb {
+    -fx-background-color: -compose-scroll-thumb;
+    -fx-background-radius: 5;
+}
+
+.scroll-bar .thumb:hover {
+    -fx-background-color: -compose-scroll-thumb-hover;
+}
+
+.scroll-bar .track {
+    -fx-background-color: -compose-scroll-track;
+    -fx-background-radius: 5;
+}
+
+.scroll-bar .increment-button,
+.scroll-bar .decrement-button {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+}
+
+.scroll-bar .increment-arrow,
+.scroll-bar .decrement-arrow {
+    -fx-background-color: transparent;
+    -fx-shape: " ";
+    -fx-padding: 0;
+}
+
+/* Sliders (the Settings dialog's interval/frame-rate/tile-size sliders): a
+   thin surfaceSunken-over-surface track, an accent-filled portion up to the
+   thumb, and a small round accent thumb. */
+.slider .track {
+    -fx-background-color: -compose-slider-track;
+    -fx-background-insets: 0;
+    -fx-background-radius: 2;
+    -fx-pref-height: 3;
+}
+
+.slider .thumb {
+    -fx-background-color: -compose-accent;
+    -fx-background-radius: 1em;
+    -fx-pref-width: 12;
+    -fx-pref-height: 12;
+}
+
+.slider .thumb:hover, .slider .thumb:pressed {
+    -fx-background-color: derive(-compose-accent, 15%);
+}
+
+.slider:focused .thumb {
+    -fx-background-color: -compose-accent, -compose-faint-focus;
+    -fx-background-insets: 0, -2;
+    -fx-background-radius: 1em, 1em;
+}
+
+/* Settings dialog + TabPane (UiStyle.CLASSIC) surface / header colours; the
+   UiStyle.COMPOSE rail/group/footer refinements are further down this file. */
+.dialog-pane {
+    -fx-background-color: -compose-surface;
+}
+
+.dialog-pane > .header-panel {
+    -fx-background-color: -compose-surface-raised;
+    -fx-border-color: -compose-divider;
+    -fx-border-width: 0 0 1 0;
+}
+
+.dialog-pane > .header-panel .label {
+    -fx-text-fill: -compose-text;
+}
+
+.dialog-pane > .button-bar > .container {
+    -fx-background-color: transparent;
+}
+
+.tab-pane .tab-header-background {
+    -fx-background-color: -compose-surface-raised;
+    -fx-border-color: -compose-divider;
+    -fx-border-width: 0 0 1 0;
+}
+
+.tab-pane .tab-header-area .tab {
+    -fx-background-color: -compose-surface;
+    -fx-background-radius: 4 4 0 0;
+    -fx-border-color: -compose-border;
+    -fx-border-width: 1 1 0 1;
+    -fx-border-radius: 4 4 0 0;
+}
+
+.tab-pane .tab-header-area .tab .tab-label {
+    -fx-text-fill: -compose-text-muted;
+}
+
+.tab-pane .tab-header-area .tab:selected {
+    -fx-background-color: -compose-accent-subtle;
+    -fx-border-color: -compose-accent;
+}
+
+.tab-pane .tab-header-area .tab:selected .tab-label {
+    -fx-text-fill: -compose-accent;
+}
+
+.tab-pane .tab-content-area {
+    -fx-background-color: -compose-surface;
+}
+
+.tab-pane > .tab-content-area > * {
+    -fx-background-color: -compose-surface;
+}
+
+/* Side panel headers (Folders/Info/Metadata/Diagnostics): the shared strip
+   uses the toolbar surface (ChromeBar in Surfaces.kt), while this title-only
+   hook gives each heading the 13px SemiBold title role without enlarging
+   Metadata's provider text or labels inside trailing controls. */
+.side-panel-title {
+    -fx-font-size: 13px;
+}
+
+/* Info/Metadata/Diagnostics tables share Metrics.row (24px, set in Java) and
+   Metrics.propertyColumn (120px). Zebra striping and selection colours
+   already follow the .root remap above (-fx-control-inner-background-alt /
+   -fx-selection-bar*); only the type ramp (11px "small") and the
+   property-column's muted tint need an explicit rule. The leading-column
+   hook (.property-column-cell) is added in Java by InfoPanel's shared
+   column setup, used by Info, Diagnostics, and Metadata alike; it carries no
+   rule in any other theme, so this is additive-only. */
+.headerless-table .table-cell,
+.headerless-table .tree-table-cell {
+    -fx-font-size: 11px;
+    -fx-text-fill: -compose-text;
+}
+
+.headerless-table .property-column-cell {
+    -fx-text-fill: -compose-text-muted;
+}
+
+/*
+ * Overrides of window-chrome.css's cross-theme literal defaults. That sheet
+ * is added to every scene (and to the Settings/Slideshow/Flipbook dialogs
+ * directly) *after* the theme overlay, so a same-specificity rule here would
+ * lose the cascade tie; ".root <class>" is used everywhere below purely to
+ * outrank it, not for any structural reason.
+ */
+
+/* Palette textMuted instead of window-chrome.css's flat "gray". */
+.root .settings-hint {
+    -fx-text-fill: -compose-text-muted;
+}
+
+/* Judgment call: kotlin's Palette has no "binary metadata value" role, so
+   there is nothing to transcribe literally. Palette.warning reads better
+   than the other themes' plain #b58900 amber against this palette's cooler
+   greys, and the italic stays from window-chrome.css's default rule. */
+.root .metadata-binary-value {
+    -fx-text-fill: -compose-warning;
+}
+
+/*
+ * UiStyle.COMPOSE's Settings dialog rail/groups/footer (Phase 3 of the
+ * window-chrome.css comment above — "structural (a left rail, etc.)").
+ * Semantic Palette values (see the roles defined on .root above).
+ */
+.root .settings-titlebar,
+.root .settings-rail,
+.root .settings-footer {
+    -fx-background-color: -compose-surface-raised;
+}
+
+.root .settings-titlebar {
+    -fx-border-color: transparent transparent -compose-divider transparent;
+}
+
+.root .settings-footer {
+    -fx-border-color: -compose-divider transparent transparent transparent;
+}
+
+.root .settings-dialog-title,
+.root .settings-group-title {
+    -fx-text-fill: -compose-text;
+}
+
+.root .settings-rail-item {
+    -fx-text-fill: -compose-text;
+}
+
+.root .settings-rail-item:hover {
+    -fx-background-color: -compose-hover;
+}
+
+.root .settings-rail-item:selected {
+    -fx-background-color: -compose-accent-subtle;
+    -fx-text-fill: -compose-accent;
+}
+
+.root .settings-rail-divider,
+.root .settings-group-divider {
+    -fx-background-color: -compose-border;
+}
+
+.root .settings-footer-path {
+    -fx-text-fill: -compose-text-muted;
+}
+
+#statusBar {
+    -fx-border-color: -compose-window;
+    -fx-border-width: 1 0 0 0;
+}
+
+.viewport {
+    -fx-background-color: -compose-window;
+}
+
+.status-bar {
+    -fx-padding: 4 8;
+    -fx-background-color: -compose-surface-raised;
+}
+
+.status-label {
+    -fx-text-fill: -compose-text-muted;
+}

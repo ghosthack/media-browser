@@ -39,6 +39,7 @@ public final class ThemeManager {
     private final Set<Scene> scenes = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<Parent> parents = Collections.newSetFromMap(new WeakHashMap<>());
     private Theme current = Theme.DEFAULT;
+    private boolean borderlessButtons;
 
     private ThemeManager() {
         for (Theme t : Theme.values()) {
@@ -56,7 +57,28 @@ public final class ThemeManager {
     public void setCurrent(Theme theme) {
         current = theme == null ? Theme.DEFAULT : theme;
         for (Scene s : scenes) applyTo(s);
-        for (Parent p : parents) applyTo(p.getStylesheets());
+        for (Parent p : parents) applyTo(p);
+    }
+
+    /** Whether button outlines are stripped (the Compose ghost-button look). */
+    public boolean borderlessButtons() {
+        return borderlessButtons;
+    }
+
+    /**
+     * Strips (or restores) button outlines on every registered target, live.
+     * Applied as the {@code borderless-buttons} root style class; the rules
+     * live in {@code window-chrome.css} and cover the hand-written themes'
+     * {@code -fx-border-color}, Cupertino's {@code -color-button-border}
+     * token, and stock Modena's layered-background outline (which needs the
+     * companion {@code theme-default} class, since Modena has no theme sheet
+     * to override).
+     */
+    public void setBorderlessButtons(boolean borderless) {
+        if (borderlessButtons == borderless) return;
+        borderlessButtons = borderless;
+        for (Scene s : scenes) applyStyleClasses(s.getRoot());
+        for (Parent p : parents) applyStyleClasses(p);
     }
 
     /** Tracks {@code scene} for live theme changes and applies the current theme now. */
@@ -74,7 +96,32 @@ public final class ThemeManager {
     public void register(Parent parent) {
         if (parent == null) return;
         parents.add(parent);
+        applyTo(parent);
+    }
+
+    private void applyTo(Parent parent) {
         applyTo(parent.getStylesheets());
+        applyStyleClasses(parent);
+    }
+
+    /**
+     * Keeps a target's marker classes in sync: {@code borderless-buttons}
+     * exactly when the strip is on, {@code theme-default} exactly when stock
+     * Modena is the active theme (so window-chrome.css can scope the Modena
+     * outline flattening to the one theme with no sheet of its own).
+     */
+    private void applyStyleClasses(Parent target) {
+        var classes = target.getStyleClass();
+        setMarker(classes, "borderless-buttons", borderlessButtons);
+        setMarker(classes, "theme-default", current == Theme.DEFAULT);
+    }
+
+    private static void setMarker(ObservableList<String> classes, String name, boolean present) {
+        if (present) {
+            if (!classes.contains(name)) classes.add(name);
+        } else {
+            classes.remove(name);
+        }
     }
 
     private void applyTo(ObservableList<String> sheets) {
@@ -108,12 +155,15 @@ public final class ThemeManager {
      */
     private void applyTo(Scene scene) {
         applyTo(scene.getStylesheets());
+        applyStyleClasses(scene.getRoot());
         scene.setFill(switch (current) {
             case DEFAULT -> Color.WHITE;
             case PLAIN_DARK -> Color.BLACK;
             case PLAIN_DARK_GRAY -> Color.web("#333333");
             case CUPERTINO_LIGHT -> Color.web("#e5e5ea");
             case CUPERTINO_DARK -> Color.web("#2c2c2e");
+            case COMPOSE_LIGHT -> Color.web("#F2F3F5");
+            case COMPOSE_DARK -> Color.web("#121316");
         });
     }
 }

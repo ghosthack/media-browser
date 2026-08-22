@@ -13,6 +13,9 @@ import java.util.Locale;
  *       instead of black.</li>
  *   <li>{@link #CUPERTINO_LIGHT} / {@link #CUPERTINO_DARK} — the macOS-styled
  *       AtlantaFX Cupertino themes.</li>
+ *   <li>{@link #COMPOSE_LIGHT} / {@link #COMPOSE_DARK} — transcribe the
+ *       Kotlin/Compose port's neutral {@code PAPER} and {@code PLAIN_DARK}
+ *       palettes (kotlin-mosaic's {@code ui.theme.Palette}).</li>
  * </ul>
  *
  * <p>Each non-default theme names a CSS resource bundled under
@@ -25,7 +28,9 @@ public enum Theme {
     PLAIN_DARK("Plain Dark", "/io/github/ghosthack/mediabrowser/ui/themes/plain-dark.css"),
     PLAIN_DARK_GRAY("Plain Dark Gray", "/io/github/ghosthack/mediabrowser/ui/themes/plain-dark-gray.css"),
     CUPERTINO_LIGHT("Cupertino Light", "/io/github/ghosthack/mediabrowser/ui/themes/cupertino-light.css"),
-    CUPERTINO_DARK("Cupertino Dark", "/io/github/ghosthack/mediabrowser/ui/themes/cupertino-dark.css");
+    CUPERTINO_DARK("Cupertino Dark", "/io/github/ghosthack/mediabrowser/ui/themes/cupertino-dark.css"),
+    COMPOSE_LIGHT("Compose Light", "/io/github/ghosthack/mediabrowser/ui/themes/compose-light.css"),
+    COMPOSE_DARK("Compose Dark", "/io/github/ghosthack/mediabrowser/ui/themes/compose-dark.css");
 
     private final String label;
     private final String resource;

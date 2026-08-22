@@ -29,7 +29,6 @@ import javafx.scene.input.MouseButton;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
-import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
 import java.util.List;
@@ -83,8 +82,6 @@ public final class MetadataPanel extends VBox {
     private Runnable onLoadRequested = () -> { };
 
     public MetadataPanel() {
-        var title = new Label("Metadata");
-        title.setStyle("-fx-font-weight: bold; -fx-padding: 6 8 6 8;");
         providerLabel.setStyle("-fx-opacity: 0.72;");
 
         loadButton.setTooltip(new Tooltip("Read the full metadata of the on-screen item"));
@@ -97,13 +94,8 @@ public final class MetadataPanel extends VBox {
         IconBinding.install(toolsToggle, AppIcon.MORE, "...", "",
                 "Show metadata filter and copy controls");
 
-        var titleSpacer = new Region();
-        HBox.setHgrow(titleSpacer, Priority.ALWAYS);
-        titleRow = new HBox(6, title, providerLabel, titleSpacer,
-                loadButton, autoToggle, toolsToggle);
-        titleRow.setAlignment(Pos.CENTER_LEFT);
-        titleRow.setPadding(new Insets(0, 6, 0, 0));
-        titleRow.getStyleClass().addAll("tool-bar", "side-panel-header");
+        titleRow = SidePanelHeader.create("Metadata", loadButton, autoToggle, toolsToggle);
+        titleRow.getChildren().add(1, providerLabel);
 
         filterField.setPromptText("Filter…");
         filterField.textProperty().addListener((o, was, now) -> applyFilter());
@@ -398,21 +390,29 @@ public final class MetadataPanel extends VBox {
                 if (empty) {
                     setText(null);
                     setTooltip(null);
-                    setStyle("");
+                    getStyleClass().remove("metadata-binary-value");
                     return;
                 }
                 setText(text);
                 TreeTableRow<Object> r = getTableRow();
                 Object row = r == null ? null : r.getItem();
                 if (row instanceof Metadata.Entry e) {
-                    setStyle(e.binary() ? "-fx-font-style: italic; -fx-text-fill: #b58900;" : "");
+                    // Default styling (italic, amber) lives in window-chrome.css's
+                    // .metadata-binary-value rule.
+                    if (e.binary()) {
+                        if (!getStyleClass().contains("metadata-binary-value")) {
+                            getStyleClass().add("metadata-binary-value");
+                        }
+                    } else {
+                        getStyleClass().remove("metadata-binary-value");
+                    }
                     String tip = e.truncated()
                             ? e.value() + "\n…\n(" + e.fullValue().length()
                                     + " chars total — right-click to copy the full value)"
                             : e.value();
                     setTooltip(tooltip(tip));
                 } else {
-                    setStyle("");
+                    getStyleClass().remove("metadata-binary-value");
                     setTooltip(null);
                 }
             }

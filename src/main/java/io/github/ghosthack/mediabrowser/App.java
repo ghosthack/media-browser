@@ -43,6 +43,7 @@ public final class App extends Application {
         // Seed the current theme before any window builds its scene, so each
         // registers and is themed from the first frame.
         ThemeManager.get().setCurrent(settings.theme());
+        ThemeManager.get().setBorderlessButtons(!settings.buttonBorders());
         // Likewise seed icon artwork before controls and virtualized cells are
         // constructed, so the first frame uses the persisted pack.
         IconPackManager.get().setCurrent(settings.iconPack());
@@ -117,6 +118,7 @@ public final class App extends Application {
         // Likewise one shared AAE edit store: resolves an image to its Apple
         // Photos .AAE edit (crop/straighten), composed above the decoders.
         var aaeStore = new AaeStore();
+        service.setAaeStore(aaeStore);
         // The window shell hosting the browser, mosaic and viewer views: one
         // window whose root swaps between them, or the classic separate
         // windows, per the persisted window-mode setting (see AppShell).

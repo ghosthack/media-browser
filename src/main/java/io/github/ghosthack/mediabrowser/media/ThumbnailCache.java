@@ -1,5 +1,6 @@
 package io.github.ghosthack.mediabrowser.media;
 
+import java.nio.file.Path;
 import java.util.function.Supplier;
 
 /**
@@ -27,6 +28,9 @@ public interface ThumbnailCache {
      * and returns it. Called on a worker thread.
      */
     Thumbnail get(ThumbnailKey key, Supplier<Thumbnail> loader);
+
+    /** Drops every cached rendition associated with {@code path}. */
+    void remove(Path path);
 
     /** Drops all cached renditions. */
     void clear();

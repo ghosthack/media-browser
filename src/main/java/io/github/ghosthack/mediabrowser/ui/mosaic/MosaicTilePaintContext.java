@@ -4,6 +4,7 @@ import io.github.ghosthack.mediabrowser.media.DirEntry;
 import io.github.ghosthack.mediabrowser.media.FolderVerdict;
 
 import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.paint.Paint;
 import javafx.scene.text.Font;
 
 /**
@@ -22,6 +23,8 @@ public final class MosaicTilePaintContext {
         boolean drawFolderCollage(MosaicTilePaintContext context);
         void drawCaption(MosaicTilePaintContext context);
         void drawReticule(MosaicTilePaintContext context);
+        boolean paintCurrentGlyphReticule(
+                MosaicTilePaintContext context, Paint reticule);
         Font tileFont(double size, boolean monospaced);
         double textWidth(String text, Font font);
     }
@@ -76,6 +79,9 @@ public final class MosaicTilePaintContext {
     public boolean drawFolderCollage() { return host.drawFolderCollage(this); }
     public void drawCaption() { host.drawCaption(this); }
     public void drawReticule() { host.drawReticule(this); }
+    public boolean paintCurrentGlyphReticule(Paint reticule) {
+        return host.paintCurrentGlyphReticule(this, reticule);
+    }
     public Font font(double size, boolean monospaced) {
         return host.tileFont(size, monospaced);
     }

@@ -5,16 +5,12 @@ import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
 
-import javafx.geometry.Pos;
 import javafx.scene.control.Button;
-import javafx.scene.control.Label;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.Tooltip;
-import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
-import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
 import java.util.ArrayList;
@@ -36,18 +32,11 @@ public final class DiagnosticsPanel extends VBox {
     public DiagnosticsPanel(MediaService service) {
         this.service = service;
 
-        var title = new Label("Diagnostics");
-        title.setStyle("-fx-font-weight: bold; -fx-padding: 6 8 6 8;");
-        var spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
         var update = new Button("Update");
         update.setTooltip(new Tooltip(
                 "Take a fresh media-engine and thumbnail-pipeline snapshot"));
         update.setOnAction(e -> refresh());
-        var header = new HBox(title, spacer, update);
-        header.setAlignment(Pos.CENTER_LEFT);
-        header.setStyle("-fx-padding: 0 4 0 0;");
-        header.getStyleClass().addAll("tool-bar", "side-panel-header");
+        var header = SidePanelHeader.create("Diagnostics", update);
 
         InfoPanel.configurePropertyValueTable(table);
         @SuppressWarnings("unchecked")

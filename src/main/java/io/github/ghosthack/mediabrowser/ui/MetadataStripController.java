@@ -1,9 +1,9 @@
 package io.github.ghosthack.mediabrowser.ui;
 
-import io.github.ghosthack.metadatastripper.MetadataStripper;
-import io.github.ghosthack.metadatastripper.StripResult;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
+import io.github.ghosthack.mediabrowser.media.export.ZeroMetadataStripper;
+import io.github.ghosthack.mediabrowser.media.export.ZeroMetadataStrippers;
 
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
@@ -33,7 +33,7 @@ public final class MetadataStripController {
     }
 
     private record Failure(Path path, String message) {}
-    private record Batch(List<StripResult> successes, List<Failure> failures) {
+    private record Batch(List<ZeroMetadataStripper.Result> successes, List<Failure> failures) {
         Batch {
             successes = List.copyOf(successes);
             failures = List.copyOf(failures);
@@ -44,7 +44,7 @@ public final class MetadataStripController {
 
     private final MediaService service;
     private final Host host;
-    private final MetadataStripper stripper = new MetadataStripper();
+    private final ZeroMetadataStripper stripper = ZeroMetadataStrippers.create();
 
     public MetadataStripController(MediaService service, Host host) {
         this.service = service;
@@ -90,7 +90,7 @@ public final class MetadataStripController {
     }
 
     private Batch stripAll(List<Path> sources) {
-        List<StripResult> successes = new ArrayList<>();
+        List<ZeroMetadataStripper.Result> successes = new ArrayList<>();
         List<Failure> failures = new ArrayList<>();
         for (Path source : sources) {
             if (ArchivePaths.inArchive(source)) {
@@ -118,12 +118,14 @@ public final class MetadataStripController {
             host.refreshAfterStrip(batch.successes().getFirst().output());
         }
 
-        long removed = batch.successes().stream().mapToLong(StripResult::removedBytes).sum();
+        long removed = batch.successes().stream()
+                .mapToLong(ZeroMetadataStripper.Result::removedBytes)
+                .sum();
         int made = batch.successes().size();
         int failed = batch.failures().size();
         String status;
         if (made == 1 && failed == 0) {
-            StripResult result = batch.successes().getFirst();
+            ZeroMetadataStripper.Result result = batch.successes().getFirst();
             status = "Exported " + result.output().getFileName()
                     + (result.removedBytes() == 0
                             ? " (no removable bytes found)"

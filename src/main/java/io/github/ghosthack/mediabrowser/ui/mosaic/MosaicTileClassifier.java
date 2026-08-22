@@ -32,6 +32,11 @@ public final class MosaicTileClassifier {
             "sqlite", "sqlite3", "db", "db3", "parquet", "avro",
             "plist", "reg", "ics", "vcf");
 
+    /** Structured-data formats whose on-disk representation is still plain text. */
+    private static final Set<String> TEXT_DATA = Set.of(
+            "json", "jsonl", "yaml", "yml", "xml", "toml", "csv", "tsv",
+            "plist", "reg", "ics", "vcf");
+
     private static final Set<String> BINARY = Set.of(
             "class", "o", "obj", "a", "lib", "dll", "so", "dylib",
             "pdb", "wasm", "pyc", "pyo", "beam", "dat", "bin", "rom",
@@ -104,5 +109,16 @@ public final class MosaicTileClassifier {
         if (DATA.contains(ext)) return MosaicTileIdentity.DATA;
         if (BINARY.contains(ext)) return MosaicTileIdentity.BINARY;
         return MosaicTileIdentity.UNKNOWN;
+    }
+
+    /**
+     * Whether a non-media entry has a recognized text representation. This is
+     * deliberately name-only like {@link #classify}: mosaic painting never
+     * opens an arbitrary file to guess whether its bytes are text.
+     */
+    static boolean isTextLike(DirEntry entry) {
+        if (entry == null || entry.type() != DirEntry.Type.OTHER) return false;
+        String ext = entry.extension().toLowerCase(Locale.ROOT);
+        return TEXT.contains(ext) || TEXT_DATA.contains(ext);
     }
 }

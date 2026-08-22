@@ -40,9 +40,11 @@ enum Reticule {
     static final double CELL_FRACTION = 0.04;
 
     private static final int CLEAR = 0x00000000;
+    private static final int BLACK = 0xFF000000;
 
     private final int mark;
     private ImagePattern pattern;
+    private ImagePattern blackPattern;
 
     Reticule(int mark) {
         this.mark = mark;
@@ -55,17 +57,26 @@ enum Reticule {
     ImagePattern pattern() {
         if (pattern == null) {
             pattern = new ImagePattern(
-                    render(), 0, 0, CELL_FRACTION, CELL_FRACTION, true);
+                    render(mark), 0, 0, CELL_FRACTION, CELL_FRACTION, true);
         }
         return pattern;
     }
 
-    private WritableImage render() {
+    /** The same motif/density with opaque-black marks for glyph-only coverage. */
+    ImagePattern blackPattern() {
+        if (blackPattern == null) {
+            blackPattern = new ImagePattern(
+                    render(BLACK), 0, 0, CELL_FRACTION, CELL_FRACTION, true);
+        }
+        return blackPattern;
+    }
+
+    private WritableImage render(int color) {
         var image = new WritableImage(CELL, CELL);
         PixelWriter px = image.getPixelWriter();
         for (int y = 0; y < CELL; y++) {
             for (int x = 0; x < CELL; x++) {
-                px.setArgb(x, y, covers(x, y) ? mark : CLEAR);
+                px.setArgb(x, y, covers(x, y) ? color : CLEAR);
             }
         }
         return image;

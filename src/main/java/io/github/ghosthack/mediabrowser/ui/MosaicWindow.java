@@ -3,10 +3,11 @@ package io.github.ghosthack.mediabrowser.ui;
 import io.github.ghosthack.mediabrowser.AppSettings;
 import io.github.ghosthack.mediabrowser.LoadingIndicator;
 import io.github.ghosthack.mediabrowser.MosaicFolderGlyph;
+import io.github.ghosthack.mediabrowser.MosaicReticuleScope;
 import io.github.ghosthack.mediabrowser.MosaicTelemetry;
 import io.github.ghosthack.mediabrowser.MosaicSelectionAnimation;
+import io.github.ghosthack.mediabrowser.UiStyle;
 import io.github.ghosthack.mediabrowser.album.AlbumStore;
-import io.github.ghosthack.mediabrowser.media.AaeSidecar;
 import io.github.ghosthack.mediabrowser.media.AaeStore;
 import io.github.ghosthack.mediabrowser.media.Adjustments;
 import io.github.ghosthack.mediabrowser.media.DirEntry;
@@ -20,6 +21,9 @@ import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.Thumbnail;
 import io.github.ghosthack.mediabrowser.media.ThumbnailMode;
+import io.github.ghosthack.mediabrowser.ui.icon.AppIcon;
+import io.github.ghosthack.mediabrowser.ui.icon.IconBinding;
+import io.github.ghosthack.mediabrowser.ui.icon.IconView;
 import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileClassifier;
 import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileModifier;
 import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTilePaintContext;
@@ -44,6 +48,7 @@ import javafx.scene.Node;
 import javafx.scene.SnapshotParameters;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.control.Button;
 import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
@@ -84,6 +89,7 @@ import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.paint.CycleMethod;
 import javafx.scene.paint.LinearGradient;
+import javafx.scene.paint.Paint;
 import javafx.scene.paint.Stop;
 import javafx.scene.shape.StrokeLineCap;
 import javafx.scene.text.Font;
@@ -203,7 +209,7 @@ public final class MosaicWindow
     private final AppSettings settings;
     /** Shared user-rotation store; consulted at draw time, never re-thumbnails. */
     private final RotationStore rotationStore;
-    /** Shared Apple {@code .AAE} edit store; its crop is applied at draw time too. */
+    /** Shared Apple {@code .AAE} edit store used by baked PNG export. */
     private final AaeStore aaeStore;
     private final int maxEdge;
     /**
@@ -381,8 +387,11 @@ public final class MosaicWindow
      */
     /** Dead-end marking on folder tiles; the Mosaic menu binds here. */
     private final BooleanProperty emptyReticule = new SimpleBooleanProperty(true);
-    /** Opt-in availability marking for files Media Browser will not open. */
-    private final BooleanProperty wontOpenReticule = new SimpleBooleanProperty(false);
+    /** Availability marking for files Media Browser will not open; on by default. */
+    private final BooleanProperty wontOpenReticule = new SimpleBooleanProperty(true);
+    /** One coverage choice shared by dead-end folder and won't-open file marks. */
+    private final ObjectProperty<MosaicReticuleScope> reticuleScope =
+            new SimpleObjectProperty<>(MosaicReticuleScope.DEFAULT);
     /** The optional subtree check behind the reticule's EMPTY mark. */
     private final BooleanProperty barrenCheck = new SimpleBooleanProperty(false);
     /** Listings one barren check may spend before answering UNKNOWN. */
@@ -492,6 +501,10 @@ public final class MosaicWindow
     /** Steps the shared location back/forward through history; set by the host. */
     private Runnable backHandler = () -> { };
     private Runnable forwardHandler = () -> { };
+    /** Opens the shared Settings dialog; set by the host (the compose toolbar's
+     *  gear button). Defaults to a no-op so a headless/standalone mosaic never
+     *  NPEs before the host wires it. */
+    private Runnable settingsHandler = () -> { };
     private final ListChangeListener<DirEntry> sourceListener = c -> rebuild();
     private boolean attached;
     /** The directory currently mirrored; a change resets scroll/selection. */
@@ -621,15 +634,12 @@ public final class MosaicWindow
      */
     private final Map<Path, Image> colorSource = new java.util.HashMap<>();
     private final Map<Path, Image> colorOutput = new java.util.HashMap<>();
-    /** Sentinel marking a path with no applicable AAE crop in {@link #cropCache}. */
-    private static final double[] NO_CROP = new double[0];
     /**
-     * Per-path AAE crop-fraction cache (or {@link #NO_CROP}), so the hot draw
-     * loop avoids the store lookup and {@code Optional} allocations on every
-     * media tile of every frame. AAE edits don't change at runtime, so entries
-     * never go stale; cleared on a directory change.
+     * Per-path generation for targeted thumbnail replacement. A crop can be
+     * saved while an older master-only request is still in flight; this token
+     * prevents that stale completion from replacing the newly baked rendition.
      */
-    private final Map<Path, double[]> cropCache = new java.util.HashMap<>();
+    private final Map<Path, Integer> thumbnailRevisions = new java.util.HashMap<>();
 
     /** Type-to-select over {@link #items} (shared with the main window's list). */
     private final Typeahead typeahead = new Typeahead();
@@ -734,6 +744,12 @@ public final class MosaicWindow
             saveSettingsQuietly();
             requestDraw();
         });
+        this.reticuleScope.set(settings.mosaicReticuleScope());
+        this.reticuleScope.addListener((o, was, v) -> {
+            settings.setMosaicReticuleScope(v);
+            saveSettingsQuietly();
+            requestDraw();
+        });
         this.barrenCheck.set(settings.mosaicBarrenCheck());
         this.barrenBudget = settings.mosaicBarrenBudget();
         this.barrenCheck.addListener((o, was, v) -> {
@@ -757,6 +773,10 @@ public final class MosaicWindow
         filterOther.addListener((o, was, v) -> rebuildWithPreservedSelection());
 
         // --- toolbar (shown by default; toggled via Show ▸ Toolbar) -----------
+        // Two variants share every handler/property/binding below (see
+        // buildClassicToolBar / buildComposeToolBar): sizeSlider and
+        // screensaverToggle are the single live model either toolbar's controls
+        // read and write, wired once here regardless of which is built.
         sizeSlider = new Slider(64, 512, tileSize);
         sizeSlider.setPrefWidth(180);
         sizeSlider.setTooltip(new Tooltip("Tile size"));
@@ -766,60 +786,22 @@ public final class MosaicWindow
             scaled.clear();   // tiles are a new on-screen size; rescale lazily
             relayout();
         });
-        var fillToggle = new ToggleButton("Fill");
-        fillToggle.setTooltip(new Tooltip("Crop tiles to fill (seamless squares)"));
-        fillToggle.selectedProperty().bindBidirectional(fillTiles);
-        var seamlessToggle = new ToggleButton("Seamless");
-        seamlessToggle.setTooltip(new Tooltip(
-                "Draw tiles with no margin or border (margin/border settings kept)"));
-        seamlessToggle.selectedProperty().bindBidirectional(seamless);
-        var filterButton = new MenuButton("Filter");
-        filterButton.setTooltip(new Tooltip("Filter media types"));
-        var filterImagesItem = new CheckMenuItem("Images");
-        filterImagesItem.selectedProperty().bindBidirectional(filterImages);
-        var filterVideosItem = new CheckMenuItem("Videos");
-        filterVideosItem.selectedProperty().bindBidirectional(filterVideos);
-        var filterAudioItem = new CheckMenuItem("Audio");
-        filterAudioItem.selectedProperty().bindBidirectional(filterAudio);
-        var filterOtherItem = new CheckMenuItem("Others");
-        filterOtherItem.selectedProperty().bindBidirectional(filterOther);
-        filterButton.getItems().addAll(filterImagesItem, filterVideosItem,
-                filterAudioItem, filterOtherItem);
-        var sortButton = new MenuButton("Sort");
-        sortButton.setTooltip(new Tooltip("Sort and order items"));
-        var sortKeyGroup = new ToggleGroup();
-        var sortDirectionGroup = new ToggleGroup();
-        sortButton.getItems().addAll(
-                sortKeyItem("By Name", MainWindow.SortKey.NAME, sortKey, sortKeyGroup),
-                sortKeyItem("By Extension", MainWindow.SortKey.EXTENSION,
-                        sortKey, sortKeyGroup),
-                sortKeyItem("By Size", MainWindow.SortKey.SIZE, sortKey, sortKeyGroup),
-                sortKeyItem("By Date", MainWindow.SortKey.DATE, sortKey, sortKeyGroup),
-                new SeparatorMenuItem(),
-                sortDirectionItem("Ascending", false, sortDescending, sortDirectionGroup),
-                sortDirectionItem("Descending", true, sortDescending, sortDirectionGroup));
-        var labelsButton = new MenuButton("Labels");
-        labelsButton.setTooltip(new Tooltip(
-                "Toggle folder, file, and media tile labels"));
-        var labelFoldersItem = new CheckMenuItem("Folders");
-        labelFoldersItem.selectedProperty().bindBidirectional(dirLabelsVisible);
-        var labelFilesItem = new CheckMenuItem("Files");
-        labelFilesItem.selectedProperty().bindBidirectional(fileLabelsVisible);
-        var labelMediaItem = new CheckMenuItem("Media");
-        labelMediaItem.selectedProperty().bindBidirectional(mediaLabelsVisible);
-        labelsButton.getItems().addAll(
-                labelFoldersItem, labelFilesItem, labelMediaItem);
-        var tileLabel = new Label("Tile");
-        tileLabel.setPadding(new Insets(0, 0, 0, 10)); // ~1.25-char left margin
         screensaverToggle.setTooltip(new Tooltip(
                 "Start the Matrix screensaver now (any input returns to the mosaic)"));
         screensaverToggle.setOnAction(e -> {
             if (screensaverToggle.isSelected()) startScreensaver();
             else stopScreensaver();
         });
-        this.toolBar = new ToolBar(tileLabel, sizeSlider, new Separator(),
-                fillToggle, seamlessToggle, new Separator(), filterButton, sortButton,
-                labelsButton, new Separator(), screensaverToggle);
+        // ui.style is read once at startup, like WindowMode: WindowChrome's
+        // manual-undecorated drag-handle/close-button wiring (SingleWindowShell /
+        // MultiWindowShell) attaches directly to whichever ToolBar instance this
+        // constructor hands back through toolBar(), so swapping *which node* is
+        // the toolbar after that wiring runs is not the "cheap" case the variant
+        // switch is allowed to take — it is a next-start setting instead.
+        this.toolBar = settings.uiStyle() == UiStyle.COMPOSE
+                ? buildComposeToolBar(sortKey, sortDescending)
+                : buildClassicToolBar(sortKey, sortDescending);
+        ToolBars.applyControlBaseline(toolBar);
         toolBar.visibleProperty().bind(toolbarVisible);
         toolBar.managedProperty().bind(toolbarVisible);
 
@@ -841,8 +823,9 @@ public final class MosaicWindow
         // This is an HBox rather than a ToolBar because the editable path must
         // consume all remaining width. Opt it into the same theme class as the
         // real toolbar so both strips use the Viewer toolbar's active palette.
-        locationBar.getStyleClass().addAll("tool-bar", "mosaic-location-bar");
+        locationBar.getStyleClass().addAll("tool-bar", "location-bar");
         locationBar.setStyle("-fx-alignment: center-left;");
+        ToolBars.applyControlBaseline(locationBar);
         locationBar.visibleProperty().bind(locationBarVisible);
         locationBar.managedProperty().bind(locationBarVisible);
 
@@ -868,7 +851,11 @@ public final class MosaicWindow
         canvas.heightProperty().bind(canvasHolder.heightProperty());
         canvas.widthProperty().addListener((o, a, b) -> relayout());
         canvas.heightProperty().addListener((o, a, b) -> relayout());
-        canvasHolder.setStyle("-fx-background-color: black;");
+        // Default black lives in mosaic.css's .mosaic-canvas-holder rule (the
+        // kotlin design's canvas role is near-black in every theme, so it never
+        // needs a per-theme override); the class hook lets a future theme still
+        // change it deliberately.
+        canvasHolder.getStyleClass().add("mosaic-canvas-holder");
         // The fixed-size animated overlays would otherwise drive the holder's
         // minimum size up to 300×112; let it shrink to nothing in narrow windows.
         canvasHolder.setMinSize(0, 0);
@@ -880,8 +867,8 @@ public final class MosaicWindow
         // mouse-transparent so clicks fall through to the canvas beneath.
         loadingLabel.setMouseTransparent(true);
         loadingLabel.setVisible(false);
-        loadingLabel.setStyle("-fx-text-fill: #dddddd; -fx-background-color: rgba(0,0,0,0.55);"
-                + " -fx-background-radius: 6; -fx-padding: 8 16 8 16; -fx-font-size: 14px;");
+        // Default styling lives in mosaic.css's .mosaic-loading-pill rule.
+        loadingLabel.getStyleClass().add("mosaic-loading-pill");
         StackPane.setAlignment(loadingLabel, Pos.CENTER);
         StackPane.setAlignment(loadingOverlay, Pos.BOTTOM_LEFT);
         StackPane.setMargin(loadingOverlay, new Insets(0, 0, 6, 6));
@@ -1002,10 +989,11 @@ public final class MosaicWindow
         this.root = new javafx.scene.layout.BorderPane(contentSplit);
         root.setTop(topBox);
         root.setBottom(bottomBox);
-        root.setStyle("-fx-background-color: black;");
         // Stable scope hook for Mosaic-only rules. Keep palette rules in the
         // selected theme so Mosaic controls cannot override Cupertino, Default
         // JavaFX, or any other active theme merely because mosaic.css is local.
+        // The black background itself is set via mosaic.css's .mosaic-root
+        // rule (not a palette rule — the canvas stays black in every theme).
         root.getStyleClass().add("mosaic-root");
 
         // On the root (not the shared scene), so Mosaic-only behavior leaves
@@ -1140,6 +1128,170 @@ public final class MosaicWindow
      * Builds one sort-key radio item backed by the browser's shared listing
      * state, keeping this toolbar dropdown and every Sort menu copy in sync.
      */
+    /**
+     * The default, text-labelled toolbar: Tile size, Fill/Seamless toggles,
+     * Filter/Sort/Labels menus, then Screensaver. Unchanged from before the
+     * compose variant existed — see {@link #buildComposeToolBar} for the
+     * icon-first reorganisation, which drives these exact same properties.
+     */
+    private ToolBar buildClassicToolBar(
+            ObjectProperty<MainWindow.SortKey> sortKey, BooleanProperty sortDescending) {
+        var fillToggle = new ToggleButton("Fill");
+        fillToggle.setTooltip(new Tooltip("Crop tiles to fill (seamless squares)"));
+        fillToggle.selectedProperty().bindBidirectional(fillTiles);
+        var seamlessToggle = new ToggleButton("Seamless");
+        seamlessToggle.setTooltip(new Tooltip(
+                "Draw tiles with no margin or border (margin/border settings kept)"));
+        seamlessToggle.selectedProperty().bindBidirectional(seamless);
+        var filterButton = new MenuButton("Filter");
+        filterButton.setTooltip(new Tooltip("Filter media types"));
+        var filterImagesItem = new CheckMenuItem("Images");
+        filterImagesItem.selectedProperty().bindBidirectional(filterImages);
+        var filterVideosItem = new CheckMenuItem("Videos");
+        filterVideosItem.selectedProperty().bindBidirectional(filterVideos);
+        var filterAudioItem = new CheckMenuItem("Audio");
+        filterAudioItem.selectedProperty().bindBidirectional(filterAudio);
+        var filterOtherItem = new CheckMenuItem("Others");
+        filterOtherItem.selectedProperty().bindBidirectional(filterOther);
+        filterButton.getItems().addAll(filterImagesItem, filterVideosItem,
+                filterAudioItem, filterOtherItem);
+        var sortButton = new MenuButton("Sort");
+        sortButton.setTooltip(new Tooltip("Sort and order items"));
+        var sortKeyGroup = new ToggleGroup();
+        var sortDirectionGroup = new ToggleGroup();
+        sortButton.getItems().addAll(
+                sortKeyItem("By Name", MainWindow.SortKey.NAME, sortKey, sortKeyGroup),
+                sortKeyItem("By Extension", MainWindow.SortKey.EXTENSION,
+                        sortKey, sortKeyGroup),
+                sortKeyItem("By Size", MainWindow.SortKey.SIZE, sortKey, sortKeyGroup),
+                sortKeyItem("By Date", MainWindow.SortKey.DATE, sortKey, sortKeyGroup),
+                new SeparatorMenuItem(),
+                sortDirectionItem("Ascending", false, sortDescending, sortDirectionGroup),
+                sortDirectionItem("Descending", true, sortDescending, sortDirectionGroup));
+        var labelsButton = new MenuButton("Labels");
+        labelsButton.setTooltip(new Tooltip(
+                "Toggle folder, file, and media tile labels"));
+        var labelFoldersItem = new CheckMenuItem("Folders");
+        labelFoldersItem.selectedProperty().bindBidirectional(dirLabelsVisible);
+        var labelFilesItem = new CheckMenuItem("Files");
+        labelFilesItem.selectedProperty().bindBidirectional(fileLabelsVisible);
+        var labelMediaItem = new CheckMenuItem("Media");
+        labelMediaItem.selectedProperty().bindBidirectional(mediaLabelsVisible);
+        labelsButton.getItems().addAll(
+                labelFoldersItem, labelFilesItem, labelMediaItem);
+        var tileLabel = new Label("Tile");
+        tileLabel.setPadding(new Insets(0, 0, 0, 10)); // ~1.25-char left margin
+        return new ToolBar(tileLabel, sizeSlider, new Separator(),
+                fillToggle, seamlessToggle, new Separator(), filterButton, sortButton,
+                labelsButton, new Separator(), screensaverToggle);
+    }
+
+    /**
+     * The Compose-style toolbar (opt-in via Settings ▸ General ▸ UI style):
+     * icon-first, in the kotlin-mosaic {@code MosaicToolbar} ordering —
+     * navigation, view toggles, tile size, filter/sort, panel toggles,
+     * screensaver, settings. Every control here binds to the exact same
+     * property {@link #buildClassicToolBar} does (or, for Up/Refresh/Settings,
+     * calls the same navigation methods the rest of the window already uses),
+     * so the two toolbars are two arrangements of one set of live wiring
+     * rather than duplicated logic. Icon-only with tooltips; text is the
+     * fallback in the Original icon pack (see {@link ToolBars#iconify}).
+     */
+    private ToolBar buildComposeToolBar(
+            ObjectProperty<MainWindow.SortKey> sortKey, BooleanProperty sortDescending) {
+        // --- navigation ---
+        var upButton = new Button();
+        ToolBars.iconify(upButton, AppIcon.UP, "Enclosing Folder");
+        upButton.setOnAction(e -> navigateToParent());
+        var refreshButton = new Button();
+        ToolBars.iconify(refreshButton, AppIcon.REFRESH, "Reload Folder");
+        refreshButton.setOnAction(e -> refreshCurrentDirectory());
+
+        // --- view toggles ---
+        var fillToggle = new ToggleButton();
+        ToolBars.iconify(fillToggle, AppIcon.CROP, "Crop tiles to fill (seamless squares)");
+        fillToggle.selectedProperty().bindBidirectional(fillTiles);
+        var seamlessToggle = new ToggleButton();
+        ToolBars.iconify(seamlessToggle, AppIcon.SEAMLESS,
+                "Draw tiles with no margin or border (margin/border settings kept)");
+        seamlessToggle.selectedProperty().bindBidirectional(seamless);
+        var labelsButton = new MenuButton();
+        ToolBars.iconify(labelsButton, AppIcon.LABELS,
+                "Toggle folder, file, and media tile labels");
+        var labelFoldersItem = new CheckMenuItem("Folders");
+        labelFoldersItem.selectedProperty().bindBidirectional(dirLabelsVisible);
+        var labelFilesItem = new CheckMenuItem("Files");
+        labelFilesItem.selectedProperty().bindBidirectional(fileLabelsVisible);
+        var labelMediaItem = new CheckMenuItem("Media");
+        labelMediaItem.selectedProperty().bindBidirectional(mediaLabelsVisible);
+        labelsButton.getItems().addAll(labelFoldersItem, labelFilesItem, labelMediaItem);
+
+        // --- tile size, with a small grid glyph in place of the "Tile" label ---
+        var gridIconLabel = new Label();
+        var gridIcon = new IconView(AppIcon.GRID, 16);
+        gridIcon.colorProperty().bind(gridIconLabel.textFillProperty());
+        gridIconLabel.setGraphic(gridIcon);
+        gridIconLabel.setTooltip(new Tooltip("Tile size"));
+
+        // --- filter / sort: this repo's MenuButtons, iconified ---
+        var filterButton = new MenuButton();
+        ToolBars.iconify(filterButton, AppIcon.FILTER, "Filter media types");
+        var filterImagesItem = new CheckMenuItem("Images");
+        filterImagesItem.selectedProperty().bindBidirectional(filterImages);
+        var filterVideosItem = new CheckMenuItem("Videos");
+        filterVideosItem.selectedProperty().bindBidirectional(filterVideos);
+        var filterAudioItem = new CheckMenuItem("Audio");
+        filterAudioItem.selectedProperty().bindBidirectional(filterAudio);
+        var filterOtherItem = new CheckMenuItem("Others");
+        filterOtherItem.selectedProperty().bindBidirectional(filterOther);
+        filterButton.getItems().addAll(filterImagesItem, filterVideosItem,
+                filterAudioItem, filterOtherItem);
+        var sortButton = new MenuButton();
+        ToolBars.iconify(sortButton, AppIcon.SORT, "Sort and order items");
+        var sortKeyGroup = new ToggleGroup();
+        var sortDirectionGroup = new ToggleGroup();
+        sortButton.getItems().addAll(
+                sortKeyItem("By Name", MainWindow.SortKey.NAME, sortKey, sortKeyGroup),
+                sortKeyItem("By Extension", MainWindow.SortKey.EXTENSION,
+                        sortKey, sortKeyGroup),
+                sortKeyItem("By Size", MainWindow.SortKey.SIZE, sortKey, sortKeyGroup),
+                sortKeyItem("By Date", MainWindow.SortKey.DATE, sortKey, sortKeyGroup),
+                new SeparatorMenuItem(),
+                sortDirectionItem("Ascending", false, sortDescending, sortDirectionGroup),
+                sortDirectionItem("Descending", true, sortDescending, sortDirectionGroup));
+
+        // --- panel toggles: exactly the Browser's icons in the same order ---
+        var panelToggles = ToolBars.panelToggles(true,
+                infoPanelVisible, metadataPanelVisible, diagnosticsPanelVisible,
+                statusBarVisible, actionLogVisible);
+
+        // View-specific chrome follows the shared panel block. The Browser has
+        // Address Bar / Nav Tree here; Mosaic has its corresponding Location Bar.
+        var locationToggle = new ToggleButton();
+        ToolBars.iconify(locationToggle, AppIcon.ADDRESS_BAR, "Location Bar");
+        locationToggle.selectedProperty().bindBidirectional(locationBarVisible);
+
+        // --- screensaver: the exact same field/handler as the classic toolbar,
+        // just iconified (its tooltip and onAction are wired once, above, in
+        // the constructor, regardless of which toolbar is built) ---
+        IconBinding.install(screensaverToggle, AppIcon.SCREENSAVER,
+                AppIcon.SCREENSAVER.originalGlyph(), "", "Screensaver");
+
+        // --- settings ---
+        var settingsButton = new Button();
+        ToolBars.iconify(settingsButton, AppIcon.SETTINGS, "Settings");
+        settingsButton.setOnAction(e -> settingsHandler.run());
+
+        var bar = new ToolBar(upButton, refreshButton, filterButton, sortButton,
+                new Separator());
+        bar.getItems().addAll(panelToggles);
+        bar.getItems().addAll(new Separator(), locationToggle, new Separator(),
+                fillToggle, seamlessToggle, labelsButton, new Separator(),
+                gridIconLabel, sizeSlider, new Separator(),
+                screensaverToggle, new Separator(), settingsButton);
+        return bar;
+    }
+
     private static RadioMenuItem sortKeyItem(
             String text,
             MainWindow.SortKey value,
@@ -1383,6 +1535,11 @@ public final class MosaicWindow
     /** Whether file tiles Media Browser will not open carry the gray hatch. */
     public BooleanProperty wontOpenReticuleProperty() {
         return wontOpenReticule;
+    }
+
+    /** Coverage shared by folder and file reticules. */
+    public ObjectProperty<MosaicReticuleScope> reticuleScopeProperty() {
+        return reticuleScope;
     }
 
     /**
@@ -1814,6 +1971,15 @@ public final class MosaicWindow
     }
 
     /**
+     * Sets the handler that opens the shared Settings dialog, wired to the
+     * compose toolbar's Settings gear (the classic toolbar reaches it through
+     * the shared menu bar / {@code Cmd+,} instead).
+     */
+    public void setSettingsHandler(Runnable handler) {
+        this.settingsHandler = handler != null ? handler : () -> { };
+    }
+
+    /**
      * Sets the folder-tile preview collage edge {@code N} (N×N child images;
      * {@code 0} draws a plain folder glyph), dropping any cached scans so the
      * new {@code N²} limit takes effect, and repaints.
@@ -1856,6 +2022,7 @@ public final class MosaicWindow
         this.fileLabelsVisible.set(settings.mosaicFileLabelsVisible());
         this.mediaLabelsVisible.set(settings.mosaicMediaLabelsVisible());
         this.wontOpenReticule.set(settings.mosaicWontOpenReticule());
+        this.reticuleScope.set(settings.mosaicReticuleScope());
         this.tileSet.set(MosaicTileSets.resolve(settings.mosaicTileSetId()));
         this.folderGlyph.set(settings.mosaicFolderGlyph());
         this.selectionAnimation.set(settings.mosaicSelectionAnimation());
@@ -2198,11 +2365,11 @@ public final class MosaicWindow
             barrenVerdicts.clear();
             barrenPending.clear();
             // Draw-loop per-path/per-text caches are directory-scoped; drop them
-            // so they don't carry stale adjustments/crops/captions across folders.
+            // so they don't carry stale adjustments/captions across folders.
             adjustmentsCache.clear();
             colorSource.clear();
             colorOutput.clear();
-            cropCache.clear();
+            thumbnailRevisions.clear();
             captionWidths.clear();
             if (wanted >= 0) {
                 resetSelectionTo(wanted);
@@ -2648,10 +2815,24 @@ public final class MosaicWindow
                 cx, cy, tileSize, dynamicModifiers);
         MosaicTileSet painter = tileSet.get();
         paintTileSet(painter == null ? MosaicTileSets.CURRENT : painter);
-        // Availability is host-owned rather than tile-set artwork, so every
-        // built-in and plugin uses the same mark. Restore the caption above the
-        // hatch; selection remains the final layer below.
-        if (wontOpenReticule.get() && needsWontOpenReticule(item)) {
+        painter = painter == null ? MosaicTileSets.CURRENT : painter;
+        MosaicReticuleScope scope = reticuleScope.get();
+        boolean glyphOnly = scope.glyphOnly();
+        Reticule glyphMark = glyphOnly ? activeReticuleFor(item, preview) : null;
+        if (glyphMark != null) {
+            // Tile sets that know their own primary silhouette clip the shared
+            // pattern exactly to it. Older plugins retain the full-tile mark.
+            Paint pattern = scope.black()
+                    ? glyphMark.blackPattern() : glyphMark.pattern();
+            if (!painter.paintGlyphReticule(tilePaintContext, pattern)) {
+                drawReticule(g, pattern, cx, cy);
+            }
+            drawCaption(tilePaintContext);
+        } else if (!glyphOnly
+                && wontOpenReticule.get() && needsWontOpenReticule(item)) {
+            // Availability is host-owned rather than tile-set artwork, so every
+            // built-in and plugin uses the same mark. Restore the caption above
+            // the hatch; selection remains the final layer below.
             drawReticule(g, Reticule.WONT_OPEN, cx, cy);
             drawCaption(tilePaintContext);
         }
@@ -2682,6 +2863,17 @@ public final class MosaicWindow
         return entry != null && !entry.openable();
     }
 
+    /** One mark resolver shared by the unified glyph-coverage setting. */
+    private Reticule activeReticuleFor(DirEntry entry, FolderPreview preview) {
+        if (wontOpenReticule.get() && needsWontOpenReticule(entry)) {
+            return Reticule.WONT_OPEN;
+        }
+        if (emptyReticule.get() && entry.type() == DirEntry.Type.DIRECTORY) {
+            return reticuleFor(preview, entry.path());
+        }
+        return null;
+    }
+
     /**
      * Isolates service-loaded painters from the host canvas. A broken provider
      * falls back to Current after its first failure instead of breaking Mosaic's
@@ -2702,7 +2894,8 @@ public final class MosaicWindow
                 || painter == MosaicTileSets.XEDGE_XS_SOLID
                 || painter == MosaicTileSets.DARKROOM
                 || painter == MosaicTileSets.FACTORY
-                || painter == MosaicTileSets.BLACKLINE) {
+                || painter == MosaicTileSets.BLACKLINE
+                || painter == MosaicTileSets.COMPOSE) {
             painter.paint(tilePaintContext);
             return;
         }
@@ -2758,6 +2951,28 @@ public final class MosaicWindow
     }
 
     @Override
+    public boolean paintCurrentGlyphReticule(
+            MosaicTilePaintContext context, Paint reticule) {
+        DirEntry item = context.entry();
+        if (item.type() == DirEntry.Type.DIRECTORY) {
+            // A photographic folder has no cheap vector/alpha mask; preserve
+            // the established full-tile fallback for that legacy-only style.
+            if (folderGlyph.get() == MosaicFolderGlyph.IMAGE) return false;
+            fillFolderShape(context.graphics(), context.x(), context.y(), Color.BLACK);
+            fillFolderShape(context.graphics(), context.x(), context.y(), reticule);
+            return true;
+        }
+        if (item.type() == DirEntry.Type.OTHER) {
+            String glyph = otherGlyph(item);
+            double span = tileSize * 0.55;
+            drawGlyph(context.graphics(), glyph, context.x(), context.y(), span, Color.BLACK);
+            drawGlyph(context.graphics(), glyph, context.x(), context.y(), span, reticule);
+            return true;
+        }
+        return false;
+    }
+
+    @Override
     public boolean drawMediaThumbnail(MosaicTilePaintContext context) {
         if (!thumbnailsVisible.get()) return false;
         Image image = imageFor(context.entry().path());
@@ -2790,6 +3005,7 @@ public final class MosaicWindow
 
     @Override
     public void drawReticule(MosaicTilePaintContext context) {
+        if (reticuleScope.get().glyphOnly()) return;
         if (context.entry().type() != DirEntry.Type.DIRECTORY) return;
         drawReticule(context.graphics(), folderPreviewFor(context.entry().path()),
                 context.entry().path(), context.x(), context.y());
@@ -2879,12 +3095,16 @@ public final class MosaicWindow
 
     /** Paints one proportional reticule over a tile without changing layout. */
     private void drawReticule(GraphicsContext g, Reticule mark, double cx, double cy) {
+        drawReticule(g, mark.pattern(), cx, cy);
+    }
+
+    private void drawReticule(GraphicsContext g, Paint pattern, double cx, double cy) {
         // Smoothing would blur the pattern to flat grey, which is exactly the
         // mush that kills the read. The ImagePattern cell is proportional to
         // this fillRect's tile bounds, so its visual scale follows tileSize.
         boolean wasSmooth = g.isImageSmoothing();
         g.setImageSmoothing(false);
-        g.setFill(mark.pattern());
+        g.setFill(pattern);
         g.fillRect(cx, cy, tileSize, tileSize);
         g.setImageSmoothing(wasSmooth);
     }
@@ -2957,14 +3177,18 @@ public final class MosaicWindow
 
     /** A non-media file tile: its (faint) uppercase extension, or a dash. */
     private void drawOtherContent(GraphicsContext g, DirEntry item, double cx, double cy) {
-        String ext = item.extension();
         // The extension label is trimmed to <=4 chars and sized to fit the tile,
         // so it needs no clip. Avoiding g.clip() here is important: a clip forces
         // NGCanvas to validate and GL-clear a full-canvas-sized buffer per call
         // (NGCanvas.initClip -> nClearBuffers), which on a large window dominates
         // render time and stalls scrolling in file-heavy directories.
-        drawGlyph(g, ext.isEmpty() ? "\u2014" : trimExtensionLabel(ext.toUpperCase()), cx, cy, tileSize * 0.55);
+        drawGlyph(g, otherGlyph(item), cx, cy, tileSize * 0.55);
         if (fileLabelsVisible.get()) drawCaption(g, item.displayName(), cx, cy);
+    }
+
+    private static String otherGlyph(DirEntry item) {
+        String ext = item.extension();
+        return ext.isEmpty() ? "\u2014" : trimExtensionLabel(ext.toUpperCase());
     }
 
     /** Extension labels show at most 4 chars; 5+ are cut to 3 plus an ellipsis. */
@@ -2995,22 +3219,18 @@ public final class MosaicWindow
     /**
      * Like {@link #drawFitted}, but first resolves a {@link #displayImage}
      * pre-scaled to the on-screen box so repaints blit a small image instead of
-     * downscaling the full (≤ {@code maxEdge}) rendition every frame.
+     * downscaling the full (≤ {@code maxEdge}) rendition every frame. AAE crop
+     * and straighten are already baked into {@code img}'s thumbnail cache entry.
      */
     private void drawScaled(GraphicsContext g, Path path, Image img,
                             double x, double y, double w, double h) {
-        // An AAE crop is shown at draw time too (the same "above the decoders,
-        // touch no cache" seam as rotation): blit just the crop sub-rectangle.
-        // Cropped tiles use the full ≤maxEdge rendition for sharpness; uncropped
-        // ones use the pre-scaled display image for cheap blits.
-        double[] crop = cropFractionFor(path);
-        Image src = crop != null ? img : displayImage(path, img, Math.max(w, h));
+        Image src = displayImage(path, img, Math.max(w, h));
         Adjustments adj = adjustmentsFor(path);
         // Colour adjustments (grayscale/invert) are a cached pixel pass; geometry
         // (rotation/mirror) stays a free draw-time canvas transform below.
         src = colorAdjusted(path, src, adj);
         if (!adj.hasGeometry()) {
-            drawFittedRegion(g, src, crop, x, y, w, h);
+            drawFitted(g, src, x, y, w, h);
             return;
         }
         // Draw-time user geometry: mirror (a -1 scale per flipped axis) then spin
@@ -3019,36 +3239,15 @@ public final class MosaicWindow
         // for collage cells), so an odd quarter-turn needs no width/height swap.
         // The scale-then-rotate order matches RasterFrames.apply (rotate first,
         // then mirror, in image space). Nothing is re-decoded and no thumbnail is
-        // touched — rotating, mirroring (and cropping) is free.
+        // touched — rotating and mirroring are free.
         g.save();
         double cx = x + w / 2, cy = y + h / 2;
         g.translate(cx, cy);
         g.scale(adj.mirrorH() ? -1 : 1, adj.mirrorV() ? -1 : 1);
         g.rotate(adj.quarterTurnsCw() * 90);
         g.translate(-cx, -cy);
-        drawFittedRegion(g, src, crop, x, y, w, h);
+        drawFitted(g, src, x, y, w, h);
         g.restore();
-    }
-
-    /**
-     * The AAE crop rectangle for {@code path} as master fractions
-     * ({@code [fx,fy,fw,fh]}), or null when none applies. Only applied to FIT
-     * renditions: a FILL thumbnail is already cover-cropped to a square, which
-     * breaks the master→thumbnail mapping, so those keep the uncropped fill (the
-     * viewer still shows the true crop). The store lookup is an O(1) cached map
-     * read, safe to call per tile per repaint.
-     */
-    private double[] cropFractionFor(Path path) {
-        if (thumbnailMode != ThumbnailMode.FIT) {
-            return null;
-        }
-        double[] cached = cropCache.get(path);
-        if (cached != null) {
-            return cached == NO_CROP ? null : cached;
-        }
-        double[] crop = aaeStore.forImage(path).flatMap(AaeSidecar::cropFraction).orElse(null);
-        cropCache.put(path, crop == null ? NO_CROP : crop);
-        return crop;
     }
 
     /**
@@ -3140,25 +3339,6 @@ public final class MosaicWindow
     }
 
     /**
-     * Draws {@code img} fitted (aspect-preserved, centred) into the w×h box at
-     * (x,y); when {@code crop} is non-null, only that fractional source
-     * sub-rectangle is fitted (a draw-time crop via the 8-arg blit).
-     */
-    private void drawFittedRegion(GraphicsContext g, Image img, double[] crop,
-                                  double x, double y, double w, double h) {
-        if (crop == null) {
-            drawFitted(g, img, x, y, w, h);
-            return;
-        }
-        double iw = img.getWidth(), ih = img.getHeight();
-        double sx = crop[0] * iw, sy = crop[1] * ih;
-        double sw = Math.max(1, crop[2] * iw), sh = Math.max(1, crop[3] * ih);
-        double scale = Math.min(w / sw, h / sh);
-        double dw = sw * scale, dh = sh * scale;
-        g.drawImage(img, sx, sy, sw, sh, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
-    }
-
-    /**
      * A copy of {@code src} scaled down to roughly the on-screen box's device
      * pixels ({@code boxEdge} × the HiDPI render scale), cached by path and
      * reused until the on-screen tile size changes. Sources already at (or below)
@@ -3246,14 +3426,26 @@ public final class MosaicWindow
 
     /** A faint centred glyph sized to {@code span} (capped), for empty/loading tiles. */
     private void drawGlyph(GraphicsContext g, String glyph, double cx, double cy, double span) {
-        drawGlyphAtFontSize(g, glyph, cx, cy, Math.min(40, span / 3.0));
+        drawGlyph(g, glyph, cx, cy, span, GLYPH_FILL);
+    }
+
+    private void drawGlyph(
+            GraphicsContext g, String glyph, double cx, double cy,
+            double span, Paint fill) {
+        drawGlyphAtFontSize(g, glyph, cx, cy, Math.min(40, span / 3.0), fill);
     }
 
     /** Draws a centred glyph at an explicit font size. */
     private void drawGlyphAtFontSize(
             GraphicsContext g, String glyph,
             double cx, double cy, double fontSize) {
-        g.setFill(GLYPH_FILL);
+        drawGlyphAtFontSize(g, glyph, cx, cy, fontSize, GLYPH_FILL);
+    }
+
+    private void drawGlyphAtFontSize(
+            GraphicsContext g, String glyph,
+            double cx, double cy, double fontSize, Paint fill) {
+        g.setFill(fill);
         g.setFont(font(fontSize));
         g.setTextAlign(TextAlignment.CENTER);
         g.setTextBaseline(VPos.CENTER);
@@ -3300,14 +3492,20 @@ public final class MosaicWindow
             }
         }
         boolean inverse = style == MosaicFolderGlyph.INVERSE;
-        double w = tileSize * 0.46, h = tileSize * 0.34;
-        double fx = cx + (tileSize - w) / 2.0, fy = cy + (tileSize - h) / 2.0;
-        double tabW = w * 0.42, tabH = h * 0.22;
         if (inverse) {
             g.setFill(FOLDER_GLYPH_FILL);
             g.fillRect(cx, cy, tileSize, tileSize);
         }
-        g.setFill(inverse ? Color.BLACK : FOLDER_GLYPH_FILL);
+        fillFolderShape(g, cx, cy, inverse ? Color.BLACK : FOLDER_GLYPH_FILL);
+    }
+
+    private void fillFolderShape(
+            GraphicsContext g, double cx, double cy, Paint fill) {
+        double w = tileSize * 0.46, h = tileSize * 0.34;
+        double fx = cx + (tileSize - w) / 2.0, fy = cy + (tileSize - h) / 2.0;
+        double tabW = w * 0.42, tabH = h * 0.22;
+        MosaicFolderGlyph style = folderGlyph.get();
+        g.setFill(fill);
         if (style == MosaicFolderGlyph.ROUNDED) {
             // Corner arc diameter; the tab dips a full arc into the body so its
             // rounded bottom corners are buried in the body fill and the joint
@@ -3412,6 +3610,7 @@ public final class MosaicWindow
         pending.add(path);
         MosaicTelemetry.recordThumbnailRequested(pending.size());
         int gen = generation;
+        int revision = thumbnailRevisions.getOrDefault(path, 0);
         long requestedAt = MosaicTelemetry.now();
         long submitStartedAt = MosaicTelemetry.now();
         service.thumbnail(path, maxEdge, thumbnailMode).whenComplete((thumb, error) -> {
@@ -3420,7 +3619,7 @@ public final class MosaicWindow
             Platform.runLater(() -> {
                 long fxStartedAt = MosaicTelemetry.now();
                 MosaicTelemetry.recordThumbnailFxDelay(elapsedBetween(completedAt, fxStartedAt));
-                onThumbnail(gen, path, thumb, error);
+                onThumbnail(gen, revision, path, thumb, error);
                 MosaicTelemetry.recordThumbnailFxApply(
                         MosaicTelemetry.elapsedSince(fxStartedAt), pending.size());
             });
@@ -3512,8 +3711,10 @@ public final class MosaicWindow
         return MediaService.Barren.UNKNOWN;
     }
 
-    private void onThumbnail(int gen, Path path, Thumbnail thumb, Throwable error) {
-        if (gen != generation) return; // directory changed since the request
+    private void onThumbnail(int gen, int revision, Path path,
+                             Thumbnail thumb, Throwable error) {
+        if (gen != generation
+                || revision != thumbnailRevisions.getOrDefault(path, 0)) return;
         pending.remove(path);
         if (error != null || thumb == null) {
             empties.add(path); // draw a placeholder rather than retry endlessly
@@ -3748,6 +3949,18 @@ public final class MosaicWindow
             pendingSelectPath = dir;
             virtualParentHandler.run();
         }
+    }
+
+    /**
+     * Re-navigates to the current folder, re-listing it from disk. The compose
+     * toolbar's Refresh action; mirrors {@code MainWindow.reloadLocation}'s
+     * "navigate to the same directory" reload, since the mosaic has no
+     * standalone rescan of its own — {@link #navigator} always drives a fresh
+     * listing through the host.
+     */
+    private void refreshCurrentDirectory() {
+        Path dir = dirSupplier != null ? dirSupplier.get() : null;
+        if (dir != null) navigator.accept(dir);
     }
 
     /** Arrow/page step: extend the range with Shift held, else move the cursor. */
@@ -4262,6 +4475,20 @@ public final class MosaicWindow
     @Override
     public void mirrorViewerAdjustments(Path path) {
         invalidateAdjustment(path);   // re-read the store's new value on next draw
+        int i = indexOfPath(path);
+        if (i >= 0) repaintCell(canvas.getGraphicsContext2D(), i);
+    }
+
+    /** Replaces the master-only cached rendition with one baked from the new AAE crop. */
+    @Override
+    public void mirrorViewerCrop(Path path) {
+        invalidateAdjustment(path);
+        service.invalidateThumbnail(path);
+        thumbnailRevisions.merge(path, 1, Integer::sum);
+        images.remove(path);
+        scaled.remove(path);
+        pending.remove(path);
+        empties.remove(path);
         int i = indexOfPath(path);
         if (i >= 0) repaintCell(canvas.getGraphicsContext2D(), i);
     }

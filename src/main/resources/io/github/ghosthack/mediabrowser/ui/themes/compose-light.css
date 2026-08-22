@@ -1,0 +1,32 @@
+/*
+ * Compose Light — kotlin-mosaic's PAPER palette over the same JavaFX control
+ * coverage as Compose Dark. The media canvas remains near-black by design;
+ * this palette changes the surrounding application chrome.
+ */
+@import url("compose-dark.css");
+
+.root {
+    -compose-window: #F2F3F5;
+    -compose-surface: #FAFAFB;
+    -compose-surface-raised: #FFFFFF;
+    -compose-surface-sunken: #ECEEF1;
+    -compose-surface-alt: rgba(0, 0, 0, 0.020);
+    -compose-border: #D3D7DD;
+    -compose-divider: #E3E6EA;
+    -compose-accent: #2F6FE0;
+    -compose-accent-subtle: #DCE7FB;
+    -compose-faint-focus: rgba(47, 111, 224, 0.25);
+    -compose-text: #1E2126;
+    -compose-text-muted: #646B75;
+    -compose-selection: #2F6FE0;
+    -compose-on-selection: #FFFFFF;
+    -compose-selection-inactive: #DBDEE3;
+    -compose-on-selection-inactive: #1E2126;
+    -compose-hover: rgba(0, 0, 0, 0.045);
+    -compose-pressed: rgba(0, 0, 0, 0.085);
+    -compose-scroll-track: rgba(0, 0, 0, 0.04);
+    -compose-scroll-thumb: rgba(0, 0, 0, 0.20);
+    -compose-scroll-thumb-hover: rgba(0, 0, 0, 0.32);
+    -compose-slider-track: #D3D7DD;
+    -compose-warning: #B07400;
+}

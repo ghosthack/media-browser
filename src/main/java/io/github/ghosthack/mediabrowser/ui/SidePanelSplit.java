@@ -30,8 +30,10 @@ final class SidePanelSplit extends SplitPane {
         getItems().add(content);
         this.width = new SidePanelWidth(this, panels, settings);
         // Both hosts paint black behind their media surface; the split must not
-        // draw a themed frame around it.
-        setStyle("-fx-background-color: black; -fx-padding: 0;");
+        // draw a themed frame around it. Default styling lives in
+        // window-chrome.css's .side-panel-split rule (loaded on every scene),
+        // so a future theme can still override it deliberately.
+        getStyleClass().add("side-panel-split");
     }
 
     /**

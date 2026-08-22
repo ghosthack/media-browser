@@ -74,4 +74,12 @@ public interface ViewerHost {
      * nothing, for hosts that don't render adjustments (the file list).
      */
     default void mirrorViewerAdjustments(Path path) { }
+
+    /**
+     * Reflects a newly persisted AAE crop into thumbnail caches. Unlike the
+     * other draw-time adjustments, a crop changes the cached rendition itself.
+     */
+    default void mirrorViewerCrop(Path path) {
+        mirrorViewerAdjustments(path);
+    }
 }
