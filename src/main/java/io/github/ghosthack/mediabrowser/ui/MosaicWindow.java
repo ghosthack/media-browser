@@ -43,7 +43,9 @@ import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
 import javafx.geometry.Point2D;
 import javafx.geometry.Pos;
+import javafx.geometry.Rectangle2D;
 import javafx.geometry.VPos;
+import javafx.scene.Cursor;
 import javafx.scene.Node;
 import javafx.scene.SnapshotParameters;
 import javafx.scene.canvas.Canvas;
@@ -81,6 +83,7 @@ import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
 import javafx.scene.input.MouseButton;
 import javafx.scene.input.MouseEvent;
+import javafx.scene.input.TransferMode;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -98,6 +101,7 @@ import javafx.scene.text.TextAlignment;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -413,6 +417,13 @@ public final class MosaicWindow
      */
     private final BooleanProperty keepFocus = new SimpleBooleanProperty(false);
     /**
+     * Opt-in native file drag mode. While enabled, dragging a tile publishes
+     * the current selection as an operating-system file list, which lets other
+     * applications (including browser upload targets) accept it. Runtime-only
+     * and off by default so ordinary selection gestures remain unchanged.
+     */
+    private final BooleanProperty dragTilesToOtherApps = new SimpleBooleanProperty(false);
+    /**
      * Media-type filter toggles shown in the toolbar's Filter submenu. Each
      * defaults to on (showing everything); turning one off hides that type from
      * the grid. Directories and {@code ..} are never affected.
@@ -541,6 +552,14 @@ public final class MosaicWindow
     private final NavigableSet<Integer> selection = new TreeSet<>();
     /** The fixed end of a Shift-range; set by every single-tile selection. */
     private int anchor = -1;
+    /** Tile where the current possible external-drag gesture began. */
+    private int dragPressedIndex = -1;
+    /** Defers collapsing a multi-selection until a click proves not to be a drag. */
+    private boolean collapseDragSelectionOnRelease;
+    /** True after JavaFX has started the native dragboard for this gesture. */
+    private boolean externalDragStarted;
+    /** Number of filesystem entries on the active native dragboard. */
+    private int activeDragFileCount;
     private int columns = 1;
     private int rows = 0;
     private double scrollY;
@@ -696,6 +715,12 @@ public final class MosaicWindow
         // afterwards is transient (it never writes back to the setting).
         this.autoOpen.set(settings.mosaicAutoOpen());
         this.autoOpen.addListener((o, was, v) -> { if (v) maybeAutoOpen(); });
+        this.dragTilesToOtherApps.addListener((o, was, enabled) -> {
+            canvas.setCursor(enabled ? Cursor.OPEN_HAND : Cursor.DEFAULT);
+            statusLabel.setText(enabled
+                    ? "Drag mode on — drag tiles to another app"
+                    : "Drag mode off");
+        });
         // Selection animation on the lead tile; none by default, persisted when changed.
         this.selectionAnimation.set(settings.mosaicSelectionAnimation());
         this.selectionAnimation.addListener((o, was, v) -> setSelectionAnimation(v));
@@ -900,6 +925,9 @@ public final class MosaicWindow
             // not move the selection the way a left-click does.
             if (e.getButton() != MouseButton.PRIMARY) return;
             int hit = indexAt(e.getX(), e.getY());
+            dragPressedIndex = hit;
+            collapseDragSelectionOnRelease = false;
+            externalDragStarted = false;
             if (hit < 0) return;
             if (e.getClickCount() == 2) {
                 selectSingle(hit);
@@ -908,9 +936,33 @@ public final class MosaicWindow
                 extendSelectionTo(hit);          // range from the anchor
             } else if (e.isShortcutDown()) {
                 toggleSelection(hit);            // Cmd/Ctrl: add or remove one tile
+            } else if (dragTilesToOtherApps.get()
+                    && selection.size() > 1 && selection.contains(hit)) {
+                // Native file managers keep a multi-selection intact while a
+                // drag may be beginning, then collapse it on mouse-up if the
+                // gesture turned out to be an ordinary click.
+                collapseDragSelectionOnRelease = true;
             } else {
                 selectSingle(hit);
             }
+        });
+        canvas.setOnMouseReleased(e -> {
+            if (e.getButton() == MouseButton.PRIMARY
+                    && collapseDragSelectionOnRelease && !externalDragStarted
+                    && dragPressedIndex >= 0) {
+                selectSingle(dragPressedIndex);
+            }
+            if (!externalDragStarted) resetExternalDragGesture();
+        });
+        canvas.setOnDragDetected(this::startExternalTileDrag);
+        canvas.setOnDragDone(e -> {
+            if (e.getTransferMode() != null && activeDragFileCount > 0) {
+                statusLabel.setText(activeDragFileCount == 1
+                        ? "Dropped 1 item into another app"
+                        : "Dropped " + activeDragFileCount + " items into another app");
+            }
+            resetExternalDragGesture();
+            canvas.setCursor(dragTilesToOtherApps.get() ? Cursor.OPEN_HAND : Cursor.DEFAULT);
         });
         // Right-click a tile → the per-tile actions popup at the cursor; the
         // platform menu key routes through onKey (see CONTEXT_MENU) instead, as
@@ -1143,6 +1195,10 @@ public final class MosaicWindow
         seamlessToggle.setTooltip(new Tooltip(
                 "Draw tiles with no margin or border (margin/border settings kept)"));
         seamlessToggle.selectedProperty().bindBidirectional(seamless);
+        var dragToggle = new ToggleButton("Drag Out");
+        dragToggle.setTooltip(new Tooltip(
+                "Make selected tiles draggable as files to other applications"));
+        dragToggle.selectedProperty().bindBidirectional(dragTilesToOtherApps);
         var filterButton = new MenuButton("Filter");
         filterButton.setTooltip(new Tooltip("Filter media types"));
         var filterImagesItem = new CheckMenuItem("Images");
@@ -1182,7 +1238,7 @@ public final class MosaicWindow
         var tileLabel = new Label("Tile");
         tileLabel.setPadding(new Insets(0, 0, 0, 10)); // ~1.25-char left margin
         return new ToolBar(tileLabel, sizeSlider, new Separator(),
-                fillToggle, seamlessToggle, new Separator(), filterButton, sortButton,
+                fillToggle, seamlessToggle, dragToggle, new Separator(), filterButton, sortButton,
                 labelsButton, new Separator(), screensaverToggle);
     }
 
@@ -1215,6 +1271,10 @@ public final class MosaicWindow
         ToolBars.iconify(seamlessToggle, AppIcon.SEAMLESS,
                 "Draw tiles with no margin or border (margin/border settings kept)");
         seamlessToggle.selectedProperty().bindBidirectional(seamless);
+        var dragToggle = new ToggleButton();
+        ToolBars.iconify(dragToggle, AppIcon.DRAG_EXPORT,
+                "Make selected tiles draggable as files to other applications");
+        dragToggle.selectedProperty().bindBidirectional(dragTilesToOtherApps);
         var labelsButton = new MenuButton();
         ToolBars.iconify(labelsButton, AppIcon.LABELS,
                 "Toggle folder, file, and media tile labels");
@@ -1286,7 +1346,7 @@ public final class MosaicWindow
                 new Separator());
         bar.getItems().addAll(panelToggles);
         bar.getItems().addAll(new Separator(), locationToggle, new Separator(),
-                fillToggle, seamlessToggle, labelsButton, new Separator(),
+                fillToggle, seamlessToggle, dragToggle, labelsButton, new Separator(),
                 gridIconLabel, sizeSlider, new Separator(),
                 screensaverToggle, new Separator(), settingsButton);
         return bar;
@@ -1570,6 +1630,15 @@ public final class MosaicWindow
      */
     public BooleanProperty keepFocusProperty() {
         return keepFocus;
+    }
+
+    /**
+     * Native file drag mode (Mosaic menu / toolbar). Off by default and
+     * runtime-only; while enabled, dragging any selected real-filesystem tile
+     * exposes the whole selection to other applications as files.
+     */
+    public BooleanProperty dragTilesToOtherAppsProperty() {
+        return dragTilesToOtherApps;
     }
 
     /**
@@ -3730,6 +3799,93 @@ public final class MosaicWindow
     }
 
     // --- interaction ---------------------------------------------------------
+
+    /** Begins a copy-only native file drag for the pressed tile/selection. */
+    private void startExternalTileDrag(MouseEvent event) {
+        if (!dragTilesToOtherApps.get()
+                || dragPressedIndex < 0 || dragPressedIndex >= items.size()) {
+            return;
+        }
+        List<File> files = externalDragFiles(items, selection, dragPressedIndex);
+        if (files.isEmpty()) {
+            statusLabel.setText(ArchivePaths.inArchive(items.get(dragPressedIndex).path())
+                    ? "Archive entries must be extracted before dragging to another app"
+                    : "This tile cannot be dragged to another app");
+            return;
+        }
+
+        var content = new ClipboardContent();
+        content.putFiles(files);
+        var dragboard = canvas.startDragAndDrop(TransferMode.COPY);
+        if (!dragboard.setContent(content)) return;
+
+        installTileDragView(dragboard, dragPressedIndex, event.getX(), event.getY());
+        externalDragStarted = true;
+        activeDragFileCount = files.size();
+        canvas.setCursor(Cursor.CLOSED_HAND);
+        statusLabel.setText(files.size() == 1
+                ? "Dragging " + files.getFirst().getName()
+                : "Dragging " + files.size() + " items");
+        event.consume();
+    }
+
+    /** Uses the already-painted tile as the native drag image when it is visible. */
+    private void installTileDragView(javafx.scene.input.Dragboard dragboard,
+                                     int index, double pointerX, double pointerY) {
+        int outer = tileSize + 2 * borderWidth;
+        int stride = outer + margin;
+        double tileX = margin + (index % columns) * (double) stride;
+        double tileY = margin + (index / columns) * (double) stride - scrollY;
+        double x = Math.max(0, tileX);
+        double y = Math.max(0, tileY);
+        double width = Math.min(tileX + outer, canvas.getWidth()) - x;
+        double height = Math.min(tileY + outer, canvas.getHeight()) - y;
+        if (width <= 0 || height <= 0) return;
+        try {
+            var params = new SnapshotParameters();
+            params.setViewport(new Rectangle2D(x, y, width, height));
+            Image dragView = canvas.snapshot(params, null);
+            dragboard.setDragView(dragView,
+                    clamp(pointerX - x, 0, width), clamp(pointerY - y, 0, height));
+        } catch (RuntimeException ignored) {
+            // The file payload is the contract; a platform that cannot snapshot
+            // during DRAG_DETECTED still gets a fully functional native drag.
+        }
+    }
+
+    private void resetExternalDragGesture() {
+        dragPressedIndex = -1;
+        collapseDragSelectionOnRelease = false;
+        externalDragStarted = false;
+        activeDragFileCount = 0;
+    }
+
+    /**
+     * Converts the selected real-filesystem tiles to the JavaFX file-list drag
+     * format. Parent links and mounted archive entries are intentionally
+     * excluded because another process cannot address their virtual Paths.
+     */
+    static List<File> externalDragFiles(List<DirEntry> entries,
+                                        Iterable<Integer> selectedIndices,
+                                        int fallbackIndex) {
+        var indices = new ArrayList<Integer>();
+        for (int index : selectedIndices) indices.add(index);
+        if (indices.isEmpty()) indices.add(fallbackIndex);
+
+        var files = new ArrayList<File>();
+        for (int index : indices) {
+            if (index < 0 || index >= entries.size()) continue;
+            DirEntry entry = entries.get(index);
+            if (entry.type() == DirEntry.Type.PARENT
+                    || ArchivePaths.inArchive(entry.path())) continue;
+            try {
+                files.add(entry.path().toAbsolutePath().normalize().toFile());
+            } catch (RuntimeException ignored) {
+                // Non-default filesystem providers need an extraction step.
+            }
+        }
+        return List.copyOf(files);
+    }
 
     /** The item index under a viewport point, or -1 if it falls in a gap/border. */
     private int indexAt(double px, double py) {

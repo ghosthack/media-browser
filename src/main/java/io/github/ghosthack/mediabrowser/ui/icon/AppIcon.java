@@ -20,6 +20,7 @@ public enum AppIcon {
     REFRESH("⟳"),
     CROP("▣"),
     SEAMLESS("▩"),
+    DRAG_EXPORT("⇱"),
     LABELS("🏷"),
     FILTER("▽"),
     SORT("⇵"),

@@ -1851,6 +1851,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 boundCheck("_Media", mosaic.mediaLabelsVisibleProperty()));
         var autoOpen = boundCheck("_Auto-open Selected in Viewer", mosaic.autoOpenProperty());
         var keepFocus = boundCheck("_Keep Focus on Open", mosaic.keepFocusProperty());
+        var dragTiles = boundCheck("_Drag Tiles to Other Apps",
+                mosaic.dragTilesToOtherAppsProperty(), keys.mod1Shift(KeyCode.D));
         var animGroup = new ToggleGroup();
         var selectionAnimation = new Menu("Se_lection Animation", null,
                 objRadio(MosaicSelectionAnimation.NONE.label(), MosaicSelectionAnimation.NONE,
@@ -1893,7 +1895,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 boundCheck("Check Whole Su_btree", mosaic.barrenCheckProperty()),
                 new SeparatorMenuItem(),
                 autoOpen,
-                keepFocus);
+                keepFocus,
+                dragTiles);
         return menu;
     }
 
