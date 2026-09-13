@@ -47,6 +47,8 @@ final class SingleWindowShell extends AppShell {
             new ReadOnlyObjectWrapper<>(null);
     private final EnumMap<AppView, BooleanExpression> actives =
             new EnumMap<>(AppView.class);
+    /** Set by {@link #deferRevealUntil}; consumed once by the next {@link #start}. */
+    private java.util.function.BooleanSupplier revealReady = () -> true;
 
     SingleWindowShell(Stage stage, AppSettings settings) {
         super(settings);
@@ -99,17 +101,28 @@ final class SingleWindowShell extends AppShell {
         }
     }
 
-    /** Shows the window on {@code initial} (flash-free like a plain stage show). */
+    /**
+     * Shows the window on {@code initial} (flash-free like a plain stage
+     * show) — held past the usual reveal until a pending {@link
+     * #deferRevealUntil} supplier (a file-association cold start expecting
+     * an imminent swap to the viewer) says it's safe, if one was set.
+     */
     @Override
     public void start(AppView initial) {
         show(initial, false);
-        WindowChrome.showWithoutFlash(stage);
+        WindowChrome.showWithoutFlash(stage, revealReady);
+        revealReady = () -> true; // one-shot: only this start() honours it
         // Re-claim focus once the stage is actually showing; a requestFocus
         // that ran before show() may not have been granted.
         Platform.runLater(() -> {
             ShellView view = views.get(activeView.get());
             if (view != null) view.activate();
         });
+    }
+
+    @Override
+    public void deferRevealUntil(java.util.function.BooleanSupplier ready) {
+        this.revealReady = ready;
     }
 
     @Override

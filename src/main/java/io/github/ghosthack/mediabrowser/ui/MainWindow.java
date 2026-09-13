@@ -872,6 +872,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         pendingViewerTarget = target;
         pendingSelection = target;
+        // Told before shell.start() (called by our caller right after this
+        // method returns) runs: hold the window's initial reveal past the
+        // usual first-frame minimum until the pending viewer swap below has
+        // actually resolved one way or the other, so that swap's own first
+        // paint never has a chance to flash as a separate, visible frame.
+        shell.deferRevealUntil(() -> pendingViewerTarget == null);
         // expandAndSelect's tree-selection listener may itself call
         // navigate() synchronously (whenever it lands on a path different
         // from currentDir) — which sets currentDir immediately but only

@@ -169,19 +169,41 @@ final class WindowChrome {
      * {@code setFill(...)} so the first painted frame is the right colour.
      */
     static void showWithoutFlash(Stage stage) {
+        showWithoutFlash(stage, () -> true);
+    }
+
+    /**
+     * As {@link #showWithoutFlash(Stage)}, but also holds the reveal past
+     * the usual two-frame minimum until {@code ready} says it's safe — for a
+     * cold start that already knows the shown view is about to be swapped
+     * for another moments later (see {@link AppShell#deferRevealUntil}):
+     * without this, only the first view's own first paint is covered, and
+     * the very next swap, landing shortly after, can flash a real, visible
+     * blank frame of its own. Capped at {@link #MAX_REVEAL_HOLD_FRAMES} so a
+     * {@code ready} that never turns true (a target that never resolves)
+     * can't hold the window invisible indefinitely.
+     */
+    static void showWithoutFlash(Stage stage, BooleanSupplier ready) {
         if (stage.isShowing()) return;
         stage.setOpacity(0);
         stage.show();
         new AnimationTimer() {
             private int frames;
             @Override public void handle(long now) {
-                if (++frames >= 2) {   // let the dark scene paint before revealing
+                frames++;
+                // Let the dark scene paint before revealing, same as the
+                // no-arg overload's fixed two-frame wait; ready() only ever
+                // extends that minimum, never shortens it.
+                if (frames >= 2 && (ready.getAsBoolean() || frames >= MAX_REVEAL_HOLD_FRAMES)) {
                     stage.setOpacity(1);
                     stop();
                 }
             }
         }.start();
     }
+
+    /** Safety valve for {@link #showWithoutFlash(Stage, BooleanSupplier)}: ~2s at 60fps. */
+    private static final int MAX_REVEAL_HOLD_FRAMES = 120;
 
     /**
      * Installs the stage-wide part of the substitute controls (the stage's

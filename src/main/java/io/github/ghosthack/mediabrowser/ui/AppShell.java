@@ -106,6 +106,22 @@ public abstract class AppShell {
     /** Puts the application on screen showing {@code initial}. */
     public abstract void start(AppView initial);
 
+    /**
+     * Optionally holds the window's first reveal (a no-op unless overridden)
+     * until {@code ready} says it's safe — for a cold start that already
+     * knows it's about to swap to a second view moments after {@link #start}
+     * (the file-association / "Open with" entry point: {@code start} always
+     * shows the browser first since the viewer's content isn't resolved
+     * until an async listing lands, then swaps to it). Without this, the
+     * single window's own flash-free reveal only covers that first browser
+     * frame — the follow-up swap to the viewer, landing very soon after,
+     * isn't covered and can expose a real, visible white flash of its own.
+     * Call before {@link #start}; only meaningful for a shell that reveals
+     * its window in one piece (currently {@code SingleWindowShell} — a
+     * separate-windows shell has no equivalent single reveal to hold).
+     */
+    public void deferRevealUntil(java.util.function.BooleanSupplier ready) { /* no-op by default */ }
+
     /** Brings {@code v} on screen and gives it keyboard focus. */
     public abstract void showView(AppView v);
 
