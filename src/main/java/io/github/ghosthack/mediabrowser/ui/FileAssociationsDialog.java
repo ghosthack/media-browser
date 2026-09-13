@@ -11,6 +11,7 @@ import io.github.ghosthack.mediabrowser.win.FileAssociationRegistry.AssocStatus;
 import io.github.ghosthack.mediabrowser.win.LaunchInvocation;
 import io.github.ghosthack.panama.media.fileassoc.RegistryException;
 
+import javafx.application.Platform;
 import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.beans.property.SimpleBooleanProperty;
 import javafx.beans.property.SimpleStringProperty;
@@ -41,6 +42,7 @@ import javafx.stage.Modality;
 import javafx.stage.Stage;
 import javafx.stage.Window;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -54,11 +56,17 @@ import java.util.Optional;
  * {@link MainWindow#composeRailItem}/{@link MainWindow#wireSettingsRail}
  * sidebar used by Settings) with one page per media kind (Images/Video/Audio),
  * each a table of every extension {@link ExtensionClassifier} recognizes for
- * that kind (checkbox, icon, extension, format description), with a per-page
- * Select All/None. Registers/removes associations on Confirm via
- * {@link FileAssociationRegistry}; every checkbox always reflects live
- * registry state, never a cached copy, since that state can change from
- * outside the app (Windows Settings, another installer).
+ * that kind (checkbox, icon, extension, a "Make Default" action, format
+ * description), with a per-page Select All/None. Registers/removes
+ * associations on Confirm via {@link FileAssociationRegistry}; every
+ * checkbox always reflects live registry state, never a cached copy, since
+ * that state can change from outside the app (Windows Settings, another
+ * installer). Associating only ever makes this app <em>available</em> for an
+ * extension (Windows won't let a third-party app silently become the
+ * default) — "Make Default" is the row-level affordance for the one path
+ * left to actually get there: the native chooser {@link
+ * FileAssociationRegistry#promptSetDefault} pops, "Always use this app"
+ * checkbox included.
  *
  * <p>A page's rows are only queried against the registry the first time that
  * page is shown (the constructor eagerly loads the initially-selected page;
@@ -89,6 +97,7 @@ public final class FileAssociationsDialog {
     private final Stage stage = new Stage();
     private final Optional<Path> packagedExe = LaunchInvocation.resolvePackagedExe();
     private final Map<MediaKind, List<Row>> rowsByKind = new EnumMap<>(MediaKind.class);
+    private final Map<MediaKind, TableView<Row>> tablesByKind = new EnumMap<>(MediaKind.class);
     private final Map<MediaKind, Boolean> loadedKinds = new EnumMap<>(MediaKind.class);
 
     private final Text feedback = new Text();
@@ -182,7 +191,7 @@ public final class FileAssociationsDialog {
         root.getStyleClass().add("move-dialog");
         root.setPadding(new Insets(16));
 
-        Scene scene = new Scene(root, 640, 620);
+        Scene scene = new Scene(root, 740, 620);
         var css = MoveDialog.class.getResource("move-dialog.css");
         if (css != null) {
             scene.getStylesheets().add(css.toExternalForm());
@@ -252,16 +261,48 @@ public final class FileAssociationsDialog {
         extCol.setCellValueFactory(cd -> new SimpleStringProperty("." + cd.getValue().extension));
         fixWidth(extCol, 80);
 
+        TableColumn<Row, Row> defaultCol = new TableColumn<>();
+        defaultCol.setCellValueFactory(cd -> new ReadOnlyObjectWrapper<>(cd.getValue()));
+        defaultCol.setCellFactory(c -> new TableCell<>() {
+            private final Button makeDefaultButton = new Button("Make Default");
+            {
+                makeDefaultButton.setOnAction(e -> {
+                    Row row = getItem();
+                    if (row != null) makeDefault(row, makeDefaultButton);
+                });
+            }
+
+            @Override
+            protected void updateItem(Row item, boolean empty) {
+                super.updateItem(item, empty);
+                // Only offered once we're genuinely AVAILABLE_NOT_DEFAULT —
+                // that state itself already means the association exists
+                // (see FileAssociationRegistry.query), so there's never a
+                // need to Confirm first before this becomes available.
+                if (empty || item == null || item.status.state() != AssocState.AVAILABLE_NOT_DEFAULT) {
+                    setGraphic(null);
+                } else {
+                    makeDefaultButton.setDisable(packagedExe.isEmpty());
+                    setGraphic(makeDefaultButton);
+                }
+            }
+        });
+        defaultCol.setSortable(false);
+        fixWidth(defaultCol, 110);
+
         TableColumn<Row, String> descCol = new TableColumn<>("Format");
         descCol.setCellValueFactory(cd -> cd.getValue().description);
 
-        table.getColumns().setAll(List.of(checkCol, iconCol, extCol, descCol));
+        // descCol must stay last: CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN
+        // flexes whichever column is last, and Format is the one that should.
+        table.getColumns().setAll(List.of(checkCol, iconCol, extCol, defaultCol, descCol));
         // CheckBoxTableCell toggles its bound property directly on click,
         // bypassing the normal start/commit-edit cycle setEditable() gates —
         // disabling the whole table is what actually blocks interaction (and
         // greys out every cell) in the dev-run case.
         table.setDisable(packagedExe.isEmpty());
         VBox.setVgrow(table, Priority.ALWAYS);
+        tablesByKind.put(kind, table);
 
         var selectAll = new Button("Select All");
         selectAll.setOnAction(e -> rows.forEach(r -> r.selected.set(true)));
@@ -321,12 +362,50 @@ public final class FileAssociationsDialog {
         if (loadedKinds.getOrDefault(kind, false)) return;
         loadedKinds.put(kind, true);
         for (Row row : rowsByKind.get(kind)) {
-            AssocStatus status = FileAssociationRegistry.query(row.extension);
-            row.status = status;
-            row.selected.set(status.state() != AssocState.NOT_ASSOCIATED);
-            row.description.set(withStatusSuffix(row.extension, status));
+            refreshRow(row);
         }
+        // The Default column's button visibility depends on row.status, a
+        // plain field rather than an observable property (selected/description
+        // already are, and refresh on their own) — force the repaint here.
+        TableView<Row> table = tablesByKind.get(kind);
+        if (table != null) table.refresh();
         updateOpenDefaultAppsVisibility();
+    }
+
+    private void refreshRow(Row row) {
+        AssocStatus status = FileAssociationRegistry.query(row.extension);
+        row.status = status;
+        row.selected.set(status.state() != AssocState.NOT_ASSOCIATED);
+        row.description.set(withStatusSuffix(row.extension, status));
+    }
+
+    /**
+     * "Make Default": the one path a third-party app has left to become a
+     * Windows default since the OS stopped letting apps do it silently via
+     * the registry (see {@link FileAssociationRegistry#promptSetDefault}).
+     * Blocks on a background thread — it waits for the user to close the
+     * native chooser — then re-queries just this row on the FX thread.
+     */
+    private void makeDefault(Row row, Button button) {
+        button.setDisable(true);
+        Thread worker = new Thread(() -> {
+            try {
+                FileAssociationRegistry.promptSetDefault(row.extension);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (IOException e) {
+                // Best-effort UI helper, matching openDefaultAppsSettings();
+                // the row simply stays whatever it already was on refresh.
+            }
+            Platform.runLater(() -> {
+                refreshRow(row);
+                TableView<Row> table = tablesByKind.get(row.kind);
+                if (table != null) table.refresh();
+                updateOpenDefaultAppsVisibility();
+            });
+        }, "make-default-prompt");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     private static String withStatusSuffix(String extension, AssocStatus status) {

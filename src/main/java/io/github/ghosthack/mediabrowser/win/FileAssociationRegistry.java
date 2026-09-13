@@ -3,6 +3,7 @@ package io.github.ghosthack.mediabrowser.win;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import io.github.ghosthack.mediabrowser.media.FileAssociationCatalog;
@@ -181,6 +182,36 @@ public final class FileAssociationRegistry {
             return true;
         } catch (IOException e) {
             return false;
+        }
+    }
+
+    /**
+     * Blocks until the user closes it: shows Windows' native "How do you
+     * want to open this .ext file?" chooser for {@code extension}, the
+     * standard shell dialog a real double-click of an unassociated file
+     * shows, complete with its "Always use this app" checkbox. This is the
+     * one path a third-party app has left, by design, to become a Windows
+     * default since the OS stopped letting apps do it silently via the
+     * registry (the same anti-hijack protection {@link #query} works around
+     * for reading): a registry write can register us as <em>available</em>
+     * ({@link AssocState#AVAILABLE_NOT_DEFAULT}), but only the user, through
+     * this dialog or Settings, can make us the default.
+     *
+     * <p>Implemented via the classic {@code rundll32 shell32.dll,OpenAs_RunDll
+     * <file>} shell trick, which needs a real (if empty) file with the right
+     * extension to point at — {@code extension} need not already be
+     * associated with anything for this to work, but the caller should only
+     * offer it where doing so makes sense (see {@link AssocState}).</p>
+     */
+    public static void promptSetDefault(String extension) throws IOException, InterruptedException {
+        requireWindows();
+        Path placeholder = Files.createTempFile("mediabrowser-default-", "." + extension);
+        try {
+            new ProcessBuilder("rundll32.exe", "shell32.dll,OpenAs_RunDll", placeholder.toString())
+                    .start()
+                    .waitFor();
+        } finally {
+            Files.deleteIfExists(placeholder);
         }
     }
 
