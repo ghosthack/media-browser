@@ -132,3 +132,16 @@ The Windows `release-signing` environment requires `AZURE_CLIENT_ID`,
 `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT`, and
 `ARTIFACT_SIGNING_PROFILE` variables. See
 [Release signing setup](SIGNING.md) for details.
+
+## Optional Windows file associations
+
+Off by default — set `WINDOWS_FILE_ASSOCIATIONS=true` to have the installer
+register this app for a curated set of image/video/audio extensions
+(`FileAssociationCatalog.curatedAll()` in the app jar — the same list the
+in-app File Associations… dialog offers), so a fresh install can open those
+files from Explorer immediately. When set, the script invokes
+`io.github.ghosthack.mediabrowser.media.FileAssociationCatalog` from the
+staged jar to emit one jpackage `--file-associations` properties file per
+extension into `target/jpackage/associations`, then passes them all to
+`jpackage`. Leaving the variable unset (the default) changes nothing about
+the installer's output.

@@ -12,6 +12,7 @@ import io.github.ghosthack.mediabrowser.ui.MainWindow;
 import io.github.ghosthack.mediabrowser.ui.ThemeManager;
 import io.github.ghosthack.mediabrowser.ui.ViewerWindow;
 import io.github.ghosthack.mediabrowser.ui.icon.IconPackManager;
+import io.github.ghosthack.mediabrowser.win.SingleInstanceGuard;
 
 import javafx.application.Application;
 import javafx.application.Platform;
@@ -23,13 +24,20 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * Media Browser entry point. Optional first program argument: the directory
- * to open initially (defaults to the user home).
+ * Media Browser entry point. Optional first program argument: either the
+ * directory to open initially (defaults to the user home) or a specific
+ * media file, which opens straight into the viewer for it — the Windows
+ * file-association / "Open with" entry point. A file argument also triggers
+ * {@link SingleInstanceGuard}: if the app is already running, the path is
+ * forwarded to it and this process exits without ever opening a window.
  */
 public final class App extends Application {
 
     /** Friendly name shown in the macOS application menu. */
     static final String APP_NAME = "Media Browser";
+
+    /** Set in {@link #main} before {@code launch()}, when a file argument acquired the single-instance lock. */
+    private static SingleInstanceGuard instanceGuard;
 
     private MediaService service;
 
@@ -128,7 +136,35 @@ public final class App extends Application {
         shell.register(AppShell.AppView.BROWSER, main);
         shell.register(AppShell.AppView.MOSAIC, main.mosaic());
         shell.register(AppShell.AppView.VIEWER, viewer);
-        shell.start(main.openInitial(startDir()));
+
+        Path argPath = launchArgPath();
+        AppShell.AppView initial = (argPath != null && Files.isRegularFile(argPath))
+                ? main.openInitialFile(argPath)
+                : main.openInitial(startDir(argPath));
+        shell.start(initial);
+
+        // A file argument that forwarded to an already-running instance never
+        // reaches here (main() returns before launch()); this instance is
+        // either the one that just acquired the lock, or an ordinary launch
+        // that never touched the guard at all.
+        if (instanceGuard != null) {
+            instanceGuard.onFileReceived(forwarded -> Platform.runLater(() -> {
+                Path abs = forwarded.toAbsolutePath().normalize();
+                if (Files.isRegularFile(abs)) {
+                    main.openInitialFile(abs);
+                } else if (Files.isDirectory(abs)) {
+                    main.openInitial(abs);
+                } else {
+                    return;
+                }
+                Stage front = shell.stageFor(AppShell.AppView.BROWSER);
+                if (front != null) {
+                    front.setIconified(false);
+                    front.toFront();
+                    front.requestFocus();
+                }
+            }));
+        }
         // Retitle the macOS app menu (built during toolkit startup) off the
         // class-name default once the menu exists. Guard on the OS here so the
         // mac-only class (which loads libobjc at init) is never touched elsewhere.
@@ -141,18 +177,35 @@ public final class App extends Application {
     @Override
     public void stop() {
         if (service != null) service.close();
+        if (instanceGuard != null) instanceGuard.close();
     }
 
-    private Path startDir() {
+    /** The launch argument, normalized — a directory, a file, or {@code null} if none was given. */
+    private Path launchArgPath() {
         var args = getParameters().getRaw();
-        if (!args.isEmpty()) {
-            Path dir = Path.of(args.getFirst()).toAbsolutePath().normalize();
-            if (Files.isDirectory(dir)) return dir;
-        }
+        if (args.isEmpty()) return null;
+        return Path.of(args.getFirst()).toAbsolutePath().normalize();
+    }
+
+    /** {@code argPath} itself if it's a directory, else the user home. */
+    private static Path startDir(Path argPath) {
+        if (argPath != null && Files.isDirectory(argPath)) return argPath;
         return Path.of(System.getProperty("user.home"));
     }
 
     public static void main(String[] args) {
+        // Scoped to a *file* argument only — the file-association entry
+        // point. A directory argument (the documented "-Djavafx.args=/dir"
+        // usage, including opening several directories in separate windows)
+        // must keep opening its own window, not get forwarded and dropped.
+        String rawArg = args.length > 0 ? args[0] : null;
+        boolean isFileArg = rawArg != null
+                && Files.isRegularFile(Path.of(rawArg).toAbsolutePath().normalize());
+        if (isFileArg) {
+            var guard = SingleInstanceGuard.acquireOrForward(rawArg);
+            if (guard.isEmpty()) return; // forwarded to the already-running instance
+            instanceGuard = guard.get();
+        }
         launch(args);
     }
 }

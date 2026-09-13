@@ -55,6 +55,19 @@ public final class ExtensionClassifier {
     private ExtensionClassifier() {}
 
     /**
+     * The full recognized extension set for {@code kind} (no leading dot).
+     * For UIs that need the long tail beyond a curated subset — see
+     * {@link FileAssociationCatalog#curated(MediaKind)}.
+     */
+    public static Set<String> extensionsFor(MediaKind kind) {
+        return switch (kind) {
+            case IMAGE -> IMAGE_EXTENSIONS;
+            case VIDEO -> VIDEO_EXTENSIONS;
+            case AUDIO -> AUDIO_EXTENSIONS;
+        };
+    }
+
+    /**
      * The media kind implied by the file's extension, or empty when the
      * extension is unknown (or the name has none).
      */

@@ -164,9 +164,12 @@
     -fx-text-fill: -compose-accent;
 }
 
-/* An open toolbar dropdown keeps the chrome's normal foreground; only its
-   subtle selected background marks the popup as active. */
-.tool-bar .menu-button:showing .label {
+/* An open toolbar dropdown or top-level menu-bar menu keeps the chrome's
+   normal foreground; only its subtle selected background marks it as active.
+   MenuBarSkin stacks both "menu" and "menu-button" on its buttons, so without
+   this carve-out they'd fall through to the accent color above. */
+.tool-bar .menu-button:showing .label,
+.menu-bar .menu-button:showing .label {
     -fx-text-fill: -compose-text;
 }
 

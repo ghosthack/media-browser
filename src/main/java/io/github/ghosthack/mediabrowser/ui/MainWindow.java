@@ -184,6 +184,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final Deque<BrowserLocation> forwardStack = new ArrayDeque<>();
     private boolean traversingHistory;
     private Path pendingSelection;
+    /**
+     * Set by {@link #openInitialFile}: the file to jump straight into the
+     * viewer for once its folder's listing lands in {@link #showListing}.
+     * Always paired with {@link #pendingSelection} pointing at the same path.
+     */
+    private Path pendingViewerTarget;
     /** True for one event tick after a click in a focus-bouncing panel; see armFocusBounce(). */
     private boolean bounceArmed;
 
@@ -837,6 +843,52 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         return AppShell.AppView.BROWSER;
     }
 
+    /**
+     * Navigates to {@code file}'s parent folder and, once that listing lands,
+     * opens the viewer directly on {@code file} — the file-association /
+     * "Open with" entry point (an Explorer double-click, or a path forwarded
+     * from an already-running instance by {@code SingleInstanceGuard}).
+     * Always lands in the browser+viewer, ignoring the startup-layout mosaic
+     * preference {@link #openInitial} honours: the caller asked for one
+     * specific file, not the general startup view.
+     *
+     * @return the view the shell should open on — always
+     *         {@link AppShell.AppView#BROWSER}; {@code viewer.open(...)}
+     *         switches to the viewer itself, one FX pulse later, once the
+     *         listing resolves and the target is found (see {@link #showListing})
+     */
+    public AppShell.AppView openInitialFile(Path file) {
+        Path target = file.toAbsolutePath().normalize();
+        Path parent = target.getParent();
+        if (parent == null || !Files.isDirectory(parent)) {
+            // Deliberately not openInitial(home): that honours the mosaic
+            // startup preference, which would break this method's own
+            // "always BROWSER" contract.
+            Path home = Path.of(System.getProperty("user.home"));
+            expandAndSelect(home);
+            if (!home.equals(currentDir)) navigate(home);
+            listView.requestFocus();
+            return AppShell.AppView.BROWSER;
+        }
+        pendingViewerTarget = target;
+        pendingSelection = target;
+        // expandAndSelect's tree-selection listener already calls navigate()
+        // synchronously when it lands on a path different from currentDir
+        // (exactly the guard openInitial's own "if (currentDir == null)"
+        // exploits) — so currentDir may already equal parent by the time
+        // this runs; skip the second, redundant scan when it does, and
+        // resolve the pending target directly from the listing already on
+        // screen instead.
+        expandAndSelect(parent);
+        if (!parent.equals(currentDir)) {
+            navigate(parent);
+        } else {
+            openPendingViewerTargetIfReady();
+        }
+        listView.requestFocus();
+        return AppShell.AppView.BROWSER;
+    }
+
     /** Opens Mosaic over the shared listing, including an album's virtual label. */
     private void openMosaic() {
         mosaic.open(visibleEntries, () -> currentDir, this::albumLocationLabel);
@@ -1257,6 +1309,57 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             listView.getSelectionModel().clearSelection();
             listView.scrollTo(0);
         }
+        openPendingViewerTargetIfReady();
+    }
+
+    /** Opportunistic check: gives up on an unresolved target only once nothing more will correct it. */
+    private void openPendingViewerTargetIfReady() {
+        openPendingViewerTargetIfReady(false);
+    }
+
+    /**
+     * Consumes {@link #pendingViewerTarget} once its folder listing has
+     * landed: opens the viewer on it directly, the same call
+     * {@link #activateSelected} makes for Enter/double-click, but always
+     * taking focus regardless of the multi-window "keep focus" toggle — a
+     * freshly-opened file (from an Explorer double-click, or forwarded from
+     * a running instance) should always take over.
+     *
+     * <p>Under {@link DetectionMode#CONTENT_SNIFF} the fast/skeleton listing
+     * classifies an unrecognized-extension file as {@code OTHER} until the
+     * background sniff either upgrades it to {@code MEDIA} or leaves it
+     * alone; a still-{@code OTHER} target here may yet be promoted by that
+     * scan, so this only reports "not viewable" and gives up once
+     * {@code giveUpIfUnresolved} says the scan is done (see the
+     * {@link #streamReclassification} completion callback) — otherwise it
+     * leaves {@link #pendingViewerTarget} set and quietly returns, to be
+     * retried once {@link #flushReclassifications} lands a correction.</p>
+     */
+    private void openPendingViewerTargetIfReady(boolean giveUpIfUnresolved) {
+        if (pendingViewerTarget == null) return;
+        Path target = pendingViewerTarget;
+        DirEntry found = null;
+        for (DirEntry entry : entries) {
+            if (entry.path().equals(target)) {
+                found = entry;
+                break;
+            }
+        }
+        if (found != null && found.viewable()) {
+            pendingViewerTarget = null;
+            selectEntry(target);
+            viewer.open(found.toMediaItem(), viewableItems(), true, this);
+            return;
+        }
+        boolean stillSniffing = found != null && found.type() == DirEntry.Type.OTHER
+                && service.detectionMode() == DetectionMode.CONTENT_SNIFF;
+        if (stillSniffing && !giveUpIfUnresolved) {
+            return; // may yet be promoted by the in-flight content sniff
+        }
+        pendingViewerTarget = null;
+        statusLabel.setText(found != null
+                ? "Not viewable: " + found.displayName()
+                : "Not found: " + target);
     }
 
     /**
@@ -1279,7 +1382,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             scheduleReclassFlush();
         }).whenComplete((v, error) -> Platform.runLater(() -> {
             flushReclassifications();              // apply the tail batch
-            if (seq == scanSequence) statusLabel.setText(target.toString());
+            if (seq == scanSequence) {
+                statusLabel.setText(target.toString());
+                // The sniff is done for this navigation: a pending viewer
+                // target still stuck at OTHER is never getting promoted now,
+                // so stop waiting and report it instead of leaving it stuck.
+                openPendingViewerTargetIfReady(true);
+            }
         }));
     }
 
@@ -1329,6 +1438,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         entries.setAll(updated);
         updateCount();
         if (keep != null) selectEntry(keep);
+        // Belt-and-suspenders: a pending viewer target normally resolves in
+        // showListing's initial pass, but a content-sniff correction that
+        // upgrades an unknown-extension file to MEDIA lands here instead.
+        openPendingViewerTargetIfReady();
     }
 
     /**
@@ -1592,7 +1705,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // elsewhere). Every item also carries an Alt-letter mnemonic (the leading
         // "_"). Each window installs its own bar instance, so the OS scopes
         // accelerators to whichever window is focused.
-        var fileMenu = new Menu("_File", null,
+        List<MenuItem> fileItems = new ArrayList<>(List.of(
                 action("_Open Folder\u2026", keys.mod1(KeyCode.O), this::chooseDirectory),
                 action("Open _Album\u2026", keys.mod1Shift(KeyCode.O), this::chooseAlbum),
                 new SeparatorMenuItem(),
@@ -1600,10 +1713,15 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 buildTrashItem(owner),
                 buildExportMenu(owner),
                 new SeparatorMenuItem(),
-                action("_Settings\u2026", keys.mod1(KeyCode.COMMA), this::showSettings),
+                action("_Settings\u2026", keys.mod1(KeyCode.COMMA), this::showSettings)));
+        if (io.github.ghosthack.panama.media.core.Platform.IS_WINDOWS) {
+            fileItems.add(action("File _Associations\u2026", null, this::showFileAssociations));
+        }
+        fileItems.addAll(List.of(
                 new SeparatorMenuItem(),
                 buildCloseWindowItem(owner),
-                action("E_xit", keys.mod1(KeyCode.Q), Platform::exit));
+                action("E_xit", keys.mod1(KeyCode.Q), Platform::exit)));
+        var fileMenu = new Menu("_File", null, fileItems.toArray(MenuItem[]::new));
 
         var back = action("_Back", keys.mod1(KeyCode.LEFT), this::goBack);
         back.disableProperty().bind(backDisabledProp);
@@ -2890,6 +3008,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         });
         initial.setSelected(true);
         target.setContent(pages.get(initial));
+    }
+
+    /** Windows only: the "File Associations…" dialog, wired from the File menu. */
+    private void showFileAssociations() {
+        new FileAssociationsDialog(stage()).showAndWait();
     }
 
     private void showSettings() {
