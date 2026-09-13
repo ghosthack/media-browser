@@ -872,19 +872,25 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         pendingViewerTarget = target;
         pendingSelection = target;
-        // expandAndSelect's tree-selection listener already calls navigate()
-        // synchronously when it lands on a path different from currentDir
-        // (exactly the guard openInitial's own "if (currentDir == null)"
-        // exploits) — so currentDir may already equal parent by the time
-        // this runs; skip the second, redundant scan when it does, and
-        // resolve the pending target directly from the listing already on
-        // screen instead.
+        // expandAndSelect's tree-selection listener may itself call
+        // navigate() synchronously (whenever it lands on a path different
+        // from currentDir) — which sets currentDir immediately but only
+        // *starts* the real listing asynchronously. An earlier version of
+        // this method tried to detect that and skip a "redundant" explicit
+        // navigate() by comparing currentDir, but currentDir flips to
+        // `parent` synchronously regardless of whether that listing has
+        // actually landed yet — on a cold start this meant
+        // openPendingViewerTargetIfReady() ran immediately against a still-
+        // empty `entries`, concluded "not found", and cleared
+        // pendingViewerTarget before the real listing ever arrived: the
+        // browser opened but the viewer never did. Always navigating
+        // explicitly costs one redundant scan when the listener's own call
+        // already covers it (bumping scanSequence discards its now-stale
+        // in-flight result), but that's the only way to guarantee this
+        // call's own showListing()/flushReclassifications() landing is the
+        // one that actually resolves pendingViewerTarget.
         expandAndSelect(parent);
-        if (!parent.equals(currentDir)) {
-            navigate(parent);
-        } else {
-            openPendingViewerTargetIfReady();
-        }
+        navigate(parent);
         listView.requestFocus();
         return AppShell.AppView.BROWSER;
     }
