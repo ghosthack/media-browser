@@ -197,7 +197,7 @@ public final class FileAssociationRegistry {
      * ({@link AssocState#AVAILABLE_NOT_DEFAULT}), but only the user, through
      * this dialog or Settings, can make us the default.
      *
-     * <p>Implemented via the classic {@code rundll32 shell32.dll,OpenAs_RunDll
+     * <p>Implemented via the classic {@code rundll32 shell32.dll,OpenAs_RunDLL
      * <file>} shell trick, which needs a real (if empty) file with the right
      * extension to point at — {@code extension} need not already be
      * associated with anything for this to work, but the caller should only
@@ -207,7 +207,7 @@ public final class FileAssociationRegistry {
         requireWindows();
         Path placeholder = Files.createTempFile("mediabrowser-default-", "." + extension);
         try {
-            new ProcessBuilder("rundll32.exe", "shell32.dll,OpenAs_RunDll", placeholder.toString())
+            new ProcessBuilder("rundll32.exe", "shell32.dll,OpenAs_RunDLL", placeholder.toString())
                     .start()
                     .waitFor();
         } finally {
