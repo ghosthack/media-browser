@@ -3,7 +3,8 @@ package io.github.ghosthack.mediabrowser.win;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.nio.file.Files;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 
 import io.github.ghosthack.mediabrowser.media.FileAssociationCatalog;
@@ -27,6 +28,15 @@ import io.github.ghosthack.panama.media.fileassoc.Shell32;
  * .<ext>\OpenWithProgids\MediaBrowser.AssocFile.<ext> (Default) = ""
  * }</pre>
  *
+ * <p>Every {@link #associate} also (idempotently) registers the app itself
+ * under the "Default Programs" scheme, so Windows Settings' Default Apps
+ * page can offer it as a target at all:</p>
+ * <pre>{@code
+ * Software\Clients\MediaBrowser\Capabilities             ApplicationName/Icon/Description
+ * Software\Clients\MediaBrowser\Capabilities\FileAssociations   .<ext> = MediaBrowser.AssocFile.<ext>  (one per associated extension)
+ * Software\RegisteredApplications                         "Media Browser" = Software\Clients\MediaBrowser\Capabilities
+ * }</pre>
+ *
  * <p><b>Windows 8+ UserChoice caveat:</b> once Explorer has recorded a
  * {@code UserChoice} for an extension (in
  * {@code HKCU\...\Explorer\FileExts\.ext\UserChoice}), writing {@code .ext}'s
@@ -34,7 +44,11 @@ import io.github.ghosthack.panama.media.fileassoc.Shell32;
  * deliberate OS anti-hijack protection, not something a registry write can
  * override. {@link #query} detects this and reports
  * {@link AssocState#AVAILABLE_NOT_DEFAULT} rather than falsely claiming
- * {@link AssocState#DEFAULT}.</p>
+ * {@link AssocState#DEFAULT}. There's no registry-only workaround for this:
+ * {@link #openAppDefaultsSettings} deep-links straight to this app's own
+ * Default Apps page, which is the only remaining self-service path (see its
+ * javadoc for why the legacy {@code OpenAs_RunDLL} shell trick doesn't
+ * work).</p>
  */
 public final class FileAssociationRegistry {
 
@@ -43,6 +57,9 @@ public final class FileAssociationRegistry {
     private static final String CLASSES_ROOT = "Software\\Classes\\";
     private static final String USER_CHOICE_ROOT =
             "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\";
+    private static final String CLIENT_ROOT = "Software\\Clients\\MediaBrowser\\Capabilities";
+    private static final String REGISTERED_APPS_ROOT = "Software\\RegisteredApplications";
+    private static final String REGISTERED_APP_NAME = "Media Browser";
 
     /** Whether — and how — this app is associated with an extension right now. */
     public enum AssocState { NOT_ASSOCIATED, DEFAULT, AVAILABLE_NOT_DEFAULT }
@@ -99,9 +116,45 @@ public final class FileAssociationRegistry {
             } finally {
                 Advapi32.regCloseKey(openWithKey);
             }
+
+            ensureRegisteredApplication(arena, exePath);
+            MemorySegment fileAssocKey = Advapi32.regCreateKeyEx(arena, Advapi32.HKEY_CURRENT_USER,
+                    CLIENT_ROOT + "\\FileAssociations", Advapi32.KEY_WRITE);
+            try {
+                Advapi32.regSetValueString(arena, fileAssocKey, "." + extension, progId);
+            } finally {
+                Advapi32.regCloseKey(fileAssocKey);
+            }
         }
         Shell32.notifyAssociationsChanged();
         return query(extension);
+    }
+
+    /**
+     * Idempotently registers this app under the "Default Programs" scheme
+     * ({@code Software\RegisteredApplications} pointing at a
+     * {@code Capabilities} key) so Windows Settings' Default Apps page can
+     * offer it as a target at all — a bare {@code .ext} ProgId association
+     * (the rest of {@link #associate}) is invisible to that page on its own.
+     */
+    private static void ensureRegisteredApplication(Arena arena, Path exePath) {
+        MemorySegment capsKey = Advapi32.regCreateKeyEx(arena, Advapi32.HKEY_CURRENT_USER,
+                CLIENT_ROOT, Advapi32.KEY_WRITE);
+        try {
+            Advapi32.regSetValueString(arena, capsKey, "ApplicationName", REGISTERED_APP_NAME);
+            Advapi32.regSetValueString(arena, capsKey, "ApplicationIcon", quote(exePath) + ",0");
+            Advapi32.regSetValueString(arena, capsKey, "ApplicationDescription",
+                    "A JavaFX desktop media browser");
+        } finally {
+            Advapi32.regCloseKey(capsKey);
+        }
+        MemorySegment registeredKey = Advapi32.regCreateKeyEx(arena, Advapi32.HKEY_CURRENT_USER,
+                REGISTERED_APPS_ROOT, Advapi32.KEY_WRITE);
+        try {
+            Advapi32.regSetValueString(arena, registeredKey, REGISTERED_APP_NAME, CLIENT_ROOT);
+        } finally {
+            Advapi32.regCloseKey(registeredKey);
+        }
     }
 
     /**
@@ -149,6 +202,21 @@ public final class FileAssociationRegistry {
             // (its subkey) is gone too.
             deleteKeyIfEmpty(arena, CLASSES_ROOT + "." + extension + "\\OpenWithProgids");
             deleteKeyIfEmpty(arena, CLASSES_ROOT + "." + extension);
+
+            // Keeps the Default-Apps-page listing in sync; the app's own
+            // Capabilities/RegisteredApplications registration is left in
+            // place even if this was the last extension — real installed
+            // apps don't unregister themselves from Default Programs just
+            // because one file type was unchecked.
+            MemorySegment fileAssocKey = Advapi32.regOpenKeyExOrNull(arena, Advapi32.HKEY_CURRENT_USER,
+                    CLIENT_ROOT + "\\FileAssociations", rw);
+            if (fileAssocKey != null) {
+                try {
+                    Advapi32.regDeleteValue(arena, fileAssocKey, "." + extension);
+                } finally {
+                    Advapi32.regCloseKey(fileAssocKey);
+                }
+            }
         }
         Shell32.notifyAssociationsChanged();
     }
@@ -170,48 +238,39 @@ public final class FileAssociationRegistry {
     }
 
     /**
-     * Best-effort: opens Windows' "Default apps" settings page, for the user
-     * to finish picking a default once {@link AssocState#AVAILABLE_NOT_DEFAULT}
-     * shows this app is registered but not chosen.
+     * Best-effort: opens Windows Settings' Default Apps page, deep-linked
+     * straight to this app's own entry (every extension it's registered for,
+     * each with its own inline default-picker) via the documented
+     * {@code ms-settings:defaultapps?registeredAppUser=<name>} query
+     * parameter — which only resolves to anything once {@link #associate}
+     * has registered the app under {@code Software\RegisteredApplications}
+     * (see the class docs). Falls back to the generic (unfiltered) Default
+     * Apps page if opening the deep link itself fails.
      *
-     * @return whether the settings page was launched
+     * <p>This is the only self-service path left: Windows has not let a
+     * third-party app set itself as a default via the registry since Windows
+     * 8, and the older workaround — shelling out to the classic
+     * {@code rundll32 shell32.dll,OpenAs_RunDLL <file>} "Open with" chooser —
+     * stopped offering an "Always" choice at all on Windows 10 1809+ (only
+     * "Just once," which just launches the app against whatever placeholder
+     * file was pointed at it — not useful, and surprising). Only the user,
+     * through this Settings page, can actually flip the default.</p>
+     *
+     * @return whether a settings page (deep-linked or generic) was launched
      */
-    public static boolean openDefaultAppsSettings() {
+    public static boolean openAppDefaultsSettings() {
         try {
-            new ProcessBuilder("explorer.exe", "ms-settings:defaultapps").start();
+            String uri = "ms-settings:defaultapps?registeredAppUser="
+                    + URLEncoder.encode(REGISTERED_APP_NAME, StandardCharsets.UTF_8);
+            new ProcessBuilder("explorer.exe", uri).start();
             return true;
         } catch (IOException e) {
-            return false;
-        }
-    }
-
-    /**
-     * Blocks until the user closes it: shows Windows' native "How do you
-     * want to open this .ext file?" chooser for {@code extension}, the
-     * standard shell dialog a real double-click of an unassociated file
-     * shows, complete with its "Always use this app" checkbox. This is the
-     * one path a third-party app has left, by design, to become a Windows
-     * default since the OS stopped letting apps do it silently via the
-     * registry (the same anti-hijack protection {@link #query} works around
-     * for reading): a registry write can register us as <em>available</em>
-     * ({@link AssocState#AVAILABLE_NOT_DEFAULT}), but only the user, through
-     * this dialog or Settings, can make us the default.
-     *
-     * <p>Implemented via the classic {@code rundll32 shell32.dll,OpenAs_RunDLL
-     * <file>} shell trick, which needs a real (if empty) file with the right
-     * extension to point at — {@code extension} need not already be
-     * associated with anything for this to work, but the caller should only
-     * offer it where doing so makes sense (see {@link AssocState}).</p>
-     */
-    public static void promptSetDefault(String extension) throws IOException, InterruptedException {
-        requireWindows();
-        Path placeholder = Files.createTempFile("mediabrowser-default-", "." + extension);
-        try {
-            new ProcessBuilder("rundll32.exe", "shell32.dll,OpenAs_RunDLL", placeholder.toString())
-                    .start()
-                    .waitFor();
-        } finally {
-            Files.deleteIfExists(placeholder);
+            try {
+                new ProcessBuilder("explorer.exe", "ms-settings:defaultapps").start();
+                return true;
+            } catch (IOException e2) {
+                return false;
+            }
         }
     }
 
