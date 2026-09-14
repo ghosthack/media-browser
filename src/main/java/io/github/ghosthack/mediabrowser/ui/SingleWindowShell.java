@@ -172,6 +172,17 @@ final class SingleWindowShell extends AppShell {
         }
         activeView.set(v);
         WindowChrome.setContent(shellRoot, next.root());
+        // Force CSS + layout synchronously on the freshly-attached root
+        // before the next render pulse paints it — the same reasoning as
+        // showWithoutFlash's pre-show() forcing (see WindowChrome), but that
+        // only ever covered the very first root shown at start(). Every
+        // later swap through here was still exposed: attaching a still-
+        // unstyled root and letting the ordinary CSS/layout pass catch up
+        // over the following pulse(s) is exactly how a swap flashes a
+        // blank/white frame of its own, independent of whether the window
+        // itself was already visible or how carefully its reveal was timed.
+        next.root().applyCss();
+        next.root().layout();
         stage.titleProperty().bind(next.titleProperty());
         next.activate();
     }
