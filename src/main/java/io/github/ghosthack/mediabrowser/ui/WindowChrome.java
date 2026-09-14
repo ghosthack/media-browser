@@ -86,7 +86,6 @@ final class WindowChrome {
      */
     @SuppressWarnings({"deprecation", "removal"})
     static BorderPane createShellRoot(Stage stage, StageStyle style) {
-        if (IS_WINDOWS) FlashProbe.prepare(); // TEMPORARY diagnostic
         var root = new BorderPane();
         root.getStyleClass().add("app-shell-root");
         if (style == StageStyle.EXTENDED) {
@@ -200,14 +199,11 @@ final class WindowChrome {
             scene.getRoot().applyCss();
             scene.getRoot().layout();
         }
-        long showNanos = System.nanoTime(); // TEMPORARY diagnostic
         stage.show();
         // The native window exists now: give its (brush-less) window class
-        // a scene-fill brush, so the fresh surface Windows hands it at the
-        // un-layering reveal below (and on every resize) is erased in the
-        // theme colour rather than shown white until the next present.
-        if (IS_WINDOWS) WinWindowBackground.install(stage);
-        if (IS_WINDOWS) FlashProbe.start(stage, showNanos); // TEMPORARY diagnostic
+        // a scene-fill brush, so a native erase (a resize exposing a new
+        // strip) paints the theme colour rather than white.
+        if (IS_WINDOWS) WinWindowSurface.install(stage);
         new AnimationTimer() {
             private int frames;
             private long startNanos = -1;
@@ -227,8 +223,13 @@ final class WindowChrome {
                 // no-arg overload's fixed two-frame wait; ready() only ever
                 // extends that minimum, never shortens it.
                 if (frames >= 2 && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
-                    stage.setOpacity(1);
-                    if (IS_WINDOWS) FlashProbe.revealed(); // TEMPORARY diagnostic
+                    // On Windows, never let Glass strip WS_EX_LAYERED from
+                    // the visible window (setOpacity(1) does): that hands it
+                    // a fresh white surface until the next present — the
+                    // sporadic white frame. See WinWindowSurface.
+                    if (!(IS_WINDOWS && WinWindowSurface.revealOpaque(stage))) {
+                        stage.setOpacity(1);
+                    }
                     stop();
                 }
             }
