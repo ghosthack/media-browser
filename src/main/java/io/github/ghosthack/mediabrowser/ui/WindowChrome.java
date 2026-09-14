@@ -86,6 +86,7 @@ final class WindowChrome {
      */
     @SuppressWarnings({"deprecation", "removal"})
     static BorderPane createShellRoot(Stage stage, StageStyle style) {
+        if (IS_WINDOWS) FlashProbe.prepare(); // TEMPORARY diagnostic
         var root = new BorderPane();
         root.getStyleClass().add("app-shell-root");
         if (style == StageStyle.EXTENDED) {
@@ -199,12 +200,14 @@ final class WindowChrome {
             scene.getRoot().applyCss();
             scene.getRoot().layout();
         }
+        long showNanos = System.nanoTime(); // TEMPORARY diagnostic
         stage.show();
         // The native window exists now: give its (brush-less) window class
         // a scene-fill brush, so the fresh surface Windows hands it at the
         // un-layering reveal below (and on every resize) is erased in the
         // theme colour rather than shown white until the next present.
         if (IS_WINDOWS) WinWindowBackground.install(stage);
+        if (IS_WINDOWS) FlashProbe.start(stage, showNanos); // TEMPORARY diagnostic
         new AnimationTimer() {
             private int frames;
             private long startNanos = -1;
@@ -225,6 +228,7 @@ final class WindowChrome {
                 // extends that minimum, never shortens it.
                 if (frames >= 2 && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
                     stage.setOpacity(1);
+                    if (IS_WINDOWS) FlashProbe.revealed(); // TEMPORARY diagnostic
                     stop();
                 }
             }
