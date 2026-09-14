@@ -164,7 +164,8 @@ final class WindowChrome {
      * Shows {@code stage} without the brief white flash a native window paints
      * before JavaFX renders its first frame: the window is made fully
      * transparent before {@code show()} and revealed once a couple of pulses
-     * have painted the (dark) scene. A no-op (just {@code show()}) if the stage
+     * have run <em>and</em> their frames have actually been presented (see
+     * {@link RenderSync}) — pulses alone run ahead of the render thread. A no-op (just {@code show()}) if the stage
      * is already showing, so re-shows don't blink. Pair with the scene's
      * {@code setFill(...)} so the first painted frame is the right colour.
      */
@@ -200,10 +201,6 @@ final class WindowChrome {
             scene.getRoot().layout();
         }
         stage.show();
-        // The native window exists now: give its (brush-less) window class
-        // a scene-fill brush, so a native erase (a resize exposing a new
-        // strip) paints the theme colour rather than white.
-        if (IS_WINDOWS) WinWindowSurface.install(stage);
         new AnimationTimer() {
             private int frames;
             private long startNanos = -1;
@@ -223,13 +220,15 @@ final class WindowChrome {
                 // no-arg overload's fixed two-frame wait; ready() only ever
                 // extends that minimum, never shortens it.
                 if (frames >= 2 && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
-                    // On Windows, never let Glass strip WS_EX_LAYERED from
-                    // the visible window (setOpacity(1) does): that hands it
-                    // a fresh white surface until the next present — the
-                    // sporadic white frame. See WinWindowSurface.
-                    if (!(IS_WINDOWS && WinWindowSurface.revealOpaque(stage))) {
-                        stage.setOpacity(1);
-                    }
+                    // Two pulses having *started* does not mean a frame has
+                    // reached the window: the render thread runs behind the
+                    // pulses, and on a cold start the first frame can still
+                    // be in flight here. Revealing before it is presented
+                    // shows the never-painted native surface — white — until
+                    // it lands: the sporadic startup flash. Block until every
+                    // queued frame has been painted and presented first.
+                    RenderSync.awaitQueuedRenders();
+                    stage.setOpacity(1);
                     stop();
                 }
             }
