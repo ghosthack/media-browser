@@ -190,6 +190,15 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * Always paired with {@link #pendingSelection} pointing at the same path.
      */
     private Path pendingViewerTarget;
+    /**
+     * Set by {@link #openInitial} when the startup layout opens mosaic:
+     * true from the moment the initial navigate() is kicked off until its
+     * listing actually lands in {@link #showListing}. Mosaic itself opens
+     * immediately either way (it tracks the live entries list reactively),
+     * but the shell's reveal is held on this so a cold start doesn't briefly
+     * show — and then have to visibly refill — an empty grid.
+     */
+    private boolean pendingInitialMosaicReveal;
     /** True for one event tick after a click in a focus-bouncing panel; see armFocusBounce(). */
     private boolean bounceArmed;
 
@@ -835,9 +844,20 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     public AppShell.AppView openInitial(Path startDir) {
         System.err.println("[flash-diag] openInitial start at " + System.nanoTime()
                 + " opensMosaic=" + settings.startupLayout().opensMosaic());
+        boolean opensMosaic = settings.startupLayout().opensMosaic();
+        if (opensMosaic) {
+            // Told before expandAndSelect (below) can possibly trigger
+            // navigate() synchronously: hold the reveal until that listing
+            // actually lands in showListing, so mosaic — which opens
+            // immediately either way, since it tracks entries reactively —
+            // never gets revealed still empty only to visibly refill a
+            // moment later.
+            pendingInitialMosaicReveal = true;
+            shell.deferRevealUntil(() -> !pendingInitialMosaicReveal);
+        }
         expandAndSelect(startDir);
         if (currentDir == null) navigate(startDir);
-        if (settings.startupLayout().opensMosaic()) {
+        if (opensMosaic) {
             openMosaic();
             System.err.println("[flash-diag] openInitial returning MOSAIC at " + System.nanoTime());
             return AppShell.AppView.MOSAIC;
@@ -1326,6 +1346,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         } else {
             listView.getSelectionModel().clearSelection();
             listView.scrollTo(0);
+        }
+        if (pendingInitialMosaicReveal) {
+            pendingInitialMosaicReveal = false;
+            System.err.println("[flash-diag] pendingInitialMosaicReveal resolved at " + System.nanoTime()
+                    + " listing.size()=" + listing.size());
         }
         openPendingViewerTargetIfReady();
     }
