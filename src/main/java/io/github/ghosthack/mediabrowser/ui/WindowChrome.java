@@ -229,11 +229,7 @@ final class WindowChrome {
                 // Let the dark scene paint before revealing, same as the
                 // no-arg overload's fixed two-frame wait; ready() only ever
                 // extends that minimum, never shortens it.
-                // TEMPORARY diagnostic: hold at least DIAG_MIN_HOLD_MILLIS so a
-                // human can tell "white at window open" (the hold isn't
-                // hiding anything) from "white at the reveal" (un-layering).
-                if (frames >= 2 && elapsedMillis >= DIAG_MIN_HOLD_MILLIS
-                        && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
+                if (frames >= 2 && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
                     System.err.println("[flash-diag] showWithoutFlash: reveal at " + System.nanoTime()
                             + " frames=" + frames + " elapsedMs=" + elapsedMillis
                             + " readyTrue=" + ready.getAsBoolean()
@@ -255,9 +251,6 @@ final class WindowChrome {
             }
         }.start();
     }
-
-    /** TEMPORARY diagnostic minimum reveal hold; remove with the other [flash-diag] sites. */
-    private static final long DIAG_MIN_HOLD_MILLIS = 1500;
 
     /** Safety valve for {@link #showWithoutFlash(Stage, BooleanSupplier)}: real elapsed time, not frame count. */
     private static final long MAX_REVEAL_HOLD_MILLIS = 5000;
