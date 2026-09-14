@@ -2682,17 +2682,9 @@ public final class MosaicWindow
         });
     }
 
-    // TEMPORARY diagnostic logging — remove with the other [flash-diag] sites.
-    private int diagDraws;
-
     private void draw() {
         long startedAt = MosaicTelemetry.now();
         int tilesDrawn = 0;
-        if (diagDraws < 3) {
-            diagDraws++;
-            System.err.println("[flash-diag] mosaic draw#" + diagDraws + " at " + System.nanoTime()
-                    + " items=" + items.size() + " canvas=" + canvas.getWidth() + "x" + canvas.getHeight());
-        }
         try {
             GraphicsContext g = canvas.getGraphicsContext2D();
             // A monitor move can change the device-pixel scale; rebuild scaled tiles.

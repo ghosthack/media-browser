@@ -842,8 +842,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * way so the mosaic mirrors the populated source list.
      */
     public AppShell.AppView openInitial(Path startDir) {
-        System.err.println("[flash-diag] openInitial start at " + System.nanoTime()
-                + " opensMosaic=" + settings.startupLayout().opensMosaic());
         boolean opensMosaic = settings.startupLayout().opensMosaic();
         if (opensMosaic) {
             // Told before expandAndSelect (below) can possibly trigger
@@ -859,7 +857,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         if (currentDir == null) navigate(startDir);
         if (opensMosaic) {
             openMosaic();
-            System.err.println("[flash-diag] openInitial returning MOSAIC at " + System.nanoTime());
             return AppShell.AppView.MOSAIC;
         }
         listView.requestFocus(); // expandAndSelect leaves focus on the tree
@@ -881,7 +878,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      *         listing resolves and the target is found (see {@link #showListing})
      */
     public AppShell.AppView openInitialFile(Path file) {
-        System.err.println("[flash-diag] openInitialFile start at " + System.nanoTime());
         Path target = file.toAbsolutePath().normalize();
         Path parent = target.getParent();
         if (parent == null || !Files.isDirectory(parent)) {
@@ -927,8 +923,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     /** Opens Mosaic over the shared listing, including an album's virtual label. */
     private void openMosaic() {
-        System.err.println("[flash-diag] openMosaic: visibleEntries.size()=" + visibleEntries.size()
-                + " at " + System.nanoTime());
         mosaic.open(visibleEntries, () -> currentDir, this::albumLocationLabel);
     }
 
@@ -1349,8 +1343,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         if (pendingInitialMosaicReveal) {
             pendingInitialMosaicReveal = false;
-            System.err.println("[flash-diag] pendingInitialMosaicReveal resolved at " + System.nanoTime()
-                    + " listing.size()=" + listing.size());
         }
         openPendingViewerTargetIfReady();
     }
@@ -1390,7 +1382,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         if (found != null && found.viewable()) {
             pendingViewerTarget = null;
-            System.err.println("[flash-diag] pendingViewerTarget resolved (viewable) at " + System.nanoTime());
             selectEntry(target);
             viewer.open(found.toMediaItem(), viewableItems(), true, this);
             return;
@@ -1401,8 +1392,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             return; // may yet be promoted by the in-flight content sniff
         }
         pendingViewerTarget = null;
-        System.err.println("[flash-diag] pendingViewerTarget resolved (NOT viewable/found) at "
-                + System.nanoTime() + " found=" + (found != null));
         statusLabel.setText(found != null
                 ? "Not viewable: " + found.displayName()
                 : "Not found: " + target);

@@ -16,28 +16,31 @@ import java.lang.reflect.Method;
 import static java.lang.foreign.ValueLayout.ADDRESS;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
-import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 
 /**
- * Windows only: keeps the JavaFX window class's background brush equal to a
- * stage's scene fill, so every native erase of the window paints the theme
- * colour instead of white.
+ * Windows only: gives the JavaFX window class a background brush equal to a
+ * stage's scene fill, so every native (re)paint of the window's surface
+ * starts from the theme colour instead of white.
  *
- * <p>Why this exists: Windows erases a top-level window's client area with
- * its window class's {@code hbrBackground} whenever the window is
- * (re)created, resized, or has its {@code WS_EX_LAYERED} style toggled —
- * and JavaFX's Glass window procedure has no {@code WM_ERASEBKGND} handler,
- * so that erase always happens. Glass's Java side even has a class-brush
- * setter fed from the scene fill ({@code WindowStage.initPlatformWindow} →
- * {@code Window.setBackground}), but {@code WinWindow._setBackground} is a
- * deliberate no-op (JDK-8171852), leaving the class default: white. The
- * visible consequence for a dark theme is the sporadic white frame on the
- * {@link WindowChrome#showWithoutFlash} reveal — {@code setOpacity(1)}
- * removes {@code WS_EX_LAYERED}, Windows discards the surface and erases it
- * white, and the {@code WM_PAINT} that follows is only serviced on a later
- * FX pulse — plus the long-known white edges while resizing a dark window.
+ * <p>Why this exists: the Glass window class is registered with a
+ * {@code NULL} {@code hbrBackground}, and its window procedure has no
+ * {@code WM_ERASEBKGND} handler, so Windows never erases a JavaFX window —
+ * the surface simply holds whatever it holds until JavaFX presents. That is
+ * fine while the window is stable, but whenever Windows hands the window a
+ * <em>fresh</em> surface it is white until the next present: on the
+ * {@link WindowChrome#showWithoutFlash} reveal, {@code setOpacity(1)} strips
+ * {@code WS_EX_LAYERED} ({@code GlassWindow::SetAlpha}), Windows re-creates
+ * the surface, and the {@code WM_PAINT} it raises is only serviced on a
+ * later FX pulse — a sporadic white frame on a dark theme, longest exactly
+ * when the FX thread is busiest (cold start). Glass's Java side even has a
+ * class-brush setter fed from the scene fill ({@code
+ * WindowStage.initPlatformWindow} → {@code Window.setBackground}), but
+ * {@code WinWindow._setBackground} is a deliberate no-op (JDK-8171852).
  * This does what Glass's disabled {@code _setBackground2} does:
  * {@code SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, CreateSolidBrush(fill))}.
+ * With a brush in place, Windows erases the fresh surface in the fill
+ * colour before JavaFX's next present, and the same holds for the
+ * newly-exposed strip while resizing a dark window.
  *
  * <p>The brush is per window class, i.e. shared by every Glass window in
  * the process; the last stage to (re)apply wins, which is the right answer
@@ -51,10 +54,6 @@ final class WinWindowBackground {
     private static MethodHandle setClassLongPtr;
     private static MethodHandle createSolidBrush;
     private static MethodHandle deleteObject;
-    // TEMPORARY diagnostic handles — remove with the other [flash-diag] sites.
-    private static MethodHandle getClassLongPtr;
-    private static MethodHandle getWindowLongPtr;
-    private static MethodHandle getLayeredWindowAttributes;
     private static boolean unavailable;
     /** The brush this class installed last; deleted once replaced (never a foreign brush). */
     private static MemorySegment ownBrush = MemorySegment.NULL;
@@ -87,11 +86,6 @@ final class WinWindowBackground {
                 int ignored = (int) deleteObject.invokeExact(ownBrush);
             }
             ownBrush = brush;
-            // TEMPORARY diagnostic logging — remove with the other [flash-diag] sites.
-            long readback = (long) getClassLongPtr.invokeExact(hwnd, GCLP_HBRBACKGROUND);
-            System.err.println("[flash-diag] class background brush set to " + c + " at " + System.nanoTime()
-                    + " previous=0x" + Long.toHexString(previous) + " new=0x" + Long.toHexString(brush.address())
-                    + " readback=0x" + Long.toHexString(readback));
         } catch (Throwable t) {
             unavailable = true;
             System.err.println("Window background brush unavailable; native erases stay white: " + t);
@@ -112,46 +106,6 @@ final class WinWindowBackground {
                 FunctionDescriptor.of(ADDRESS, JAVA_INT));
         deleteObject = linker.downcallHandle(gdi32.findOrThrow("DeleteObject"),
                 FunctionDescriptor.of(JAVA_INT, ADDRESS));
-        getClassLongPtr = linker.downcallHandle(user32.findOrThrow("GetClassLongPtrW"),
-                FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT));
-        getWindowLongPtr = linker.downcallHandle(user32.findOrThrow("GetWindowLongPtrW"),
-                FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT));
-        getLayeredWindowAttributes = linker.downcallHandle(user32.findOrThrow("GetLayeredWindowAttributes"),
-                FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS));
-    }
-
-    /**
-     * TEMPORARY diagnostic — remove with the other [flash-diag] sites. Logs
-     * the native window's real state: extended style (is WS_EX_LAYERED
-     * actually set?), the layered alpha Windows holds, and the class brush.
-     */
-    static void logState(Stage stage, String label) {
-        if (unavailable) return;
-        try {
-            if (setClassLongPtr == null) bind();
-            MemorySegment hwnd = hwndFor(stage);
-            if (hwnd == null) {
-                System.err.println("[flash-diag] win32 " + label + ": no HWND yet");
-                return;
-            }
-            long exStyle = (long) getWindowLongPtr.invokeExact(hwnd, -20 /* GWL_EXSTYLE */);
-            long brush = (long) getClassLongPtr.invokeExact(hwnd, GCLP_HBRBACKGROUND);
-            try (Arena arena = Arena.ofConfined()) {
-                MemorySegment key = arena.allocate(JAVA_INT), alpha = arena.allocate(JAVA_BYTE),
-                        flags = arena.allocate(JAVA_INT);
-                int ok = (int) getLayeredWindowAttributes.invokeExact(hwnd, key, alpha, flags);
-                System.err.println("[flash-diag] win32 " + label + " at " + System.nanoTime()
-                        + " hwnd=0x" + Long.toHexString(hwnd.address())
-                        + " exStyle=0x" + Long.toHexString(exStyle)
-                        + " layered=" + ((exStyle & 0x80000) != 0)
-                        + " layeredAttrs(ok=" + ok + " alpha=" + (alpha.get(JAVA_BYTE, 0) & 255)
-                        + " flags=0x" + Integer.toHexString(flags.get(JAVA_INT, 0)) + ")"
-                        + " classBrush=0x" + Long.toHexString(brush)
-                        + " fxOpacity=" + stage.getOpacity());
-            }
-        } catch (Throwable t) {
-            System.err.println("[flash-diag] win32 " + label + " failed: " + t);
-        }
     }
 
     /** The {@code HWND} behind {@code stage}, via its Glass peer (mirrors {@code MacWindowFrame}). */

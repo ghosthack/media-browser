@@ -86,7 +86,6 @@ final class WindowChrome {
      */
     @SuppressWarnings({"deprecation", "removal"})
     static BorderPane createShellRoot(Stage stage, StageStyle style) {
-        if (IS_WINDOWS) FlashProbe.prepare(); // TEMPORARY diagnostic
         var root = new BorderPane();
         root.getStyleClass().add("app-shell-root");
         if (style == StageStyle.EXTENDED) {
@@ -200,17 +199,12 @@ final class WindowChrome {
             scene.getRoot().applyCss();
             scene.getRoot().layout();
         }
-        // TEMPORARY diagnostic logging — remove once the white-flash reports
-        // (file-association viewer swap, mosaic startup) are root-caused.
-        System.err.println("[flash-diag] showWithoutFlash: stage.show() at " + System.nanoTime());
-        long showNanos = System.nanoTime();
         stage.show();
-        // The native window exists now: make Windows' own erases of it (the
-        // un-layering at the reveal below, every resize) paint the scene
-        // fill instead of the Glass window class's default white.
+        // The native window exists now: give its (brush-less) window class
+        // a scene-fill brush, so the fresh surface Windows hands it at the
+        // un-layering reveal below (and on every resize) is erased in the
+        // theme colour rather than shown white until the next present.
         if (IS_WINDOWS) WinWindowBackground.install(stage);
-        if (IS_WINDOWS) FlashProbe.start(stage, showNanos);
-        if (IS_WINDOWS) WinWindowBackground.logState(stage, "after show()");
         new AnimationTimer() {
             private int frames;
             private long startNanos = -1;
@@ -230,23 +224,8 @@ final class WindowChrome {
                 // no-arg overload's fixed two-frame wait; ready() only ever
                 // extends that minimum, never shortens it.
                 if (frames >= 2 && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
-                    System.err.println("[flash-diag] showWithoutFlash: reveal at " + System.nanoTime()
-                            + " frames=" + frames + " elapsedMs=" + elapsedMillis
-                            + " readyTrue=" + ready.getAsBoolean()
-                            + " cappedOut=" + (elapsedMillis >= MAX_REVEAL_HOLD_MILLIS));
-                    if (IS_WINDOWS) WinWindowBackground.logState(stage, "before reveal");
                     stage.setOpacity(1);
-                    if (IS_WINDOWS) WinWindowBackground.logState(stage, "after setOpacity(1)");
                     stop();
-                    if (IS_WINDOWS) {
-                        new AnimationTimer() {
-                            private int n;
-                            @Override public void handle(long t) {
-                                if (++n <= 3) WinWindowBackground.logState(stage, "reveal+" + n + " pulses");
-                                else stop();
-                            }
-                        }.start();
-                    }
                 }
             }
         }.start();
