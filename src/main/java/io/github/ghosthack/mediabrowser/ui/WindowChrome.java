@@ -186,6 +186,19 @@ final class WindowChrome {
     static void showWithoutFlash(Stage stage, BooleanSupplier ready) {
         if (stage.isShowing()) return;
         stage.setOpacity(0);
+        // Force CSS + layout synchronously before the window is ever shown
+        // (even invisibly): without this, the two-frame wait below only
+        // guarantees a couple of rendered pulses have happened, not that the
+        // scene was actually *styled* by either of them — a slow cold start
+        // (class loading, JIT warmup) competing with the FX thread for those
+        // same pulses can still let an unstyled (default white background)
+        // frame slip out before CSS resolves, on any theme, not just this
+        // method's own file-association reveal-hold case.
+        Scene scene = stage.getScene();
+        if (scene != null && scene.getRoot() != null) {
+            scene.getRoot().applyCss();
+            scene.getRoot().layout();
+        }
         stage.show();
         new AnimationTimer() {
             private int frames;
