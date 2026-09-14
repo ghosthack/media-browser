@@ -1,10 +1,7 @@
 package io.github.ghosthack.mediabrowser.win;
 
-import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 
 import io.github.ghosthack.mediabrowser.media.FileAssociationCatalog;
@@ -245,7 +242,14 @@ public final class FileAssociationRegistry {
      * parameter — which only resolves to anything once {@link #associate}
      * has registered the app under {@code Software\RegisteredApplications}
      * (see the class docs). Falls back to the generic (unfiltered) Default
-     * Apps page if opening the deep link itself fails.
+     * Apps page if the shell refuses the deep link.
+     *
+     * <p>Dispatched through {@link Shell32#shellOpen} (ShellExecuteW), with
+     * the registered name's space left literal: that form is verified to land
+     * on Apps ▸ Default apps ▸ Media Browser on Windows 11. The earlier
+     * {@code explorer.exe <uri>} spawn with a URL-encoded name opened a plain
+     * Explorer folder window instead — explorer.exe treats an argument it
+     * cannot parse as a folder path.</p>
      *
      * <p>This is the only self-service path left: Windows has not let a
      * third-party app set itself as a default via the registry since Windows
@@ -259,19 +263,8 @@ public final class FileAssociationRegistry {
      * @return whether a settings page (deep-linked or generic) was launched
      */
     public static boolean openAppDefaultsSettings() {
-        try {
-            String uri = "ms-settings:defaultapps?registeredAppUser="
-                    + URLEncoder.encode(REGISTERED_APP_NAME, StandardCharsets.UTF_8);
-            new ProcessBuilder("explorer.exe", uri).start();
-            return true;
-        } catch (IOException e) {
-            try {
-                new ProcessBuilder("explorer.exe", "ms-settings:defaultapps").start();
-                return true;
-            } catch (IOException e2) {
-                return false;
-            }
-        }
+        return Shell32.shellOpen("ms-settings:defaultapps?registeredAppUser=" + REGISTERED_APP_NAME)
+                || Shell32.shellOpen("ms-settings:defaultapps");
     }
 
     // ── helpers ─────────────────────────────────────────────────────────

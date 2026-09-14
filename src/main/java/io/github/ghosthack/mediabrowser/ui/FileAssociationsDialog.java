@@ -143,6 +143,14 @@ public final class FileAssociationsDialog {
         Label header = new Label("File Associations");
         header.getStyleClass().add("move-header");
 
+        // Created before its content so wrapping text can bind to *its*
+        // width: the Scene resizes the root to the scene, so that width never
+        // depends on the children — see bindWrappingWidth.
+        VBox root = new VBox(10);
+        root.getStyleClass().add("move-dialog");
+        root.setPadding(new Insets(16));
+        ObservableValue<Number> wrapWidth = root.widthProperty().subtract(32); // minus the padding
+
         VBox content = new VBox(10, header);
 
         if (packagedExe.isEmpty()) {
@@ -155,7 +163,7 @@ public final class FileAssociationsDialog {
             Text banner = new Text("Running from a development build — associations can only be"
                     + " set from the installed Media Browser.exe.");
             banner.setFill(Color.web("#c82828")); // matches .move-error's -fx-text-fill
-            bindWrappingWidth(banner, content.widthProperty());
+            bindWrappingWidth(banner, wrapWidth);
             content.getChildren().add(banner);
         } else if (proposeCurated) {
             Text banner = new Text("Choose which file types Media Browser should open from"
@@ -163,7 +171,7 @@ public final class FileAssociationsDialog {
                     + " checked types, Cancel registers nothing. This can be changed"
                     + " later under File \u25b8 File Associations\u2026");
             banner.setFill(Color.GRAY); // matches .move-note's -fx-text-fill
-            bindWrappingWidth(banner, content.widthProperty());
+            bindWrappingWidth(banner, wrapWidth);
             content.getChildren().add(banner);
         }
 
@@ -204,7 +212,7 @@ public final class FileAssociationsDialog {
 
         feedback.setFill(Color.GRAY); // matches .move-note's -fx-text-fill
         feedback.setStyle("-fx-font-style: italic;"); // matches .move-note's -fx-font-style
-        bindWrappingWidth(feedback, content.widthProperty());
+        bindWrappingWidth(feedback, wrapWidth);
         feedback.setVisible(false);
         feedback.setManaged(false);
         content.getChildren().add(feedback);
@@ -225,9 +233,7 @@ public final class FileAssociationsDialog {
         buttons.setAlignment(Pos.CENTER_RIGHT);
         content.getChildren().add(buttons);
 
-        VBox root = new VBox(10, content);
-        root.getStyleClass().add("move-dialog");
-        root.setPadding(new Insets(16));
+        root.getChildren().add(content);
 
         Scene scene = new Scene(root, 640, 620);
         var css = MoveDialog.class.getResource("move-dialog.css");
@@ -352,6 +358,15 @@ public final class FileAssociationsDialog {
      * instead uses the child's width-unconstrained (single-line) preferred
      * height when budgeting space, silently truncating every line past the
      * first. {@code Text} sidesteps the whole negotiation.
+     *
+     * <p>{@code width} must not depend on the text's own layout: binding to
+     * the enclosing content VBox's width (as this once did) is a fixpoint
+     * trap. A {@code Text}'s min width is its current layout width, so on the
+     * first pass (wrappingWidth still 0, text unwrapped) the VBox grows to the
+     * text's full single-line width, which then becomes the wrapping width —
+     * and the text stays on one line at exactly that width forever, with the
+     * whole dialog content wider than the window (buttons pushed off the right
+     * edge, table clipped). The scene-sized root's width is safe.</p>
      */
     private static void bindWrappingWidth(Text text, ObservableValue<Number> width) {
         text.wrappingWidthProperty().bind(width);
