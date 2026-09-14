@@ -204,6 +204,10 @@ final class WindowChrome {
         System.err.println("[flash-diag] showWithoutFlash: stage.show() at " + System.nanoTime());
         long showNanos = System.nanoTime();
         stage.show();
+        // The native window exists now: make Windows' own erases of it (the
+        // un-layering at the reveal below, every resize) paint the scene
+        // fill instead of the Glass window class's default white.
+        if (IS_WINDOWS) WinWindowBackground.install(stage);
         if (IS_WINDOWS) FlashProbe.start(stage, showNanos);
         new AnimationTimer() {
             private int frames;
