@@ -257,7 +257,13 @@ public final class FileAssociationRegistry {
      * {@code rundll32 shell32.dll,OpenAs_RunDLL <file>} "Open with" chooser —
      * stopped offering an "Always" choice at all on Windows 10 1809+ (only
      * "Just once," which just launches the app against whatever placeholder
-     * file was pointed at it — not useful, and surprising). Only the user,
+     * file was pointed at it — not useful, and surprising). The other
+     * candidate, {@code SHOpenWithDialog} with
+     * {@code OAIF_REGISTER_EXT | OAIF_FORCE_REGISTRATION} on the bare
+     * extension (the Windows 7–10 "How do you want to open .jpg files from
+     * now on?" form), was probed on Windows 11 (2026-09-14): it shows no
+     * picker at all, only a message box reading "To change your default
+     * apps, go to Settings &gt; Apps &gt; Default apps." Only the user,
      * through this Settings page, can actually flip the default.</p>
      *
      * @return whether a settings page (deep-linked or generic) was launched
