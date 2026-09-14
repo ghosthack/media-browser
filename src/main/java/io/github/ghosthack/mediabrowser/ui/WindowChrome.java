@@ -86,6 +86,7 @@ final class WindowChrome {
      */
     @SuppressWarnings({"deprecation", "removal"})
     static BorderPane createShellRoot(Stage stage, StageStyle style) {
+        if (IS_WINDOWS) FlashProbe.prepare(); // TEMPORARY diagnostic
         var root = new BorderPane();
         root.getStyleClass().add("app-shell-root");
         if (style == StageStyle.EXTENDED) {
@@ -209,6 +210,7 @@ final class WindowChrome {
         // fill instead of the Glass window class's default white.
         if (IS_WINDOWS) WinWindowBackground.install(stage);
         if (IS_WINDOWS) FlashProbe.start(stage, showNanos);
+        if (IS_WINDOWS) WinWindowBackground.logState(stage, "after show()");
         new AnimationTimer() {
             private int frames;
             private long startNanos = -1;
@@ -227,17 +229,35 @@ final class WindowChrome {
                 // Let the dark scene paint before revealing, same as the
                 // no-arg overload's fixed two-frame wait; ready() only ever
                 // extends that minimum, never shortens it.
-                if (frames >= 2 && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
+                // TEMPORARY diagnostic: hold at least DIAG_MIN_HOLD_MILLIS so a
+                // human can tell "white at window open" (the hold isn't
+                // hiding anything) from "white at the reveal" (un-layering).
+                if (frames >= 2 && elapsedMillis >= DIAG_MIN_HOLD_MILLIS
+                        && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
                     System.err.println("[flash-diag] showWithoutFlash: reveal at " + System.nanoTime()
                             + " frames=" + frames + " elapsedMs=" + elapsedMillis
                             + " readyTrue=" + ready.getAsBoolean()
                             + " cappedOut=" + (elapsedMillis >= MAX_REVEAL_HOLD_MILLIS));
+                    if (IS_WINDOWS) WinWindowBackground.logState(stage, "before reveal");
                     stage.setOpacity(1);
+                    if (IS_WINDOWS) WinWindowBackground.logState(stage, "after setOpacity(1)");
                     stop();
+                    if (IS_WINDOWS) {
+                        new AnimationTimer() {
+                            private int n;
+                            @Override public void handle(long t) {
+                                if (++n <= 3) WinWindowBackground.logState(stage, "reveal+" + n + " pulses");
+                                else stop();
+                            }
+                        }.start();
+                    }
                 }
             }
         }.start();
     }
+
+    /** TEMPORARY diagnostic minimum reveal hold; remove with the other [flash-diag] sites. */
+    private static final long DIAG_MIN_HOLD_MILLIS = 1500;
 
     /** Safety valve for {@link #showWithoutFlash(Stage, BooleanSupplier)}: real elapsed time, not frame count. */
     private static final long MAX_REVEAL_HOLD_MILLIS = 5000;

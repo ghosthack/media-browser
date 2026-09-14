@@ -16,6 +16,7 @@ import java.lang.reflect.Method;
 import static java.lang.foreign.ValueLayout.ADDRESS;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 
 /**
  * Windows only: keeps the JavaFX window class's background brush equal to a
@@ -50,6 +51,10 @@ final class WinWindowBackground {
     private static MethodHandle setClassLongPtr;
     private static MethodHandle createSolidBrush;
     private static MethodHandle deleteObject;
+    // TEMPORARY diagnostic handles — remove with the other [flash-diag] sites.
+    private static MethodHandle getClassLongPtr;
+    private static MethodHandle getWindowLongPtr;
+    private static MethodHandle getLayeredWindowAttributes;
     private static boolean unavailable;
     /** The brush this class installed last; deleted once replaced (never a foreign brush). */
     private static MemorySegment ownBrush = MemorySegment.NULL;
@@ -83,7 +88,10 @@ final class WinWindowBackground {
             }
             ownBrush = brush;
             // TEMPORARY diagnostic logging — remove with the other [flash-diag] sites.
-            System.err.println("[flash-diag] class background brush set to " + c + " at " + System.nanoTime());
+            long readback = (long) getClassLongPtr.invokeExact(hwnd, GCLP_HBRBACKGROUND);
+            System.err.println("[flash-diag] class background brush set to " + c + " at " + System.nanoTime()
+                    + " previous=0x" + Long.toHexString(previous) + " new=0x" + Long.toHexString(brush.address())
+                    + " readback=0x" + Long.toHexString(readback));
         } catch (Throwable t) {
             unavailable = true;
             System.err.println("Window background brush unavailable; native erases stay white: " + t);
@@ -104,6 +112,46 @@ final class WinWindowBackground {
                 FunctionDescriptor.of(ADDRESS, JAVA_INT));
         deleteObject = linker.downcallHandle(gdi32.findOrThrow("DeleteObject"),
                 FunctionDescriptor.of(JAVA_INT, ADDRESS));
+        getClassLongPtr = linker.downcallHandle(user32.findOrThrow("GetClassLongPtrW"),
+                FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT));
+        getWindowLongPtr = linker.downcallHandle(user32.findOrThrow("GetWindowLongPtrW"),
+                FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT));
+        getLayeredWindowAttributes = linker.downcallHandle(user32.findOrThrow("GetLayeredWindowAttributes"),
+                FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS));
+    }
+
+    /**
+     * TEMPORARY diagnostic — remove with the other [flash-diag] sites. Logs
+     * the native window's real state: extended style (is WS_EX_LAYERED
+     * actually set?), the layered alpha Windows holds, and the class brush.
+     */
+    static void logState(Stage stage, String label) {
+        if (unavailable) return;
+        try {
+            if (setClassLongPtr == null) bind();
+            MemorySegment hwnd = hwndFor(stage);
+            if (hwnd == null) {
+                System.err.println("[flash-diag] win32 " + label + ": no HWND yet");
+                return;
+            }
+            long exStyle = (long) getWindowLongPtr.invokeExact(hwnd, -20 /* GWL_EXSTYLE */);
+            long brush = (long) getClassLongPtr.invokeExact(hwnd, GCLP_HBRBACKGROUND);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment key = arena.allocate(JAVA_INT), alpha = arena.allocate(JAVA_BYTE),
+                        flags = arena.allocate(JAVA_INT);
+                int ok = (int) getLayeredWindowAttributes.invokeExact(hwnd, key, alpha, flags);
+                System.err.println("[flash-diag] win32 " + label + " at " + System.nanoTime()
+                        + " hwnd=0x" + Long.toHexString(hwnd.address())
+                        + " exStyle=0x" + Long.toHexString(exStyle)
+                        + " layered=" + ((exStyle & 0x80000) != 0)
+                        + " layeredAttrs(ok=" + ok + " alpha=" + (alpha.get(JAVA_BYTE, 0) & 255)
+                        + " flags=0x" + Integer.toHexString(flags.get(JAVA_INT, 0)) + ")"
+                        + " classBrush=0x" + Long.toHexString(brush)
+                        + " fxOpacity=" + stage.getOpacity());
+            }
+        } catch (Throwable t) {
+            System.err.println("[flash-diag] win32 " + label + " failed: " + t);
+        }
     }
 
     /** The {@code HWND} behind {@code stage}, via its Glass peer (mirrors {@code MacWindowFrame}). */
