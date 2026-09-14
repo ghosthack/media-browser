@@ -179,7 +179,7 @@ final class WindowChrome {
      * for another moments later (see {@link AppShell#deferRevealUntil}):
      * without this, only the first view's own first paint is covered, and
      * the very next swap, landing shortly after, can flash a real, visible
-     * blank frame of its own. Capped at {@link #MAX_REVEAL_HOLD_FRAMES} so a
+     * blank frame of its own. Capped at {@link #MAX_REVEAL_HOLD_MILLIS} so a
      * {@code ready} that never turns true (a target that never resolves)
      * can't hold the window invisible indefinitely.
      */
@@ -202,12 +202,23 @@ final class WindowChrome {
         stage.show();
         new AnimationTimer() {
             private int frames;
+            private long startNanos = -1;
             @Override public void handle(long now) {
                 frames++;
+                if (startNanos < 0) startNanos = now;
+                // A wall-clock cap, not a frame-count one: the async
+                // resolution this holds for (an off-FX-thread directory
+                // listing) competes with real elapsed time, not with how
+                // many pulses happen to fire — a frame-count cap hit under
+                // load (a slow cold start, a cold disk cache, antivirus
+                // scanning a fresh install) reveals the window before that
+                // resolution lands, letting the swap it was covering flash
+                // anyway, sporadically, exactly when it's slowest.
+                long elapsedMillis = (now - startNanos) / 1_000_000;
                 // Let the dark scene paint before revealing, same as the
                 // no-arg overload's fixed two-frame wait; ready() only ever
                 // extends that minimum, never shortens it.
-                if (frames >= 2 && (ready.getAsBoolean() || frames >= MAX_REVEAL_HOLD_FRAMES)) {
+                if (frames >= 2 && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
                     stage.setOpacity(1);
                     stop();
                 }
@@ -215,8 +226,8 @@ final class WindowChrome {
         }.start();
     }
 
-    /** Safety valve for {@link #showWithoutFlash(Stage, BooleanSupplier)}: ~2s at 60fps. */
-    private static final int MAX_REVEAL_HOLD_FRAMES = 120;
+    /** Safety valve for {@link #showWithoutFlash(Stage, BooleanSupplier)}: real elapsed time, not frame count. */
+    private static final long MAX_REVEAL_HOLD_MILLIS = 5000;
 
     /**
      * Installs the stage-wide part of the substitute controls (the stage's
