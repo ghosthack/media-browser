@@ -199,6 +199,9 @@ final class WindowChrome {
             scene.getRoot().applyCss();
             scene.getRoot().layout();
         }
+        // TEMPORARY diagnostic logging — remove once the white-flash reports
+        // (file-association viewer swap, mosaic startup) are root-caused.
+        System.err.println("[flash-diag] showWithoutFlash: stage.show() at " + System.nanoTime());
         stage.show();
         new AnimationTimer() {
             private int frames;
@@ -219,6 +222,10 @@ final class WindowChrome {
                 // no-arg overload's fixed two-frame wait; ready() only ever
                 // extends that minimum, never shortens it.
                 if (frames >= 2 && (ready.getAsBoolean() || elapsedMillis >= MAX_REVEAL_HOLD_MILLIS)) {
+                    System.err.println("[flash-diag] showWithoutFlash: reveal at " + System.nanoTime()
+                            + " frames=" + frames + " elapsedMs=" + elapsedMillis
+                            + " readyTrue=" + ready.getAsBoolean()
+                            + " cappedOut=" + (elapsedMillis >= MAX_REVEAL_HOLD_MILLIS));
                     stage.setOpacity(1);
                     stop();
                 }
