@@ -48,6 +48,7 @@ public final class AppSettings {
     private static final String ICON_PACK_KEY = "ui.iconPack";
     private static final String UI_STYLE_KEY = "ui.style";
     private static final String BUTTON_BORDERS_KEY = "ui.buttonBorders";
+    private static final String FILE_ASSOCIATIONS_PROMPTED_KEY = "fileAssociations.prompted";
     private static final String THUMB_MAX_EDGE_KEY = "mosaic.thumbnail.maxEdge";
     private static final String THUMB_BUDGET_MB_KEY = "mosaic.thumbnail.memoryBudgetMb";
     private static final String MOSAIC_THUMBNAILS_VISIBLE_KEY = "mosaic.thumbnail.visible";
@@ -237,6 +238,7 @@ public final class AppSettings {
     private IconPack iconPack;
     private UiStyle uiStyle;
     private boolean buttonBorders;
+    private boolean fileAssociationsPrompted;
     private int thumbnailMaxEdge;
     private int thumbnailMemoryBudgetMb;
     private boolean mosaicThumbnailsVisible;
@@ -385,6 +387,8 @@ public final class AppSettings {
                 props.getProperty(UI_STYLE_KEY), DEFAULT_UI_STYLE);
         settings.buttonBorders =
                 Boolean.parseBoolean(props.getProperty(BUTTON_BORDERS_KEY, "false"));
+        settings.fileAssociationsPrompted =
+                Boolean.parseBoolean(props.getProperty(FILE_ASSOCIATIONS_PROMPTED_KEY, "false"));
         settings.thumbnailMaxEdge = parseBoundedInt(
                 props.getProperty(THUMB_MAX_EDGE_KEY), DEFAULT_THUMB_MAX_EDGE, 32, 2048);
         settings.thumbnailMemoryBudgetMb = parseBoundedInt(
@@ -704,6 +708,7 @@ public final class AppSettings {
         props.setProperty(ICON_PACK_KEY, iconPack.name());
         props.setProperty(UI_STYLE_KEY, uiStyle.name());
         props.setProperty(BUTTON_BORDERS_KEY, Boolean.toString(buttonBorders));
+        props.setProperty(FILE_ASSOCIATIONS_PROMPTED_KEY, Boolean.toString(fileAssociationsPrompted));
         props.setProperty(THUMB_MAX_EDGE_KEY, Integer.toString(thumbnailMaxEdge));
         props.setProperty(THUMB_BUDGET_MB_KEY, Integer.toString(thumbnailMemoryBudgetMb));
         props.setProperty(MOSAIC_THUMBNAILS_VISIBLE_KEY,
@@ -1134,6 +1139,20 @@ public final class AppSettings {
 
     public void setButtonBorders(boolean buttonBorders) {
         this.buttonBorders = buttonBorders;
+    }
+
+    /**
+     * Whether the one-time first-launch File Associations prompt (Windows,
+     * packaged builds only — see {@code App}) has already been shown. Set
+     * the moment the prompt opens, whatever the user then decides, so it is
+     * never shown twice.
+     */
+    public boolean fileAssociationsPrompted() {
+        return fileAssociationsPrompted;
+    }
+
+    public void setFileAssociationsPrompted(boolean prompted) {
+        this.fileAssociationsPrompted = prompted;
     }
 
     /** Longest-edge pixel cap for mosaic preview renditions (default 300). */

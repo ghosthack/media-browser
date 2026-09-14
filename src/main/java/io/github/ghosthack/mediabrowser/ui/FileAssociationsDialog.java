@@ -73,6 +73,16 @@ import java.util.Optional;
  * their built-in unchecked/unassociated placeholder, and {@link #confirm}
  * skips such pages entirely (not just leaves them unchanged) so a placeholder
  * can never be mistaken for a real, user-reviewed baseline.</p>
+ *
+ * <p>{@link #firstRunProposal} is the same dialog in its one-time first-launch
+ * role (packaged Windows builds only, driven from {@code App}): every page is
+ * loaded up front and {@link FileAssociationCatalog#curated} extensions not
+ * already associated come pre-checked as a proposal, so Confirm registers the
+ * common set in one go and Cancel registers nothing. This replaces any
+ * installer-side registration: jpackage's MSI has no per-type confirm step
+ * and would write opaque hashed ProgIds this dialog could never recognize,
+ * whereas everything registered here shares the app's own
+ * {@code MediaBrowser.AssocFile.<ext>} ProgIds.</p>
  */
 public final class FileAssociationsDialog {
 
@@ -93,6 +103,8 @@ public final class FileAssociationsDialog {
 
     private final Stage stage = new Stage();
     private final Optional<Path> packagedExe = LaunchInvocation.resolvePackagedExe();
+    /** First-launch mode: pre-check curated, not-yet-associated extensions as a proposal. */
+    private final boolean proposeCurated;
     private final Map<MediaKind, List<Row>> rowsByKind = new EnumMap<>(MediaKind.class);
     private final Map<MediaKind, Boolean> loadedKinds = new EnumMap<>(MediaKind.class);
 
@@ -101,8 +113,30 @@ public final class FileAssociationsDialog {
     private final Button confirmButton = new Button("Confirm");
 
     public FileAssociationsDialog(Window owner) {
+        this(owner, false);
+    }
+
+    private FileAssociationsDialog(Window owner, boolean proposeCurated) {
+        this.proposeCurated = proposeCurated;
         buildUi(owner);
-        refreshKind(MediaKind.values()[0]);
+        if (proposeCurated) {
+            // Every page is loaded now so Confirm covers curated extensions on
+            // pages the user never clicked through — confirm() only ever acts
+            // on loaded pages, and a proposal the user can't see, but did
+            // accept by pressing Confirm, must still land.
+            for (MediaKind kind : MediaKind.values()) refreshKind(kind);
+        } else {
+            refreshKind(MediaKind.values()[0]);
+        }
+    }
+
+    /**
+     * The one-time first-launch variant: opens with the curated set pre-checked
+     * (see the class docs). Only meaningful from a packaged build — a dev run
+     * gets the same disabled dialog and banner as always.
+     */
+    public static FileAssociationsDialog firstRunProposal(Window owner) {
+        return new FileAssociationsDialog(owner, true);
     }
 
     private void buildUi(Window owner) {
@@ -121,6 +155,14 @@ public final class FileAssociationsDialog {
             Text banner = new Text("Running from a development build — associations can only be"
                     + " set from the installed Media Browser.exe.");
             banner.setFill(Color.web("#c82828")); // matches .move-error's -fx-text-fill
+            bindWrappingWidth(banner, content.widthProperty());
+            content.getChildren().add(banner);
+        } else if (proposeCurated) {
+            Text banner = new Text("Choose which file types Media Browser should open from"
+                    + " Explorer. Common formats are pre-selected; Confirm registers the"
+                    + " checked types, Cancel registers nothing. This can be changed"
+                    + " later under File \u25b8 File Associations\u2026");
+            banner.setFill(Color.GRAY); // matches .move-note's -fx-text-fill
             bindWrappingWidth(banner, content.widthProperty());
             content.getChildren().add(banner);
         }
@@ -336,7 +378,11 @@ public final class FileAssociationsDialog {
     private void refreshRow(Row row) {
         AssocStatus status = FileAssociationRegistry.query(row.extension);
         row.status = status;
-        row.selected.set(status.state() != AssocState.NOT_ASSOCIATED);
+        boolean associated = status.state() != AssocState.NOT_ASSOCIATED;
+        // The proposal only ever adds: an extension already associated stays
+        // checked, and one the registry doesn't know is checked iff curated.
+        row.selected.set(associated
+                || (proposeCurated && FileAssociationCatalog.curated(row.kind).contains(row.extension)));
         row.description.set(withStatusSuffix(row.extension, status));
     }
 

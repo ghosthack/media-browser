@@ -1,33 +1,27 @@
 package io.github.ghosthack.mediabrowser.media;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.net.URLConnection;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Properties;
 
 import static java.util.Map.entry;
 
 /**
- * The curated extension set offered by the Windows file-associations dialog
- * ({@code ui.FileAssociationsDialog}) and the opt-in jpackage installer flag
- * ({@code WINDOWS_FILE_ASSOCIATIONS} in {@code oss/scripts/package.sh}) — the
- * single source of truth both share, so they cannot drift apart.
+ * The Windows file-associations vocabulary shared by the dialog
+ * ({@code ui.FileAssociationsDialog}) and the registry layer
+ * ({@code win.FileAssociationRegistry}): the ProgId scheme, the type
+ * descriptions Explorer shows, per-extension format names, and the curated
+ * subset.
  *
- * <p>Deliberately narrower than {@link ExtensionClassifier}'s full
- * recognized-extension lists: common formats only. The long tail stays
- * reachable from the dialog's "show all" expansion but is never pre-checked
- * or installer-registered.</p>
- *
- * <p>No dependency outside {@code java.base}: {@link #main} is invoked by
- * the packaging script with a bare {@code java -cp <jar>}, so this class
- * must load without JavaFX, Panama, or any third-party jar on the
- * classpath.</p>
+ * <p>The curated lists are deliberately narrower than
+ * {@link ExtensionClassifier}'s full recognized-extension sets: common
+ * formats only. They are what the first-launch prompt pre-checks as a
+ * proposal; the dialog itself always lists the full recognized set, nothing
+ * pre-checked beyond what the registry already reports. Nothing is ever
+ * registered by the installer — jpackage would write its own opaque ProgIds,
+ * which this vocabulary could not recognize — so every association this app
+ * owns goes through {@link #progId}.</p>
  */
 public final class FileAssociationCatalog {
 
@@ -71,12 +65,6 @@ public final class FileAssociationCatalog {
     /** The friendly type description shown in Explorer's Open-with picker. */
     public static String description(String extension, MediaKind kind) {
         return "Media Browser " + kind.badge() + " file (." + extension.toLowerCase(Locale.ROOT) + ")";
-    }
-
-    /** Best-effort MIME type for jpackage's association descriptor; falls back generically. */
-    public static String mimeType(String extension) {
-        String guess = URLConnection.guessContentTypeFromName("file." + extension);
-        return guess != null ? guess : "application/octet-stream";
     }
 
     /**
@@ -193,38 +181,4 @@ public final class FileAssociationCatalog {
             entry("tta", "True Audio"),
             entry("spx", "Speex Audio"),
             entry("dsf", "DSD Stream File"));
-
-    /**
-     * CLI entry point used only by {@code oss/scripts/package.sh}:
-     * {@code --emit-jpackage-properties <outDir> <iconPath>} writes one
-     * {@code <ext>.properties} file per curated extension, in the format
-     * jpackage's {@code --file-associations} flag expects (one extension per
-     * file).
-     */
-    public static void main(String[] args) {
-        if (args.length != 3 || !"--emit-jpackage-properties".equals(args[0])) {
-            System.err.println("Usage: --emit-jpackage-properties <outDir> <iconPath>");
-            System.exit(2);
-            return;
-        }
-        Path outDir = Path.of(args[1]);
-        String icon = args[2];
-        try {
-            Files.createDirectories(outDir);
-            for (Map.Entry<String, MediaKind> e : curatedAll().entrySet()) {
-                String ext = e.getKey();
-                MediaKind kind = e.getValue();
-                Properties props = new Properties();
-                props.setProperty("extension", ext);
-                props.setProperty("mime-type", mimeType(ext));
-                props.setProperty("description", description(ext, kind));
-                props.setProperty("icon", icon);
-                try (var out = Files.newOutputStream(outDir.resolve(ext + ".properties"))) {
-                    props.store(out, null);
-                }
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-    }
 }

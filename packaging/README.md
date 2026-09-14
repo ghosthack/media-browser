@@ -133,15 +133,20 @@ The Windows `release-signing` environment requires `AZURE_CLIENT_ID`,
 `ARTIFACT_SIGNING_PROFILE` variables. See
 [Release signing setup](SIGNING.md) for details.
 
-## Optional Windows file associations
+## Windows file associations
 
-Off by default — set `WINDOWS_FILE_ASSOCIATIONS=true` to have the installer
-register this app for a curated set of image/video/audio extensions
-(`FileAssociationCatalog.curatedAll()` in the app jar — the same list the
-in-app File Associations… dialog offers), so a fresh install can open those
-files from Explorer immediately. When set, the script invokes
-`io.github.ghosthack.mediabrowser.media.FileAssociationCatalog` from the
-staged jar to emit one jpackage `--file-associations` properties file per
-extension into `target/jpackage/associations`, then passes them all to
-`jpackage`. Leaving the variable unset (the default) changes nothing about
-the installer's output.
+The installer registers no file associations. Two jpackage limits make that
+the right call: its MSI has no per-type confirm step (the only optional
+dialogs are the license, install-directory and shortcut prompts), and the
+ProgIds it would write are opaque per-build hashes (`progId<uuid>`), which
+the in-app File Associations dialog could neither recognize nor remove.
+
+Instead, the first launch of an installed build on Windows opens the File
+Associations dialog with the curated set from
+`FileAssociationCatalog.curated()` pre-checked as a proposal. Confirm
+registers exactly those types (or whatever the user changed the selection
+to) under the app's own `MediaBrowser.AssocFile.<ext>` ProgIds — the same
+ones File ▸ File Associations… reads and writes later — and Cancel
+registers nothing. Either way the prompt is recorded in
+`fileAssociations.prompted` and never shown again; the menu item remains the
+way back in.

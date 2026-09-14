@@ -8,10 +8,12 @@ import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogFile;
 import io.github.ghosthack.mediabrowser.ui.ActionLog;
 import io.github.ghosthack.mediabrowser.ui.AppShell;
+import io.github.ghosthack.mediabrowser.ui.FileAssociationsDialog;
 import io.github.ghosthack.mediabrowser.ui.MainWindow;
 import io.github.ghosthack.mediabrowser.ui.ThemeManager;
 import io.github.ghosthack.mediabrowser.ui.ViewerWindow;
 import io.github.ghosthack.mediabrowser.ui.icon.IconPackManager;
+import io.github.ghosthack.mediabrowser.win.LaunchInvocation;
 import io.github.ghosthack.mediabrowser.win.SingleInstanceGuard;
 
 import javafx.application.Application;
@@ -142,6 +144,7 @@ public final class App extends Application {
                 ? main.openInitialFile(argPath)
                 : main.openInitial(startDir(argPath));
         shell.start(initial);
+        maybePromptFileAssociations(shell, settings);
 
         // A file argument that forwarded to an already-running instance never
         // reaches here (main() returns before launch()); this instance is
@@ -171,6 +174,51 @@ public final class App extends Application {
         if (System.getProperty("os.name", "").toLowerCase().contains("mac")) {
             Platform.runLater(() ->
                     MacApplicationMenu.setApplicationName(App.class.getName(), APP_NAME));
+        }
+    }
+
+    /**
+     * Windows, packaged builds, first launch only: proposes the curated file
+     * associations in the File Associations dialog once the browser stage is
+     * actually on screen (the shell may defer its reveal). The installer
+     * registers nothing itself — see {@link FileAssociationsDialog} for why —
+     * so this is where a fresh install gets its "open with Media Browser"
+     * offer. Recorded as prompted before the dialog opens, whatever the user
+     * decides, so it can never nag; File ▸ File Associations… stays the way
+     * back in. A dev run is never prompted: there is no stable executable to
+     * register, and the dialog would only show its disabled state.
+     */
+    private static void maybePromptFileAssociations(AppShell shell, AppSettings settings) {
+        if (!io.github.ghosthack.panama.media.core.Platform.IS_WINDOWS) return;
+        if (settings.fileAssociationsPrompted()) return;
+        Path exe = LaunchInvocation.resolvePackagedExe().orElse(null);
+        if (exe == null) return;
+        Stage front = shell.stageFor(AppShell.AppView.BROWSER);
+        if (front == null) return;
+        Runnable prompt = () -> {
+            // One stderr line so a redirected launch can prove the prompt fired
+            // (a Windows GUI-subsystem exe shows nothing on a console otherwise).
+            System.err.println("[App] first-launch file-associations prompt: " + exe);
+            settings.setFileAssociationsPrompted(true);
+            try {
+                settings.save();
+            } catch (IOException e) {
+                System.err.println("[App] could not persist the file-associations prompt flag: " + e);
+            }
+            FileAssociationsDialog.firstRunProposal(front).showAndWait();
+        };
+        if (front.isShowing()) {
+            Platform.runLater(prompt);
+        } else {
+            front.showingProperty().addListener(new javafx.beans.value.ChangeListener<>() {
+                @Override
+                public void changed(javafx.beans.value.ObservableValue<? extends Boolean> obs,
+                                    Boolean was, Boolean showing) {
+                    if (!showing) return;
+                    front.showingProperty().removeListener(this);
+                    Platform.runLater(prompt);
+                }
+            });
         }
     }
 

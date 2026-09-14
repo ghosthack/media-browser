@@ -247,28 +247,6 @@ else
     mkdir -p "$RELEASE_DIR"
 fi
 
-FILE_ASSOC_ARGS=()
-if [[ "$PLATFORM" == "windows" && "${WINDOWS_FILE_ASSOCIATIONS:-false}" == "true" ]]; then
-    echo "==> Generating Windows file-association descriptors"
-    ASSOC_DIR="$PACKAGE_ROOT/associations"
-    rm -rf "$ASSOC_DIR"
-    mkdir -p "$ASSOC_DIR"
-    ASSOC_JARS=("$INPUT_DIR"/media-browser-*.jar)
-    (( ${#ASSOC_JARS[@]} == 1 )) || {
-        echo "error: expected exactly one staged media-browser jar in $INPUT_DIR" >&2
-        exit 1
-    }
-    java -cp "${ASSOC_JARS[0]}" io.github.ghosthack.mediabrowser.media.FileAssociationCatalog \
-        --emit-jpackage-properties "$ASSOC_DIR" "$ROOT/packaging/icons/media-browser.ico"
-    for props in "$ASSOC_DIR"/*.properties; do
-        FILE_ASSOC_ARGS+=(--file-associations "$props")
-    done
-    (( ${#FILE_ASSOC_ARGS[@]} > 0 )) || {
-        echo "error: WINDOWS_FILE_ASSOCIATIONS=true but no association descriptors were generated" >&2
-        exit 1
-    }
-fi
-
 echo "==> Creating the $NATIVE_TYPE installer"
 INSTALLER_ARGS=(
     --type "$NATIVE_TYPE"
@@ -295,7 +273,6 @@ case "$PLATFORM" in
             --win-menu
             --win-menu-group "$APP_NAME"
             --win-shortcut
-            "${FILE_ASSOC_ARGS[@]}"
         )
         ;;
     linux)
