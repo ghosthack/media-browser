@@ -202,7 +202,9 @@ final class WindowChrome {
         // TEMPORARY diagnostic logging — remove once the white-flash reports
         // (file-association viewer swap, mosaic startup) are root-caused.
         System.err.println("[flash-diag] showWithoutFlash: stage.show() at " + System.nanoTime());
+        long showNanos = System.nanoTime();
         stage.show();
+        if (IS_WINDOWS) FlashProbe.start(stage, showNanos);
         new AnimationTimer() {
             private int frames;
             private long startNanos = -1;
