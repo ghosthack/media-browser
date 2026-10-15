@@ -13,6 +13,7 @@ import javafx.scene.image.Image;
 import javafx.stage.Stage;
 
 import java.util.EnumMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -72,12 +73,25 @@ public abstract class AppShell {
         this.maximizer = new WindowMaximizer(maximizeOverscan);
     }
 
-    /** Applies the packaged application artwork to a JavaFX window. */
+    /**
+     * Applies the packaged application artwork to a JavaFX window. Skipped in a
+     * macOS app bundle: JavaFX hands window icons to the Dock, which would replace
+     * the bundle's .icns with this PNG right after launch.
+     */
     protected static void installApplicationIcon(Stage stage) {
         Image icon = ApplicationIconHolder.ICON;
-        if (icon != null) {
+        if (icon != null && !(isMac() && System.getProperty("jpackage.app-path") != null)) {
             stage.getIcons().add(icon);
         }
+    }
+
+    /** The application artwork, or {@code null} when the resource is missing. */
+    static Image applicationIcon() {
+        return ApplicationIconHolder.ICON;
+    }
+
+    private static boolean isMac() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac");
     }
 
     private static Image loadApplicationIcon() {

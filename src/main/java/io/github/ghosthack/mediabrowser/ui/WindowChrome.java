@@ -22,6 +22,7 @@ import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
 import javafx.scene.control.ToolBar;
 import javafx.scene.control.Tooltip;
+import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
@@ -96,8 +97,10 @@ final class WindowChrome {
             // HeaderBar's native move/double-click/maximize handling.
             HeaderBar.setDragType(title, HeaderDragType.TRANSPARENT_SUBTREE);
 
-            if (!stage.getIcons().isEmpty()) {
-                var image = new ImageView(stage.getIcons().get(0));
+            Image icon = stage.getIcons().isEmpty()
+                    ? AppShell.applicationIcon() : stage.getIcons().get(0);
+            if (icon != null) {
+                var image = new ImageView(icon);
                 image.setFitWidth(16);
                 image.setFitHeight(16);
                 image.setPreserveRatio(true);
