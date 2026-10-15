@@ -283,6 +283,8 @@ jobs:
             echo "Expected exactly one DMG to notarize." >&2
             exit 1
           fi
+          codesign --force --timestamp --sign "$SIGNING_IDENTITY" "${images[0]}"
+          codesign --verify --strict --verbose=2 "${images[0]}"
           submission="$RUNNER_TEMP/media-browser-notary-submission.json"
           xcrun notarytool submit "${images[0]}" --wait \
             --apple-id "$NOTARY_APPLE_ID" \

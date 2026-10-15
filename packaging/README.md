@@ -111,8 +111,11 @@ Windows:
 Local PFX signing remains available through these variables. GitHub release CI
 uses Azure Artifact Signing instead: it signs the app launcher before creating
 the Windows installer and portable ZIP, then signs and verifies the installer.
-The macOS release path continues to use the protected `release` environment
-and notarizes/staples a signed DMG.
+The macOS release path uses the protected `release` environment. `jpackage`
+signs the `.app`; release CI then signs the DMG itself with a timestamp and
+verifies its signature before submitting it for notarization. After acceptance,
+CI staples the ticket to the DMG and validates it with `stapler`. The `.app`
+is not stapled separately.
 
 Configure GitHub environments named `release` and `release-signing`. macOS,
 Linux, and publication use `release`; Windows packaging uses

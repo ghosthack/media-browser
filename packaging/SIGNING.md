@@ -41,8 +41,14 @@ gh repo view ghosthack/media-browser
 
 An active Apple Developer Program membership is required. Create a
 **Developer ID Application** certificate, not a Developer ID Installer
-certificate. The application certificate signs the `.app` contained in the
-DMG.
+certificate. The application certificate signs both the `.app` contained in
+the DMG and the DMG itself.
+
+`jpackage` signs the `.app`. Before `xcrun notarytool submit`, release CI signs
+the finished DMG with `codesign --force --timestamp --sign "$SIGNING_IDENTITY"`
+and verifies it with `codesign --verify --strict --verbose=2`. After Apple
+accepts the submission, CI runs `xcrun stapler staple` and
+`xcrun stapler validate` on the DMG. The `.app` is not stapled separately.
 
 Apple documentation:
 
@@ -186,7 +192,8 @@ Approve the environment deployments when prompted. In the workflow log,
 confirm that:
 
 - macOS does not report that its certificate is missing.
-- macOS notarization completes and stapler validation succeeds.
+- macOS DMG signing and strict signature verification succeed before notarization.
+- macOS notarization completes and DMG stapler validation succeeds.
 - Azure OIDC login succeeds.
 - Both Windows signing operations succeed.
 - Windows signature and timestamp verification succeeds.
