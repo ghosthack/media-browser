@@ -568,11 +568,7 @@ public final class ViewerWindow implements AppShell.ShellView {
             settings.setViewerFlipbookLoop(on);
             updateFlipbookTooltip();
             rebuildFlipbookTimeline();
-            try {
-                settings.save();
-            } catch (java.io.IOException ignored) {
-                // The live mode still applies for this session.
-            }
+            saveSettingsQuietly();
         });
 
         // Persisted crop actions are grouped separately from Crop to Fill,
@@ -1794,11 +1790,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         }
         if (mode != LoadingIndicator.NOW_LOADING) nowLoadingOverlay.stop();
         settings.setViewerLoadingIndicator(mode);
-        try {
-            settings.save();
-        } catch (java.io.IOException ignored) {
-            // a failed save is non-fatal; the live setting still applies
-        }
+        saveSettingsQuietly();
     }
 
     /**
@@ -1987,14 +1979,18 @@ public final class ViewerWindow implements AppShell.ShellView {
                         .of(profile.iccData()).renderingsLine());
     }
 
+    /**
+     * Persists settings. A failure leaves the live setting applied for this
+     * session, but is reported in the status bar (and stderr) — after a failed
+     * read at startup every save is refused, and silently dropping that lost
+     * all of the session's preference changes. Mirrors the main window.
+     */
     private void saveSettingsQuietly() {
         try {
             settings.save();
         } catch (java.io.IOException e) {
-            // The in-memory value still applies for the session, but it will
-            // not survive a restart: say so instead of losing it silently.
-            infoPanel.showMessage("Cannot save settings: " + e.getMessage());
-            System.err.println("[ViewerWindow] cannot save settings: " + e.getMessage());
+            statusLabel.setText("Cannot save settings: " + e.getMessage());
+            System.err.println("media-browser: cannot save settings: " + e.getMessage());
         }
     }
 
@@ -3023,11 +3019,7 @@ public final class ViewerWindow implements AppShell.ShellView {
 
         // Persist whatever the live edits settled on (a failed save is non-fatal;
         // the live config still applies for the session).
-        try {
-            settings.save();
-        } catch (java.io.IOException ignored) {
-            // ignored: the in-memory config still drives the running slideshow
-        }
+        saveSettingsQuietly();
     }
 
     // --- flipbook (buffered image-sequence playback) --------------------------
@@ -3290,11 +3282,7 @@ public final class ViewerWindow implements AppShell.ShellView {
 
         // Persist whatever the live edits settled on (a failed save is non-fatal;
         // the live config still applies for the session).
-        try {
-            settings.save();
-        } catch (java.io.IOException ignored) {
-            // ignored: the in-memory config still drives the running flipbook
-        }
+        saveSettingsQuietly();
     }
 
     // --- move dialog ---------------------------------------------------------

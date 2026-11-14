@@ -23,6 +23,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -674,10 +675,27 @@ public final class MediaService implements AutoCloseable {
      * geometry is part of their identity and baked into their cached pixels.
      */
     public CompletableFuture<Thumbnail> thumbnail(Path file, int maxEdge, ThumbnailMode mode) {
+        return thumbnail(file, maxEdge, mode, () -> true);
+    }
+
+    /**
+     * {@link #thumbnail(Path, int, ThumbnailMode)} that honours
+     * {@code stillWanted} (called on a pool thread): checked when the request
+     * reaches the front of the pool's FIFO queue and again before decoding, so
+     * a backlog of tiles the caller has navigated away from drains as cheap
+     * no-ops instead of decodes ahead of the tiles now on screen. A skipped
+     * request completes exceptionally with a {@link CancellationException}
+     * (see {@link #isSuperseded}); a request that joined an in-flight
+     * generation whose creator was superseded sees the same, and should simply
+     * ask again.
+     */
+    public CompletableFuture<Thumbnail> thumbnail(Path file, int maxEdge, ThumbnailMode mode,
+                                                  BooleanSupplier stillWanted) {
         long queuedAt = MediaTelemetry.now();
         long requestedNanos = System.nanoTime();
         return CompletableFuture.supplyAsync(() -> {
             MediaTelemetry.recordThumbnailKeyQueue(MediaTelemetry.elapsedSince(queuedAt));
+            if (!stillWanted.getAsBoolean()) throw supersededThumbnail(file);
 
             long keyStart = MediaTelemetry.now();
             // Read once: the rendition is keyed by this policy and generated
@@ -722,6 +740,7 @@ public final class MediaService implements AutoCloseable {
             CompletableFuture<Thumbnail> future = inFlight.computeIfAbsent(key, k -> {
                 created.set(true);
                 return CompletableFuture.supplyAsync(() -> {
+                    if (!stillWanted.getAsBoolean()) throw supersededThumbnail(file);
                     MediaEngineTrace.Recorder trace = MediaEngineTrace.Recorder.recording(
                             mediaEngine, file, "Thumbnail " + mode, requestedNanos);
                     Throwable failure = null;
@@ -787,7 +806,7 @@ public final class MediaService implements AutoCloseable {
                 afterThumbnailGenerationQueued.accept(future);
                 future.whenComplete((r, e) -> {
                     inFlight.remove(stored, future);
-                    thumbnailsProcessed.increment();
+                    if (!isSuperseded(e)) thumbnailsProcessed.increment();
                 });
             } else {
                 MediaTelemetry.recordThumbnailInFlightJoin();
@@ -795,6 +814,18 @@ public final class MediaService implements AutoCloseable {
             }
             return future;
         }, thumbnailExecutor).thenCompose(Function.identity());
+    }
+
+    private static CancellationException supersededThumbnail(Path file) {
+        return new CancellationException("thumbnail no longer wanted: " + file.getFileName());
+    }
+
+    /** True when {@code error} is a thumbnail request skipped by its {@code stillWanted} gate. */
+    public static boolean isSuperseded(Throwable error) {
+        for (Throwable t = error; t != null; t = t.getCause()) {
+            if (t instanceof CancellationException) return true;
+        }
+        return false;
     }
 
     /**

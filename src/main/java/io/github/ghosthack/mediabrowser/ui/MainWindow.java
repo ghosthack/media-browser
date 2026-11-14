@@ -175,6 +175,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final SplitPane rightPanels = new SplitPane();
     /** Debounce for the opt-in Auto metadata load; (re)armed on each selection change. */
     private final PauseTransition metadataDebounce = new PauseTransition(Duration.millis(180));
+    /** Settle delay before the Info panel's probe / stat / archive read (see refreshInfoPanel). */
+    private final PauseTransition infoDebounce = new PauseTransition(Duration.millis(120));
     private final SplitPane splitPane = new SplitPane();
     /** Keeps the right stack at the width shared with the viewer and mosaic. */
     private final SidePanelWidth sidePanelWidth;
@@ -633,7 +635,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // by updateRightPanels() as any of their toggles flips.
         addressVisibleProp.addListener((o, a, v) -> setAddressBarVisible(v));
         treeVisibleProp.addListener((o, a, v) -> setSidePanelVisible(treePanel, v));
-        infoVisibleProp.addListener((o, a, v) -> updateRightPanels());
+        // Info probes (native work) only while shown; refresh the selection on reveal.
+        infoVisibleProp.addListener((o, a, v) -> {
+            updateRightPanels();
+            refreshInfoPanel(listView.getSelectionModel().getSelectedItem());
+        });
         metadataVisibleProp.addListener((o, a, v) -> updateRightPanels());
         diagnosticsVisibleProp.addListener((o, a, v) -> updateRightPanels());
         statusVisibleProp.addListener((o, a, v) -> setStatusBarVisible(v));
@@ -2619,16 +2625,31 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 && metadataVisibleProp.get() && metadataPanel.isAutoLoad()) {
             metadataDebounce.playFromStart();
         }
+        if (entry != null) statusLabel.setText(entry.displayName());
+        refreshInfoPanel(entry);
+    }
+
+    /**
+     * Brings the Info panel up to date with {@code entry}. Every call bumps
+     * {@code probeSequence} so in-flight reads for an earlier selection are
+     * dropped. While the panel is hidden nothing else happens — no native
+     * probe, stat or archive read — and {@link #infoVisibleProp}'s listener
+     * calls back in on reveal (mirrors the mosaic). The async reads are
+     * launched through {@link #infoDebounce}, so holding an arrow key queues
+     * work only for the row it settles on rather than one FFmpeg open per row
+     * on the shared decode thread.
+     */
+    private void refreshInfoPanel(DirEntry entry) {
+        infoDebounce.stop();
+        int seq = ++probeSequence; // void in-flight reads for an earlier selection
+        if (!infoVisibleProp.get()) return;
         if (entry == null) {
-            probeSequence++; // void in-flight reads for the cleared selection
             infoPanel.clearFileFacts();
             infoPanel.showMessage("No selection");
             return;
         }
-        statusLabel.setText(entry.displayName());
         if (!entry.viewable()) {
-            int seq = ++probeSequence; // void in-flight probes for an earlier selection
-            updateFileFacts(entry, seq);
+            if (entry.type() == DirEntry.Type.PARENT) infoPanel.clearFileFacts();
             infoPanel.showMessage(switch (entry.type()) {
                 case PARENT -> "Parent folder";
                 case DIRECTORY -> "Folder";
@@ -2640,19 +2661,34 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                         : "Reading archive…";
                 default -> "Not viewable media";
             });
-            if (entry.type() == DirEntry.Type.ARCHIVE) showArchiveInfo(entry, seq);
+            afterInfoDebounce(seq, () -> {
+                updateFileFacts(entry, seq);
+                if (entry.type() == DirEntry.Type.ARCHIVE) showArchiveInfo(entry, seq);
+            });
             return;
         }
         if (mirroringSelection) {
-            // Void in-flight probes; the viewer supplies the probe (see
-            // setOnItemProbed) — the File section is still read here.
-            int seq = ++probeSequence;
-            updateFileFacts(entry, seq);
+            // The viewer supplies the probe (see setOnItemProbed) — the File
+            // section is still read here.
+            afterInfoDebounce(seq, () -> updateFileFacts(entry, seq));
             return;
         }
         infoPanel.showMessage("Probing…");
-        int seq = ++probeSequence;
-        updateFileFacts(entry, seq);
+        afterInfoDebounce(seq, () -> {
+            updateFileFacts(entry, seq);
+            probeForInfo(entry, seq);
+        });
+    }
+
+    /** Runs {@code work} once selection settles, unless superseded by then. */
+    private void afterInfoDebounce(int seq, Runnable work) {
+        infoDebounce.setOnFinished(e -> {
+            if (seq == probeSequence) work.run();
+        });
+        infoDebounce.playFromStart();
+    }
+
+    private void probeForInfo(DirEntry entry, int seq) {
         service.probe(entry.path()).whenComplete((probe, error) ->
                 Platform.runLater(() -> {
                     if (seq != probeSequence) return;

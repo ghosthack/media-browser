@@ -37,6 +37,16 @@ final class DngRender {
         int outW = crop[2];
         int outH = crop[3];
         int left = crop[0];
+        // Crop comes from the file: keep it inside the mosaic and the output
+        // array addressable, failing as a MediaException (which the facade
+        // turns into the embedded-preview fallback) rather than an int
+        // overflow / NegativeArraySizeException / AIOOBE escaping it.
+        if (outW <= 0 || outH <= 0 || left < 0 || crop[1] < 0
+                || (long) left + outW > width || (long) crop[1] + outH > height
+                || (long) outW * outH * 4 > Integer.MAX_VALUE - 8) {
+            throw new MediaException("DNG: crop " + left + "," + crop[1] + " " + outW + "x"
+                    + outH + " does not fit a renderable frame of " + width + "x" + height);
+        }
         int top = crop[1];
 
         float[] linearize = storedToLinear(dng);

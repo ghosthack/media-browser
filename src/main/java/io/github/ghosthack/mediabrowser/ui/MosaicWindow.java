@@ -571,8 +571,12 @@ public final class MosaicWindow
     private int rows = 0;
     private double scrollY;
 
-    /** Bumped on every directory change; stale async completions are ignored. */
-    private int generation;
+    /**
+     * Bumped on every directory change; stale async completions are ignored.
+     * Written only on the FX thread; volatile because thumbnail requests read
+     * it from pool threads to skip work that is no longer wanted.
+     */
+    private volatile int generation;
 
     /** Loaded tile images, access-ordered and byte-budgeted. */
     private final FxImageCache<Path> images;
@@ -615,6 +619,14 @@ public final class MosaicWindow
      */
     private final Map<Path, MediaService.Barren> barrenVerdicts = new java.util.HashMap<>();
     private final java.util.Set<Path> barrenPending = new java.util.HashSet<>();
+    /**
+     * Staleness mark for barren checks, bumped only where the barren state is
+     * reset (directory change, barren-check toggle). Deliberately not
+     * {@link #generation}: a verdict is independent of the tile rendition, and
+     * gating on it let a Fill/Fit toggle strand in-flight folders in
+     * {@link #barrenPending} so they were never re-requested or marked.
+     */
+    private int barrenGeneration;
     /** Folders whose preview scan is in flight — avoids duplicate scans. */
     private final java.util.Set<Path> folderPending = new java.util.HashSet<>();
 
@@ -792,6 +804,7 @@ public final class MosaicWindow
         this.barrenBudget = settings.mosaicBarrenBudget();
         this.barrenCheck.addListener((o, was, v) -> {
             settings.setMosaicBarrenCheck(v);
+            barrenGeneration++;
             barrenVerdicts.clear();
             barrenPending.clear();
             requestDraw();
@@ -1672,11 +1685,7 @@ public final class MosaicWindow
      */
     private void setSelectionAnimation(MosaicSelectionAnimation style) {
         settings.setMosaicSelectionAnimation(style);
-        try {
-            settings.save();
-        } catch (java.io.IOException ignored) {
-            // a failed save is non-fatal; the live setting still applies
-        }
+        saveSettingsQuietly();
         updateAnimationTimer();
     }
 
@@ -2012,11 +2021,7 @@ public final class MosaicWindow
     private void setFillTiles(boolean fill) {
         thumbnailMode = fill ? ThumbnailMode.FILL : ThumbnailMode.FIT;
         settings.setMosaicFillTiles(fill);
-        try {
-            settings.save();
-        } catch (java.io.IOException ignored) {
-            // a failed save is non-fatal; the live mode still applies
-        }
+        saveSettingsQuietly();
         generation++;          // ignore in-flight completions rendered in the old mode
         images.clear();
         scaled.clear();
@@ -2475,6 +2480,7 @@ public final class MosaicWindow
             empties.clear();
             folderPreviews.clear();
             folderPending.clear();
+            barrenGeneration++;
             barrenVerdicts.clear();
             barrenPending.clear();
             // Draw-loop per-path/per-text caches are directory-scoped; drop them
@@ -3733,7 +3739,8 @@ public final class MosaicWindow
         int colorEpoch = tileColor.epoch();
         long requestedAt = MosaicTelemetry.now();
         long submitStartedAt = MosaicTelemetry.now();
-        service.thumbnail(path, maxEdge, thumbnailMode).whenComplete((thumb, error) -> {
+        service.thumbnail(path, maxEdge, thumbnailMode, () -> gen == generation)
+                .whenComplete((thumb, error) -> {
             long completedAt = MosaicTelemetry.now();
             MosaicTelemetry.recordThumbnailTotal(elapsedBetween(requestedAt, completedAt));
             Platform.runLater(() -> {
@@ -3818,10 +3825,10 @@ public final class MosaicWindow
         MediaService.Barren cached = barrenVerdicts.get(dir);
         if (cached != null) return cached;
         if (!barrenPending.add(dir)) return MediaService.Barren.UNKNOWN;
-        int gen = generation;
+        int gen = barrenGeneration;
         service.barren(dir, barrenBudget).whenComplete((verdict, error) ->
                 Platform.runLater(() -> {
-                    if (gen != generation) return;
+                    if (gen != barrenGeneration) return;
                     barrenPending.remove(dir);
                     barrenVerdicts.put(dir,
                             error != null || verdict == null
@@ -3850,6 +3857,12 @@ public final class MosaicWindow
                 || revision != thumbnailRevisions.getOrDefault(path, 0)
                 || colorEpoch != tileColor.epoch()) return;
         pending.remove(path);
+        if (MediaService.isSuperseded(error)) {
+            // Joined a generation whose original requester left; this tile is
+            // still wanted, so the next draw simply asks again.
+            requestDraw();
+            return;
+        }
         if (error != null || thumb == null) {
             empties.add(path); // draw a placeholder rather than retry endlessly
         } else if (thumb.frame().isPresent()) {
@@ -4735,12 +4748,18 @@ public final class MosaicWindow
         return v < lo ? lo : Math.min(v, hi);
     }
 
-    /** Persists settings; a failed save keeps the live state but is reported, as in the browser. */
+    /**
+     * Persists settings. A failure leaves the live setting applied for this
+     * session, but is reported in the status bar (and stderr) — after a failed
+     * read at startup every save is refused, and silently dropping that lost
+     * all of the session's preference changes. Mirrors the main window.
+     */
     private void saveSettingsQuietly() {
         try {
             settings.save();
         } catch (java.io.IOException e) {
             statusLabel.setText("Cannot save settings: " + e.getMessage());
+            System.err.println("media-browser: cannot save settings: " + e.getMessage());
         }
     }
 

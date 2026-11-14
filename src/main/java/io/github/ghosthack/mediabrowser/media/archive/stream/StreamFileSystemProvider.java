@@ -53,7 +53,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.zip.InflaterInputStream;
 
 /**
  * Consumer-owned NIO adapter over robust-unrar, robust-seven, pdf-media, epub-media,
@@ -225,8 +224,10 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
                                         ? () -> PdfFlateImages.openPng(reader, entry)
                                         : wrappedRasterExtension == null
                                                 ? null
-                                                : () -> new InflaterInputStream(
-                                                        reader.openStream(entry)),
+                                                : () -> new BoundedInflaterInputStream(
+                                                        reader.openStream(entry),
+                                                        flateWrappedRasterLimit(entry),
+                                                        "PDF raster " + name),
                         decodedJbig2
                                 ? () -> PdfJbig2Images.decode(reader, entry)
                                 : decodedFlate
@@ -388,6 +389,31 @@ public final class StreamFileSystemProvider extends FileSystemProvider {
      * stream. Keep the physical bytes mounted as {@code .pdfimg}, but offer a
      * private decoder rendition with only that outer storage filter removed.
      */
+    /** Inflated-size floor for a flate-wrapped raster, whatever its stored length. */
+    static final long FLATE_WRAPPED_FLOOR = 64L << 20;
+    /** Inflated-to-stored ratio cap: the payload is already-compressed JPEG/JP2 (~1:1). */
+    static final long FLATE_WRAPPED_RATIO = 64;
+    /** Cap when the PDF declares no stream length. */
+    static final long FLATE_WRAPPED_UNKNOWN = 256L << 20;
+    /** Absolute ceiling on any flate-wrapped raster. */
+    static final long FLATE_WRAPPED_CEILING = 1L << 30;
+
+    /**
+     * Most bytes a flate-wrapped JPEG / JPEG 2000 entry may inflate to. The
+     * payload is itself compressed, so honest Flate wrapping is close to 1:1;
+     * a stream that expands far past its stored length is a deflate bomb that
+     * would otherwise be materialized onto the temp volume by the archive
+     * cache (whose budget is only checked after the copy).
+     */
+    static long flateWrappedRasterLimit(PdfEntry entry) {
+        var stored = entry.declaredSize();
+        if (stored.isEmpty() || stored.getAsLong() <= 0) return FLATE_WRAPPED_UNKNOWN;
+        long byRatio = stored.getAsLong() > FLATE_WRAPPED_CEILING / FLATE_WRAPPED_RATIO
+                ? FLATE_WRAPPED_CEILING
+                : stored.getAsLong() * FLATE_WRAPPED_RATIO;
+        return Math.min(FLATE_WRAPPED_CEILING, Math.max(FLATE_WRAPPED_FLOOR, byRatio));
+    }
+
     private static String flateWrappedRasterExtension(PdfEntry entry) {
         if (!entry.isRaster()) return null;
         var raster = entry.raster().orElseThrow();

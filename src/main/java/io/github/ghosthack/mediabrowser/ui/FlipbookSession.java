@@ -154,14 +154,32 @@ final class FlipbookSession {
         service.loadVisual(path, () -> !cancelled).whenComplete((result, error) -> {
             if (cancelled) return;
             if (result == null && error == null) return;   // gate-skipped: cancelled
-            if (error != null || result.frame().isEmpty()) {
-                skipped++;
-            } else if (!bufferFrame(path, result.frame().get())) {
-                return;   // fatal (budget) — bufferFrame already reported
+            try {
+                if (error != null || result.frame().isEmpty()) {
+                    skipped++;
+                } else if (!bufferFrame(path, result.frame().get())) {
+                    return;   // fatal (budget) — bufferFrame already reported
+                }
+                notifyProgress(i + 1);
+                decodeNext(i + 1);
+            } catch (Throwable t) {
+                // whenComplete's returned future is discarded, so anything
+                // thrown here (an AAE/rotation bake failure, or an OOM near
+                // the headroom limit — apply() makes temporary full copies)
+                // would vanish and leave the UI at "Preloading k/N" forever,
+                // still holding every buffered frame. Free them first, then
+                // report.
+                abandon(t);
             }
-            notifyProgress(i + 1);
-            decodeNext(i + 1);
         });
+    }
+
+    private void abandon(Throwable t) {
+        frames.clear();
+        bufferedBytes = 0;
+        fail("Flipbook preload failed: " + (t instanceof OutOfMemoryError
+                ? "out of memory" : String.valueOf(t.getMessage() != null
+                        ? t.getMessage() : t.getClass().getSimpleName())));
     }
 
     /**

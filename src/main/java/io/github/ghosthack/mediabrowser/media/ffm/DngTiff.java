@@ -375,11 +375,31 @@ final class DngTiff {
         return v & 0xFFFFFFFFL;
     }
 
+    /**
+     * {@code e.count} as an array length, rejected unless every element lies
+     * inside the file. The count is untrusted: allocating from it unchecked let
+     * a crafted 0x7FFFFFFF ask for a 16 GB array, and the resulting
+     * OutOfMemoryError escaped every {@code catch (RuntimeException)} on the
+     * decode path.
+     */
+    private static int checkedCount(ByteBuffer buf, Entry e) {
+        int size = typeSize(e.type);
+        if (size == 0) {
+            throw new MediaException("DNG: unsupported field type " + e.type);
+        }
+        long end = e.valueOffset + e.count * size;   // count ≤ 2^32, size ≤ 8: no overflow
+        if (e.count < 0 || e.valueOffset < 0 || end > buf.capacity()) {
+            throw new MediaException("DNG: field of " + e.count
+                    + " values at " + e.valueOffset + " runs past the end of the file");
+        }
+        return (int) e.count;   // ≤ capacity ≤ Integer.MAX_VALUE
+    }
+
     private static long[] longArray(ByteBuffer buf, Entry e) {
         if (e == null) {
             return new long[0];
         }
-        long[] out = new long[(int) e.count];
+        long[] out = new long[checkedCount(buf, e)];
         for (int i = 0; i < out.length; i++) {
             out[i] = readLongAt(buf, e, i);
         }
@@ -391,7 +411,7 @@ final class DngTiff {
     }
 
     private static double[] doubleArray(ByteBuffer buf, Entry e) {
-        double[] out = new double[(int) e.count];
+        double[] out = new double[checkedCount(buf, e)];
         for (int i = 0; i < out.length; i++) {
             out[i] = readDoubleAt(buf, e, i);
         }

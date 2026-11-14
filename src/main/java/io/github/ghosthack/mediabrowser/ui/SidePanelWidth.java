@@ -96,10 +96,9 @@ final class SidePanelWidth {
         saveDebounce.setOnFinished(e -> {
             try {
                 settings.save();
-            } catch (java.io.IOException failed) {
-                // The live width still applies; this helper has no status line
-                // of its own, so the lost save goes to stderr once per drag.
-                System.err.println("[SidePanelWidth] cannot save settings: " + failed.getMessage());
+            } catch (java.io.IOException failure) {
+                // Non-fatal (the live width still applies), but not silent.
+                System.err.println("media-browser: cannot save settings: " + failure.getMessage());
             }
         });
     }

@@ -179,8 +179,9 @@ public final class AlbumsDialog {
             settings.recordAlbumUse(album.fileName());
             try {
                 settings.save();
-            } catch (IOException ignored) {
+            } catch (IOException e) {
                 // Recency is a convenience; don't fail the add over it.
+                System.err.println("media-browser: cannot save album recents: " + e.getMessage());
             }
             reload(album);
             String message = AlbumMenu.addMessage(album, result);
