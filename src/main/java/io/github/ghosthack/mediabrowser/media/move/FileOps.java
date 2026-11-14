@@ -110,24 +110,42 @@ public final class FileOps {
      * {@code destination}. A carrier changes nothing when it fails, so the file
      * is moved back and the whole move fails as one — never a file that moved
      * while its edits stayed behind. Should even the move back fail, the
-     * exception says where the file now is.
+     * {@link StrandedMoveException} says where the file now is.
+     *
+     * <p>An unchecked carrier failure (a directory listing dying on a flaky
+     * share) is rolled back exactly like an {@link IOException}: left to
+     * propagate, it would strand the file at the destination with no move
+     * back and no word of where it went.</p>
      */
     private static void carrySidecars(Path source, Path destination, SidecarCarrier sidecars)
             throws IOException {
         try {
             sidecars.carry(source, destination);
-        } catch (IOException carry) {
+        } catch (IOException | RuntimeException carry) {
             try {
                 Files.move(destination, source);
-            } catch (IOException back) {
+            } catch (IOException | RuntimeException back) {
                 carry.addSuppressed(back);
-                throw new IOException("moved to " + destination.getFileName()
-                        + " but its sidecars could not follow (" + carry.getMessage()
-                        + ") and it could not be moved back", carry);
+                throw new StrandedMoveException("moved to " + destination.getFileName()
+                        + " but its sidecars could not follow (" + reason(carry)
+                        + ") and it could not be moved back", destination, carry);
             }
-            throw new IOException("its sidecars could not follow (" + carry.getMessage()
+            throw new IOException("its sidecars could not follow (" + reason(carry)
                     + "); nothing was moved", carry);
         }
+    }
+
+    /**
+     * Why {@code failure} happened, for a one-line message: its own text, or
+     * for a wrapper that has none of its own ({@code UncheckedIOException}
+     * restates its cause's class name) the cause's.
+     */
+    private static String reason(Throwable failure) {
+        Throwable t = failure;
+        if (t instanceof java.io.UncheckedIOException && t.getCause() != null) {
+            t = t.getCause();
+        }
+        return t.getMessage() == null || t.getMessage().isBlank() ? t.toString() : t.getMessage();
     }
 
     /** Create {@code dir} and any missing parents (like {@code mkdir -p}). */

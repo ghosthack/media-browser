@@ -5,6 +5,7 @@ import io.github.ghosthack.mediabrowser.LoadingIndicator;
 import io.github.ghosthack.mediabrowser.album.AlbumStore;
 import io.github.ghosthack.mediabrowser.media.AaeSidecar;
 import io.github.ghosthack.mediabrowser.media.AaeStore;
+import io.github.ghosthack.mediabrowser.media.Adjustments;
 import io.github.ghosthack.mediabrowser.media.ColorProfile;
 import io.github.ghosthack.mediabrowser.media.ContentSniffer;
 import io.github.ghosthack.mediabrowser.media.ExtensionClassifier;
@@ -19,6 +20,7 @@ import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.color.ColorPolicy;
 import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionModel;
 import io.github.ghosthack.mediabrowser.media.VideoPlayer;
+import io.github.ghosthack.mediabrowser.media.VisualResult;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 import io.github.ghosthack.mediabrowser.media.move.FileOps;
 import io.github.ghosthack.mediabrowser.media.move.SidecarCarrier;
@@ -71,6 +73,7 @@ import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.ToolBar;
 import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
+import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.image.PixelBuffer;
 import javafx.scene.image.PixelFormat;
@@ -2070,8 +2073,14 @@ public final class ViewerWindow implements AppShell.ShellView {
         // superseded while this request waited in the single decode thread's
         // queue, so a held arrow key doesn't pile up a backlog of full decodes
         // (which would freeze the on-screen image far behind the cursor).
-        service.loadVisual(item.path(), () -> seq == loadSequence).whenComplete((result, error) ->
+        //
+        // The sidecar reads and the pixel bake ride the decode's own thread
+        // (see bakeStill), so the FX thread only attaches the finished image.
+        service.loadVisual(item.path(), () -> seq == loadSequence)
+                .thenApply(result -> new LoadedVisual(result, bakeStill(item.path(), result)))
+                .whenComplete((loaded, error) ->
                 Platform.runLater(() -> {
+                    VisualResult result = loaded == null ? null : loaded.result();
                     // a superseded request completes null (decode skipped)
                     if (result == null && error == null) {
                         diagnosticsPanel.refresh();
@@ -2131,8 +2140,19 @@ public final class ViewerWindow implements AppShell.ShellView {
                         // as the bake base so re-bakes need no re-decode (a no-op
                         // when there is no usable sidecar).
                         RasterFrame master = visual.get();
-                        RasterFrame upright = RasterFrames.applyAae(master,
-                                aaeStore.forImage(item.path()).orElse(null));
+                        // Baked off this thread, against the sidecars as they
+                        // were then. Both stores now answer from memory, so
+                        // asking again is cheap, and it catches an adjustment
+                        // made while the load was in flight: only then is the
+                        // bake redone here.
+                        BakedStill baked = loaded.baked();
+                        if (baked == null
+                                || baked.aae() != aaeStore.forImage(item.path()).orElse(null)
+                                || !baked.adjustments().equals(
+                                        rotationStore.adjustments(item.path()))) {
+                            baked = bakeStill(item.path(), master);
+                        }
+                        RasterFrame upright = baked.upright();
                         // Only this load's own decode becomes the bake base; a
                         // superseded one (another item, or this item under an
                         // older colour policy) is painted to keep rapid
@@ -2141,10 +2161,9 @@ public final class ViewerWindow implements AppShell.ShellView {
                                 index >= 0 && index < siblings.size()
                                         ? siblings.get(index).path() : null,
                                 master, upright);
-                        RasterFrame shown = RasterFrames.apply(upright,
-                                rotationStore.adjustments(item.path()));
+                        RasterFrame shown = baked.shown();
                         hideLoadingIndicator();
-                        imageView.setImage(FxImages.toImage(shown));
+                        imageView.setImage(baked.image());
                         placeholder.setText("");
                         statusLabel.setText(item.fileName() + " — "
                                 + shown.width() + " × " + shown.height()
@@ -2177,6 +2196,39 @@ public final class ViewerWindow implements AppShell.ShellView {
             playButton.setSelected(true);
             startPlayback(item);
         }
+    }
+
+    /** A finished load: the decode and, for a still, its display bake. */
+    private record LoadedVisual(VisualResult result, BakedStill baked) {}
+
+    /**
+     * A decoded still made ready for display: the sidecars it was baked
+     * against, the upright (AAE-edited) frame, the frame with the user
+     * adjustments on top, and that frame as a JavaFX image.
+     */
+    private record BakedStill(AaeSidecar aae, Adjustments adjustments,
+                              RasterFrame upright, RasterFrame shown, Image image) {}
+
+    /** {@link #bakeStill(Path, RasterFrame)} for a load's result; null when it has no frame. */
+    private BakedStill bakeStill(Path path, VisualResult result) {
+        if (result == null || result.frame().isEmpty()) return null;
+        return bakeStill(path, result.frame().get());
+    }
+
+    /**
+     * Reads {@code path}'s sidecars and bakes {@code master} for display.
+     * Called on the decode thread as part of the load — the first read of a
+     * folder's sidecars is disk I/O, and the bake and the image copy are
+     * full-frame pixel work — and on the FX thread only to redo a bake the
+     * sidecars changed under. Both stores are thread-safe; the image is not
+     * attached to the scene until the FX thread takes it.
+     */
+    private BakedStill bakeStill(Path path, RasterFrame master) {
+        AaeSidecar aae = aaeStore.forImage(path).orElse(null);
+        Adjustments adjustments = rotationStore.adjustments(path);
+        RasterFrame upright = RasterFrames.applyAae(master, aae);
+        RasterFrame shown = RasterFrames.apply(upright, adjustments);
+        return new BakedStill(aae, adjustments, upright, shown, FxImages.toImage(shown));
     }
 
     /**
@@ -2282,7 +2334,7 @@ public final class ViewerWindow implements AppShell.ShellView {
             Platform.runLater(this::exportBakedPng);
         });
         var exportMenu = new Menu("Export", null, zeroMetadata, bakedPng);
-        albumMenu = new AlbumMenu(albumStore, settings,
+        albumMenu = new AlbumMenu(service, albumStore, settings,
                 () -> currentMoveSelection().sources(), stage(), statusLabel::setText);
         var crop = new MenuItem("Crop…");
         if (keys != null) crop.setAccelerator(keys.mod1Shift(KeyCode.C));
@@ -3105,6 +3157,8 @@ public final class ViewerWindow implements AppShell.ShellView {
         if (session == null || !session.isReady() || !flipbookToggle.isSelected()) return;
         int w = session.frameWidth();
         int h = session.frameHeight();
+        // PixelBuffer supports only premultiplied BGRA; the session's frames
+        // are already premultiplied (FlipbookSession.presentationBytes).
         flipbookPixels = new PixelBuffer<>(w, h, ByteBuffer.allocateDirect(w * h * 4),
                 PixelFormat.getByteBgraPreInstance());
         service.cancelSuperResolution();
@@ -3616,22 +3670,32 @@ public final class ViewerWindow implements AppShell.ShellView {
         if (!extensionFixAttempted.add(path)) return;
         service.fileOp(() -> {
             String extension = ContentSniffer.canonicalExtension(path).orElse(null);
-            if (extension == null) return (Path) null; // uncertain: keep the name
+            if (extension == null) return (ActionLogEntry) null; // uncertain: keep the name
+            Path finalPath;
             try {
-                return FileOps.renameInPlaceWithAutoRename(path,
+                finalPath = FileOps.renameInPlaceWithAutoRename(path,
                         path.getFileName() + "." + extension,
                         SidecarCarrier.of(rotationStore, aaeStore));
+            } catch (io.github.ghosthack.mediabrowser.media.move.StrandedMoveException e) {
+                // Renamed, but without its sidecars and with no way back: say
+                // so, then log and follow the file to where it now is.
+                logError("Extension fix for " + path.getFileName() + " left it renamed", e);
+                finalPath = e.landedAt();
             } catch (java.io.IOException e) {
                 throw new UncheckedIOException(e);
             }
-        }).whenComplete((finalPath, error) -> Platform.runLater(() -> {
+            // On disk here, off the FX thread, the moment the rename is done.
+            ActionLogEntry entry = ActionLogEntry.extensionFix(path, finalPath);
+            ActionLog.get().persist(entry);
+            return entry;
+        }).whenComplete((entry, error) -> Platform.runLater(() -> {
             if (error != null) {
                 logError("Extension fix failed for " + path.getFileName(), error);
                 return;
             }
-            if (finalPath != null) {
-                ActionLog.get().record(ActionLogEntry.extensionFix(path, finalPath));
-                applyExtensionFix(path, finalPath);
+            if (entry != null) {
+                ActionLog.get().recordPersisted(entry);
+                applyExtensionFix(path, Path.of(entry.targetPath()));
             }
         }));
     }

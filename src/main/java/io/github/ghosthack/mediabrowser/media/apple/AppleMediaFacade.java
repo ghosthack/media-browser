@@ -1,5 +1,6 @@
 package io.github.ghosthack.mediabrowser.media.apple;
 
+import io.github.ghosthack.mediabrowser.media.BgraAlpha;
 import io.github.ghosthack.mediabrowser.media.ImageSequences;
 import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
@@ -82,7 +83,7 @@ public final class AppleMediaFacade implements MediaFacade {
             // AVFoundation declines) stays an IMAGE the ImageIO still renders, so
             // the viewer never offers a Play button that can only error.
             return Optional.of(ImageSequences.stillOrAnimationKind(file,
-                    () -> videoInfo(file) != null));
+                    () -> animationTrack(file).isPresent()));
         }
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
@@ -104,7 +105,9 @@ public final class AppleMediaFacade implements MediaFacade {
     public MediaProbe probe(Path file) {
         if (sniffImage(file)) {
             return ImageSequences.decodeStillOrAnimation(file,
-                    () -> avVideoProbe(file),
+                    MediaEngineTrace.Recorder.disabled(), ANIMATED_VISUAL,
+                    () -> animationTrack(file),
+                    vi -> videoProbe(file, vi),
                     () -> imageProbe(file));
         }
         String ext = extension(file);
@@ -129,9 +132,7 @@ public final class AppleMediaFacade implements MediaFacade {
     @Override
     public VisualResult loadVisual(Path file) {
         if (sniffImage(file)) {
-            return ImageSequences.decodeStillOrAnimation(file,
-                    () -> avVideoVisual(file),
-                    () -> imageIoVisual(file));
+            return stillOrAnimationVisual(file, MediaEngineTrace.Recorder.disabled());
         }
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
@@ -159,26 +160,7 @@ public final class AppleMediaFacade implements MediaFacade {
     @Override
     public VisualResult loadVisual(Path file, MediaEngineTrace.Recorder trace) {
         if (sniffImage(file)) {
-            if (ImageSequences.isAnimatedImageSequence(file)) {
-                long animated = trace.beginAttempt();
-                try {
-                    VisualResult result = avVideoVisual(file);
-                    trace.succeeded("AVFoundation animated image track", animated,
-                            visualDetail(result));
-                    return result;
-                } catch (MediaException e) {
-                    trace.failed("AVFoundation animated image track", animated, e);
-                }
-            }
-            long still = trace.beginAttempt();
-            try {
-                VisualResult result = imageIoVisual(file);
-                trace.succeeded("Apple ImageIO still", still, visualDetail(result));
-                return result;
-            } catch (RuntimeException | Error e) {
-                trace.failed("Apple ImageIO still", still, e);
-                throw e;
-            }
+            return stillOrAnimationVisual(file, trace);
         }
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
@@ -222,9 +204,8 @@ public final class AppleMediaFacade implements MediaFacade {
         // the path without loading the whole file into the heap. ImageIO fits
         // within the box; FILL then centre-crops the square in Java.
         if (sniffImage(file)) {
-            return ImageSequences.decodeStillOrAnimation(file,
-                    () -> avVideoThumbnail(file, maxEdge, mode),
-                    () -> imageIoThumbnail(file, maxEdge, mode));
+            return stillOrAnimationThumbnail(file, maxEdge, mode,
+                    MediaEngineTrace.Recorder.disabled());
         }
         // Video posters: AVAssetImageGenerator with setMaximumSize: downscales
         // during decode (native, no full-size raster), seeking ~10% in to skip a
@@ -249,27 +230,7 @@ public final class AppleMediaFacade implements MediaFacade {
     public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode,
                                    MediaEngineTrace.Recorder trace) {
         if (sniffImage(file)) {
-            if (ImageSequences.isAnimatedImageSequence(file)) {
-                long animated = trace.beginAttempt();
-                try {
-                    Thumbnail result = avVideoThumbnail(file, maxEdge, mode);
-                    trace.succeeded("AVFoundation animated thumbnail", animated,
-                            thumbnailDetail(result, maxEdge, mode));
-                    return result;
-                } catch (MediaException e) {
-                    trace.failed("AVFoundation animated thumbnail", animated, e);
-                }
-            }
-            long still = trace.beginAttempt();
-            try {
-                Thumbnail result = imageIoThumbnail(file, maxEdge, mode);
-                trace.succeeded("Apple ImageIO thumbnail", still,
-                        thumbnailDetail(result, maxEdge, mode));
-                return result;
-            } catch (RuntimeException | Error e) {
-                trace.failed("Apple ImageIO thumbnail", still, e);
-                throw e;
-            }
+            return stillOrAnimationThumbnail(file, maxEdge, mode, trace);
         }
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
@@ -316,10 +277,52 @@ public final class AppleMediaFacade implements MediaFacade {
     //
     // For an animated AVIF/HEIC the ImageIO still sniff matches but only the
     // moov track plays. ImageSequences.decodeStillOrAnimation runs the av* path
-    // and falls back to the imageIo* still when AVFoundation throws — e.g. it
-    // declines the avis/hevs brand or lacks the codec. Like Media Foundation,
-    // AVFoundation only enumerates real tracks, so there is no still-vs-track
-    // stream to disambiguate.
+    // when AVFoundation exposes the animation track, and the imageIo* still
+    // when it does not (it declines the avis/hevs brand or lacks the codec) —
+    // the same gate classify() uses, recorded as DECLINED in the trace. A
+    // failure on a track AVFoundation did open is the file's decode error,
+    // never swapped for the still. Like Media Foundation, AVFoundation only
+    // enumerates real tracks, so there is no still-vs-track stream to
+    // disambiguate.
+
+    private static final String ANIMATED_VISUAL = "AVFoundation animated image track";
+    private static final String ANIMATED_THUMBNAIL = "AVFoundation animated thumbnail";
+
+    private VisualResult stillOrAnimationVisual(Path file, MediaEngineTrace.Recorder trace) {
+        return ImageSequences.decodeStillOrAnimation(file, trace, ANIMATED_VISUAL,
+                () -> animationTrack(file),
+                vi -> traced(trace, ANIMATED_VISUAL,
+                        () -> avVideoVisual(file, vi), AppleMediaFacade::visualDetail),
+                () -> traced(trace, "Apple ImageIO still",
+                        () -> imageIoVisual(file), AppleMediaFacade::visualDetail));
+    }
+
+    private Thumbnail stillOrAnimationThumbnail(Path file, int maxEdge, ThumbnailMode mode,
+                                                MediaEngineTrace.Recorder trace) {
+        return ImageSequences.decodeStillOrAnimation(file, trace, ANIMATED_THUMBNAIL,
+                () -> animationTrack(file),
+                vi -> traced(trace, ANIMATED_THUMBNAIL,
+                        () -> avVideoThumbnail(file, vi, maxEdge, mode),
+                        t -> thumbnailDetail(t, maxEdge, mode)),
+                () -> traced(trace, "Apple ImageIO thumbnail",
+                        () -> imageIoThumbnail(file, maxEdge, mode),
+                        t -> thumbnailDetail(t, maxEdge, mode)));
+    }
+
+    /** Runs one claimed route, recording its outcome; a failure is rethrown. */
+    private static <T> T traced(MediaEngineTrace.Recorder trace, String strategy,
+                                java.util.function.Supplier<T> action,
+                                java.util.function.Function<T, String> detail) {
+        long started = trace.beginAttempt();
+        try {
+            T result = action.get();
+            trace.succeeded(strategy, started, detail.apply(result));
+            return result;
+        } catch (RuntimeException | Error e) {
+            trace.failed(strategy, started, e);
+            throw e;
+        }
+    }
 
     private VisualResult imageIoVisual(Path file) {
         try (Arena arena = Arena.ofConfined()) {
@@ -338,12 +341,7 @@ public final class AppleMediaFacade implements MediaFacade {
         }
     }
 
-    private MediaProbe avVideoProbe(Path file) {
-        return videoProbe(file, requireAnimationTrack(file));
-    }
-
-    private VisualResult avVideoVisual(Path file) {
-        VideoInfo vi = requireAnimationTrack(file);
+    private VisualResult avVideoVisual(Path file, VideoInfo vi) {
         try (Arena arena = Arena.ofConfined()) {
             DecodedImage<PixelFormat> frame =
                     AVFoundation.extractFrame(arena, file.toString(), 0);
@@ -354,8 +352,8 @@ public final class AppleMediaFacade implements MediaFacade {
         }
     }
 
-    private Thumbnail avVideoThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
-        VideoInfo vi = requireAnimationTrack(file);
+    private Thumbnail avVideoThumbnail(Path file, VideoInfo vi, int maxEdge,
+                                       ThumbnailMode mode) {
         try {
             return videoThumbnail(file, vi, maxEdge, mode);
         } catch (RuntimeException e) {
@@ -364,15 +362,13 @@ public final class AppleMediaFacade implements MediaFacade {
         }
     }
 
-    /** The AVFoundation animation track of an animated AVIF/HEIC, or a
-     *  {@link MediaException} (so the still falls back) when there is none. */
-    private VideoInfo requireAnimationTrack(Path file) {
-        VideoInfo vi = videoInfo(file);
-        if (vi == null || vi.width() <= 0 || vi.height() <= 0) {
-            throw new MediaException("apple: no playable animation track in "
-                    + file.getFileName());
-        }
-        return vi;
+    /**
+     * The AVFoundation animation track of an animated AVIF/HEIC; empty when
+     * AVFoundation exposes none, which is what routes the file to the still.
+     */
+    private static Optional<VideoInfo> animationTrack(Path file) {
+        return Optional.ofNullable(videoInfo(file))
+                .filter(vi -> vi.width() > 0 && vi.height() > 0);
     }
 
     /**
@@ -534,7 +530,17 @@ public final class AppleMediaFacade implements MediaFacade {
                 null, 0, info.codec(), sampleRate, channels, null);
     }
 
-    /** Copies a vendored BGRA {@link DecodedImage} into a tightly packed {@link RasterFrame}. */
+    /**
+     * Copies a vendored BGRA {@link DecodedImage} into a tightly packed,
+     * straight-alpha {@link RasterFrame}.
+     *
+     * <p>Both vendored Apple sources — {@code ImageIO} stills/thumbnails and
+     * {@code AVFoundation.extractFrame} posters — render through a
+     * {@code kCGImageAlphaPremultipliedFirst} CGBitmapContext, so their pixels
+     * are premultiplied by construction and are converted here. For opaque
+     * frames (ordinary video, JPEG) every alpha is 255 and the conversion
+     * leaves the bytes untouched.
+     */
     private static RasterFrame toRaster(DecodedImage<PixelFormat> img) {
         int w = img.width();
         int h = img.height();
@@ -550,6 +556,7 @@ public final class AppleMediaFacade implements MediaFacade {
                         dst, y * rowBytes, rowBytes);
             }
         }
+        BgraAlpha.unpremultiplyInPlace(dst);
         return new RasterFrame(w, h, dst);
     }
 

@@ -1,5 +1,6 @@
 package io.github.ghosthack.mediabrowser.media.windows;
 
+import io.github.ghosthack.mediabrowser.media.BgraAlpha;
 import io.github.ghosthack.mediabrowser.media.ImageSequences;
 import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
@@ -106,7 +107,7 @@ public final class WindowsMediaFacade implements MediaFacade {
         // Play button that can only error.
         if (sniffImage(file)) {
             return Optional.of(ImageSequences.stillOrAnimationKind(file,
-                    () -> videoInfo(file) != null));
+                    () -> animationTrack(file).isPresent()));
         }
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
@@ -131,7 +132,9 @@ public final class WindowsMediaFacade implements MediaFacade {
     public MediaProbe probe(Path file) {
         if (sniffImage(file)) {
             return ImageSequences.decodeStillOrAnimation(file,
-                    () -> mfVideoProbe(file),
+                    MediaEngineTrace.Recorder.disabled(), ANIMATED_VISUAL,
+                    () -> animationTrack(file),
+                    vi -> videoProbe(file, vi, audioInfo(file)),
                     () -> imageProbe(file));
         }
         String ext = extension(file);
@@ -164,8 +167,9 @@ public final class WindowsMediaFacade implements MediaFacade {
     @Override
     public VisualResult loadVisual(Path file, MediaEngineTrace.Recorder trace) {
         if (sniffImage(file)) {
-            return ImageSequences.decodeStillOrAnimation(file,
-                    () -> mfVideoVisual(file, trace),
+            return ImageSequences.decodeStillOrAnimation(file, trace, ANIMATED_VISUAL,
+                    () -> animationTrack(file),
+                    vi -> mfVideoVisual(file, vi, trace),
                     () -> traced(trace, "WIC still decode", () -> wicVisual(file)));
         }
         String ext = extension(file);
@@ -176,7 +180,7 @@ public final class WindowsMediaFacade implements MediaFacade {
                 trace.succeeded("Media Foundation video probe", probeStarted,
                         vi.width() + "×" + vi.height());
                 // Poster ~10% in skips a black/fade-in opening frame. Keep the
-                // confined Arena open until toRaster copies the pixels out, and
+                // confined Arena open until videoRaster copies the pixels out, and
                 // wrap any DecodeException so it never leaks past the facade.
                 long durationMs = vi.durationMillis();
                 long posterMs = durationMs > 0 ? (long) (durationMs * 0.1) : 0;
@@ -185,7 +189,7 @@ public final class WindowsMediaFacade implements MediaFacade {
                             MediaFoundation.extractFrame(
                                     arena, file.toString(), posterMs, 0,
                                     attempt -> recordMfAttempt(trace, attempt));
-                    return new VisualResult(videoProbe(file, vi), Optional.of(toRaster(frame)));
+                    return new VisualResult(videoProbe(file, vi), Optional.of(videoRaster(frame)));
                 } catch (RuntimeException e) {
                     throw new MediaException("windows-native: cannot decode video frame "
                             + file.getFileName() + ": " + e.getMessage(), e);
@@ -216,9 +220,8 @@ public final class WindowsMediaFacade implements MediaFacade {
         // + EXIF orientation baked in), fitting the box; FILL then centre-crops
         // the square in Java. Mirrors the Apple stills path exactly.
         if (sniffImage(file)) {
-            return ImageSequences.decodeStillOrAnimation(file,
-                    () -> mfVideoThumbnail(file, maxEdge, mode),
-                    () -> wicThumbnail(file, maxEdge, mode));
+            return stillOrAnimationThumbnail(file, maxEdge, mode,
+                    MediaEngineTrace.Recorder.disabled());
         }
         // Video posters: extract the poster ~10% in, asking Media Foundation to
         // DOWNSCALE during decode so the longer edge fits maxEdge (Phase 6 native
@@ -236,7 +239,7 @@ public final class WindowsMediaFacade implements MediaFacade {
                 try (Arena arena = Arena.ofConfined()) {
                     DecodedImage<PixelFormat> frame =
                             MediaFoundation.extractFrame(arena, file.toString(), posterMs, maxEdge);
-                    RasterFrame raster = Thumbnails.scale(toRaster(frame), maxEdge, mode);
+                    RasterFrame raster = Thumbnails.scale(videoRaster(frame), maxEdge, mode);
                     return new Thumbnail(Optional.of(raster), MediaKind.VIDEO);
                 } catch (RuntimeException e) {
                     throw new MediaException("windows-native: cannot thumbnail video "
@@ -258,14 +261,34 @@ public final class WindowsMediaFacade implements MediaFacade {
     @Override
     public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode,
                                    MediaEngineTrace.Recorder trace) {
-        String strategy = sniffImage(file)
-                ? (ImageSequences.isAnimatedImageSequence(file)
-                        ? "Media Foundation animated poster / WIC still recovery"
-                        : "WIC source-scaled thumbnail")
-                : "Media Foundation native-downscaled poster";
+        if (sniffImage(file)) {
+            return stillOrAnimationThumbnail(file, maxEdge, mode, trace);
+        }
+        return tracedThumbnail(trace, "Media Foundation native-downscaled poster",
+                maxEdge, mode, () -> loadThumbnail(file, maxEdge, mode));
+    }
+
+    /**
+     * A sniffed still: the animated poster when Media Foundation exposes the
+     * animation track, else the WIC still — each named in the trace, with the
+     * decline recorded when the animation has no playable track.
+     */
+    private Thumbnail stillOrAnimationThumbnail(Path file, int maxEdge, ThumbnailMode mode,
+                                                MediaEngineTrace.Recorder trace) {
+        return ImageSequences.decodeStillOrAnimation(file, trace, ANIMATED_THUMBNAIL,
+                () -> animationTrack(file),
+                vi -> tracedThumbnail(trace, ANIMATED_THUMBNAIL, maxEdge, mode,
+                        () -> mfVideoThumbnail(file, vi, maxEdge, mode)),
+                () -> tracedThumbnail(trace, "WIC source-scaled thumbnail", maxEdge, mode,
+                        () -> wicThumbnail(file, maxEdge, mode)));
+    }
+
+    private static Thumbnail tracedThumbnail(MediaEngineTrace.Recorder trace, String strategy,
+                                             int maxEdge, ThumbnailMode mode,
+                                             Supplier<Thumbnail> action) {
         long started = trace.beginAttempt();
         try {
-            Thumbnail result = loadThumbnail(file, maxEdge, mode);
+            Thumbnail result = action.get();
             trace.succeeded(strategy, started,
                     mode + ", requested ≤" + maxEdge + " px, produced "
                             + result.frame().map(f -> f.width() + "×" + f.height() + " BGRA")
@@ -280,16 +303,22 @@ public final class WindowsMediaFacade implements MediaFacade {
     // -- still (WIC) vs animated AVIF/HEIC (Media Foundation) ----------------
     //
     // For an animated AVIF/HEIC the WIC still sniff matches but only the moov
-    // track plays. ImageSequences.decodeStillOrAnimation runs the mf* path and
-    // falls back to the wic* still when MF throws — e.g. its MP4 source rejects
-    // the avis/hevs brand or the AV1/HEVC Store codec MFT is missing. Unlike
-    // FFmpeg, MF never exposes the still primary item as a track, so there is no
-    // still-vs-track stream to disambiguate here.
+    // track plays. ImageSequences.decodeStillOrAnimation runs the mf* path when
+    // MF exposes the animation track, and the wic* still when it does not —
+    // e.g. its MP4 source rejects the avis/hevs brand or the AV1/HEVC Store
+    // codec MFT is missing; the same gate classify() uses, recorded as DECLINED
+    // in the trace. A failure on a track MF did open is the file's decode
+    // error, never swapped for the still. Unlike FFmpeg, MF never exposes the
+    // still primary item as a track, so there is no still-vs-track stream to
+    // disambiguate here.
+
+    private static final String ANIMATED_VISUAL = "Media Foundation animation track";
+    private static final String ANIMATED_THUMBNAIL = "Media Foundation animated poster";
 
     private VisualResult wicVisual(Path file) {
         try (Arena arena = Arena.ofConfined()) {
             DecodedImage<PixelFormat> img = WIC.decodeFromPath(arena, file.toString());
-            return new VisualResult(imageProbe(file), Optional.of(toRaster(img)));
+            return new VisualResult(imageProbe(file), Optional.of(stillRaster(img)));
         } catch (RuntimeException e) {
             throw new MediaException("windows-native: cannot decode image "
                     + file.getFileName() + ": " + e.getMessage(), e);
@@ -300,7 +329,7 @@ public final class WindowsMediaFacade implements MediaFacade {
         try (Arena arena = Arena.ofConfined()) {
             DecodedImage<PixelFormat> thumb =
                     WIC.decodeThumbnailFromPath(arena, file.toString(), maxEdge);
-            RasterFrame frame = toRaster(thumb);
+            RasterFrame frame = stillRaster(thumb);
             if (mode == ThumbnailMode.FILL) frame = Thumbnails.fill(frame, maxEdge);
             return new Thumbnail(Optional.of(frame), MediaKind.IMAGE);
         } catch (RuntimeException e) {
@@ -309,22 +338,11 @@ public final class WindowsMediaFacade implements MediaFacade {
         }
     }
 
-    private MediaProbe mfVideoProbe(Path file) {
-        VideoInfo vi = requireAnimationTrack(file);
-        return videoProbe(file, vi, audioInfo(file));
-    }
-
-    private VisualResult mfVideoVisual(Path file, MediaEngineTrace.Recorder trace) {
-        long probeStarted = trace.beginAttempt();
-        VideoInfo vi;
-        try {
-            vi = requireAnimationTrack(file);
-        } catch (RuntimeException | Error failure) {
-            trace.failed("Media Foundation animation probe", probeStarted, failure);
-            throw failure;
-        }
-        trace.succeeded("Media Foundation animation probe", probeStarted,
+    private VisualResult mfVideoVisual(Path file, VideoInfo vi,
+                                       MediaEngineTrace.Recorder trace) {
+        trace.succeeded("Media Foundation animation probe", trace.beginAttempt(),
                 vi.width() + "×" + vi.height());
+        long decodeStarted = trace.beginAttempt();
         long durationMs = vi.durationMillis();
         long posterMs = durationMs > 0 ? (long) (durationMs * 0.1) : 0;
         try (Arena arena = Arena.ofConfined()) {
@@ -333,10 +351,13 @@ public final class WindowsMediaFacade implements MediaFacade {
                             arena, file.toString(), posterMs, 0,
                             attempt -> recordMfAttempt(trace, attempt));
             return new VisualResult(videoProbe(file, vi, audioInfo(file)),
-                    Optional.of(toRaster(frame)));
+                    Optional.of(videoRaster(frame)));
         } catch (RuntimeException e) {
-            throw new MediaException("windows-native: cannot decode animation frame "
+            MediaException failure = new MediaException(
+                    "windows-native: cannot decode animation frame "
                     + file.getFileName() + ": " + e.getMessage(), e);
+            trace.failed(ANIMATED_VISUAL, decodeStarted, failure);
+            throw failure;
         }
     }
 
@@ -367,14 +388,14 @@ public final class WindowsMediaFacade implements MediaFacade {
         }
     }
 
-    private Thumbnail mfVideoThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
-        VideoInfo vi = requireAnimationTrack(file);
+    private Thumbnail mfVideoThumbnail(Path file, VideoInfo vi, int maxEdge,
+                                       ThumbnailMode mode) {
         long durationMs = vi.durationMillis();
         long posterMs = durationMs > 0 ? (long) (durationMs * 0.1) : 0;
         try (Arena arena = Arena.ofConfined()) {
             DecodedImage<PixelFormat> frame =
                     MediaFoundation.extractFrame(arena, file.toString(), posterMs, maxEdge);
-            RasterFrame raster = Thumbnails.scale(toRaster(frame), maxEdge, mode);
+            RasterFrame raster = Thumbnails.scale(videoRaster(frame), maxEdge, mode);
             return new Thumbnail(Optional.of(raster), MediaKind.VIDEO);
         } catch (RuntimeException e) {
             throw new MediaException("windows-native: cannot thumbnail animation "
@@ -382,15 +403,14 @@ public final class WindowsMediaFacade implements MediaFacade {
         }
     }
 
-    /** The MF animation track of an animated AVIF/HEIC, or a {@link MediaException}
-     *  (so the still falls back) when Media Foundation exposes no playable track. */
-    private VideoInfo requireAnimationTrack(Path file) {
-        VideoInfo vi = videoInfo(file);
-        if (vi == null || vi.width() <= 0 || vi.height() <= 0) {
-            throw new MediaException("windows-native: no playable animation track in "
-                    + file.getFileName());
-        }
-        return vi;
+    /**
+     * The MF animation track of an animated AVIF/HEIC; empty when Media
+     * Foundation exposes no playable track, which is what routes the file to
+     * the still.
+     */
+    private static Optional<VideoInfo> animationTrack(Path file) {
+        return Optional.ofNullable(videoInfo(file))
+                .filter(vi -> vi.width() > 0 && vi.height() > 0);
     }
 
     @Override
@@ -732,18 +752,45 @@ public final class WindowsMediaFacade implements MediaFacade {
     }
 
     /**
-     * Copies a vendored BGRA {@link DecodedImage} into a tightly packed
-     * {@link RasterFrame} (golden rule #3): the fast path copies verbatim when
+     * A WIC still or thumbnail as a straight-alpha {@link RasterFrame}. The
+     * vendored WIC binding always format-converts to {@code 32bppPBGRA}
+     * (premultiplied), while {@link RasterFrame} is straight alpha, so the
+     * packed copy is un-premultiplied. Opaque pixels (alpha 255) are unchanged.
+     *
+     * <p>Stills only: never route Media Foundation frames here — see
+     * {@link #videoRaster}.</p>
+     */
+    static RasterFrame stillRaster(DecodedImage<PixelFormat> img) {
+        byte[] bgra = packBgra(img);
+        BgraAlpha.unpremultiplyInPlace(bgra);
+        return new RasterFrame(img.width(), img.height(), bgra);
+    }
+
+    /**
+     * A Media Foundation frame as a {@link RasterFrame}, bytes copied verbatim.
+     * MF frames are opaque video and are deliberately NOT un-premultiplied:
+     * the vendored NV12 path writes alpha 255 (already straight), and the
+     * {@code MFVideoFormat_RGB32} path passes MF's fourth byte through, which
+     * is undefined padding rather than alpha — dividing colour by it would
+     * corrupt the frame (a padding byte of 0 would blank it).
+     */
+    static RasterFrame videoRaster(DecodedImage<PixelFormat> img) {
+        return new RasterFrame(img.width(), img.height(), packBgra(img));
+    }
+
+    /**
+     * Copies a vendored BGRA {@link DecodedImage} into tightly packed bytes
+     * (golden rule #3): the fast path copies verbatim when
      * {@code stride == width*4}, otherwise each row's first {@code width*4} bytes
      * are copied and the per-row stride padding dropped, yielding a
      * {@code width*height*4}-byte output.
      *
-     * <p>Pure (MemorySegment/Panama only — no WIC/MF) and relaxed from
-     * {@code private} to package-private/static so the BGRA stride-packing
-     * contract is covered deterministically under {@code mvn test} on any OS
+     * <p>Pure (MemorySegment/Panama only — no WIC/MF); it and its two callers
+     * above are package-private/static so the BGRA stride-packing and alpha
+     * contracts are covered deterministically under {@code mvn test} on any OS
      * (no native APIs, no constructor).</p>
      */
-    static RasterFrame toRaster(DecodedImage<PixelFormat> img) {
+    static byte[] packBgra(DecodedImage<PixelFormat> img) {
         int w = img.width();
         int h = img.height();
         int stride = img.stride();
@@ -758,7 +805,7 @@ public final class WindowsMediaFacade implements MediaFacade {
                         dst, y * rowBytes, rowBytes);
             }
         }
-        return new RasterFrame(w, h, dst);
+        return dst;
     }
 
     private static long fileSize(Path file) {

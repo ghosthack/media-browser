@@ -51,10 +51,10 @@ public interface SidecarCarrier {
             AaeStore.Undo aae = edits.carryOwnSidecar(source, target);
             try {
                 rotations.moveEntry(source, target);
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 try {
                     aae.undo();
-                } catch (IOException rollback) {
+                } catch (IOException | RuntimeException rollback) {
                     e.addSuppressed(rollback);
                 }
                 throw e;

@@ -143,9 +143,18 @@ public final class AaeStore {
      * {@code IMG_E1234} copy, lands beside the already-carried copy of the
      * same name.
      *
+     * <p>A sidecar is never carried <em>onto a stranger</em>: when the target
+     * folder already holds a different file the carried sidecar would pair
+     * with (same stem, or its {@code IMG_E} copy) and no sidecar of that name
+     * is there yet, the carry is refused. That file is not a partner sharing
+     * this edit — a partner would have brought its copy — so the edit would
+     * silently apply to an unrelated photo, whose next crop would then
+     * overwrite it.
+     *
      * @return how to reverse the carry (a no-op when there was nothing to carry)
      * @throws IOException if the sidecar cannot be carried, including when the
-     *                     target name is already taken by a different file;
+     *                     target name is already taken by a different file or
+     *                     the sidecar would attach to an unrelated file there;
      *                     nothing is then changed
      */
     public Undo carryOwnSidecar(Path source, Path target) throws IOException {
@@ -203,6 +212,14 @@ public final class AaeStore {
             // A partner moved earlier in this batch already carried it.
             return retireLeftCopy(aae, destination, remainingStems, sourceDir, targetDir);
         }
+        Path stranger = wouldAlsoPairWith(destination, targetDir, movedFile);
+        if (stranger != null) {
+            // The names only: this message reaches the move-failure UI text.
+            throw new IOException("its edit sidecar " + aaeName + " cannot follow: as "
+                    + destination.getFileName() + " it would also apply to "
+                    + stranger.getFileName() + ", a different file already there"
+                    + " — rename one of them first");
+        }
         boolean shared = Sidecars.isMatchedAaeSidecar(aae, remainingStems);
         if (shared) {
             Files.copy(aae, destination, StandardCopyOption.COPY_ATTRIBUTES);
@@ -248,6 +265,39 @@ public final class AaeStore {
             invalidate(sourceDir);
             invalidate(targetDir);
         };
+    }
+
+    /**
+     * A file already in {@code targetDir}, other than the one just moved
+     * there, that a sidecar newly created at {@code destination} would pair
+     * with — by the same rule every reader uses ({@link #forImage},
+     * {@link Sidecars#isMatchedAaeSidecar}): the same stem, or the stem's
+     * {@code IMG_E} edited copy. Null when there is none.
+     *
+     * <p>Such a file had no edit under that name (the caller has established
+     * {@code destination} does not exist), so it is not a partner that already
+     * shares this one: carrying the sidecar in would silently apply a
+     * stranger's edit to it, and a later crop of it would rewrite that
+     * sidecar. A genuine partner that moved earlier took a copy along, which
+     * the caller finds at {@code destination} and never asks here.</p>
+     */
+    private static Path wouldAlsoPairWith(Path destination, Path targetDir, Path movedFile)
+            throws IOException {
+        String stem = Sidecars.stem(destination);
+        String edited = Sidecars.editedVariant(stem);
+        try (Stream<Path> children = Files.list(targetDir)) {
+            for (Path p : children.filter(p -> !Files.isDirectory(p)).toList()) {
+                if (Sidecars.isAaeSidecar(p) || Sidecars.isRotationSidecar(p)
+                        || p.toAbsolutePath().normalize().equals(movedFile)) {
+                    continue;
+                }
+                String other = Sidecars.stem(p);
+                if (other.equals(stem) || other.equals(edited)) {
+                    return p;
+                }
+            }
+        }
+        return null;
     }
 
     private static boolean sameBytes(Path a, Path b) throws IOException {

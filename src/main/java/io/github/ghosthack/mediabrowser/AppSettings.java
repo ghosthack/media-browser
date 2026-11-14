@@ -309,7 +309,8 @@ public final class AppSettings {
     private boolean mosaicStatusBarVisible;
     private boolean mosaicLocationBarVisible;
     private boolean actionLogVisible;
-    private boolean actionLogFileEnabled;
+    /** Volatile: the file-operation thread reads it per logged move. */
+    private volatile boolean actionLogFileEnabled;
     private boolean extensionFixEnabled;
     private int sidePanelWidth = DEFAULT_SIDE_PANEL_WIDTH;
     /**

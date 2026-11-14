@@ -6,6 +6,7 @@ import com.drew.imaging.jpeg.JpegSegmentType;
 import com.drew.metadata.Directory;
 import com.drew.metadata.Tag;
 import io.github.ghosthack.mediabrowser.media.ColorProfile;
+import io.github.ghosthack.mediabrowser.media.MediaException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -30,6 +31,16 @@ public final class EmbeddedProfileReader {
 
     private EmbeddedProfileReader() {}
 
+    /**
+     * The file's embedded RGB profile. Empty means the scan completed and
+     * found none: an untagged file, or a malformed/unsupported envelope the
+     * scanners decline — color management is additive, so that never turns a
+     * decodable still into an error.
+     *
+     * @throws MediaException when the scan itself failed (unreadable file, I/O
+     *         error, scanner defect). That is not "untagged": the caller must
+     *         neither cache it nor show the image unmanaged as if it were.
+     */
     static Optional<ColorProfile> read(Path file) {
         String ext = extension(file);
         try {
@@ -43,9 +54,8 @@ public final class EmbeddedProfileReader {
             };
             return ColorProfile.parse(bytes);
         } catch (IOException | RuntimeException ex) {
-            // Color management is additive. A malformed/unsupported metadata
-            // envelope must never turn an otherwise decodable still into an error.
-            return Optional.empty();
+            throw new MediaException("cannot read the embedded ICC profile of "
+                    + file.getFileName() + ": " + ex, ex);
         }
     }
 

@@ -142,6 +142,18 @@ public final class MediaService implements AutoCloseable {
     });
 
     /**
+     * The browser's folder tree lists subfolders here. Its own thread, not
+     * {@code media-file-op}: a tree that queued behind a long move would stop
+     * expanding and following navigation until the move finished. Single so a
+     * node's listings stay ordered amongst themselves.
+     */
+    private final ExecutorService folderTreeExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "media-folder-tree");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /**
      * The on-demand full-metadata read ({@link #metadata}) runs on its own
      * dedicated single thread, deliberately <b>not</b> the {@code media-facade}
      * {@code executor} that browse/probe/decode use. A fat AI-PNG metadata read
@@ -1407,6 +1419,14 @@ public final class MediaService implements AutoCloseable {
         return CompletableFuture.supplyAsync(task, fileOpExecutor);
     }
 
+    /**
+     * Runs a folder-tree listing off the FX thread on its own thread, so it
+     * never waits behind a move on {@link #fileOp}.
+     */
+    public <T> CompletableFuture<T> folderTreeListing(Supplier<T> task) {
+        return CompletableFuture.supplyAsync(task, folderTreeExecutor);
+    }
+
     public String nativeVersions() {
         return facade.nativeVersions();
     }
@@ -1724,6 +1744,7 @@ public final class MediaService implements AutoCloseable {
         executor.shutdownNow();
         fileOpExecutor.shutdownNow();
         metadataExecutor.shutdownNow();
+        folderTreeExecutor.shutdownNow();
         superResolutionExecutor.shutdownNow();
         thumbnailExecutor.shutdownNow();
         thumbnailCache.clear();

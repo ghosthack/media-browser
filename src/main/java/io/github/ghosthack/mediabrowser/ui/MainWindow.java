@@ -371,7 +371,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             // mirror deliberately selects a different node for an archive (its
             // containing folder) or a path the tree cannot show (the deepest
             // visible ancestor), and navigating to that would undo the move.
-            if (sel == null || mirroringIntoTree) return;
+            if (mirroringIntoTree) return;
+            // The user (or a virtual location) moved the tree selection: a
+            // mirror still waiting on a folder listing must not move it back.
+            treeMirrorSequence++;
+            if (sel == null) return;
             Path selected = sel.getValue();
             if (selected == null) {
                 if (!atComputerLocation) navigateToComputer();
@@ -448,7 +452,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 });
                 var exportMenu = new Menu("Export");
                 exportMenu.getItems().addAll(zeroMetadata, bakedPng);
-                var albumMenu = new AlbumMenu(albumStore, settings,
+                var albumMenu = new AlbumMenu(service, albumStore, settings,
                         () -> currentMoveSelection().sources(), stage(),
                         statusLabel::setText);
                 // Right-click doesn't change selection: target the clicked cell
@@ -1145,6 +1149,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             statusLabel.setText("Not a folder: " + ArchivePaths.format(target));
             return false;
         }
+        // Re-listing the folder already shown (Reload, or the refresh after a
+        // move, trash or export from any of the three views) is when folders
+        // may have appeared or gone: bring the tree's listed nodes up to date.
+        if (target.equals(currentDir) && currentAlbum == null) refreshTree();
         Path select = pendingSelection; // entry to re-select once listed
         pendingSelection = null;
         typeahead.reset();
@@ -1533,14 +1541,45 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }
         // Accepts both a plain path and an archive locator
         // (/discs/photos.iso!/DCIM), mounting the container when needed.
-        Path target = ArchivePaths.parse(addressField.getText()).orElse(null);
+        String text = addressField.getText();
+        if (!mayMount(text)) {
+            openParsedAddress(text, ArchivePaths.parse(text).orElse(null));
+            return;
+        }
+        // The mount is real I/O (a large zip's central directory, an image's
+        // descriptors): off the FX thread, like openArchive.
+        statusLabel.setText("Opening " + text.trim() + "…");
+        navigationRequests.resolve(
+                service.fileOp(() -> ArchivePaths.parse(text).orElse(null)),
+                Platform::runLater,
+                (target, error) -> {
+                    if (error != null) {
+                        statusLabel.setText("Cannot open " + text.trim() + ": "
+                                + rootMessage(error));
+                        return;
+                    }
+                    openParsedAddress(text, target);
+                });
+    }
+
+    private void openParsedAddress(String text, Path target) {
         if (target == null) {
-            statusLabel.setText("Cannot open: " + addressField.getText().trim());
+            statusLabel.setText("Cannot open: " + text.trim());
             return;
         }
         if (navigate(target)) {
             listView.requestFocus();
         }
+    }
+
+    /**
+     * Whether parsing location-bar {@code text} can mount an archive: only
+     * text carrying the {@code !/} locator separator can. Anything else is a
+     * plain path, resolved in place so it never queues behind a move on the
+     * file-op thread.
+     */
+    static boolean mayMount(String text) {
+        return text != null && text.contains(ArchivePaths.SEPARATOR);
     }
 
     /**
@@ -1550,13 +1589,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      */
     private boolean navigateAndSync(Path dir) {
         if (!navigate(dir)) return false;   // rejected: leave the tree where it is
-        if (ArchivePaths.inArchive(dir)) {
-            ArchivePaths.hostArchive(dir)
-                    .map(archive -> archive.toAbsolutePath().normalize().getParent())
-                    .ifPresent(this::expandAndSelect);
-            return true;
-        }
-        expandAndSelect(dir.toAbsolutePath().normalize());
+        mirrorLocationIntoTree(dir);
         return true;
     }
 
@@ -2450,10 +2483,99 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         };
     }
 
-    /** Set while {@link #expandAndSelect} moves the tree selection, so its listener does not navigate. */
+    /**
+     * Set while the tree selection is moved by the program — {@link #mirrorIntoTree}
+     * selecting the mirrored node, or a folder listing landing in a node and
+     * displacing the selection — so its listener does not navigate.
+     */
     private boolean mirroringIntoTree;
+    /**
+     * Latest-wins ticket for {@link #expandAndSelect}: the walk waits on folder
+     * listings that land later, and a continuation is dropped once a newer
+     * mirror was requested or the tree selection was moved by anything else.
+     */
+    private int treeMirrorSequence;
 
+    /** How the tree's nodes list their folders: off the FX thread, reporting failures. */
+    private final DirTreeItem.Loading treeLoading = new DirTreeItem.Loading(
+            this::listTreeFolders,
+            Platform::runLater,
+            this::applyTreeChange,
+            this::reportTreeFailure);
+
+    private CompletableFuture<List<Path>> listTreeFolders(java.util.function.Supplier<List<Path>> listing) {
+        return service.folderTreeListing(listing);
+    }
+
+    private void reportTreeFailure(Path dir, Throwable error) {
+        statusLabel.setText("Cannot list folders in " + ArchivePaths.format(dir) + ": "
+                + rootMessage(error));
+    }
+
+    /**
+     * Applies a landed folder listing to the tree. Removing a node can displace
+     * the selection, which must not read as the user picking another folder;
+     * when that happens the current location is mirrored afresh.
+     */
+    private void applyTreeChange(Runnable change) {
+        TreeItem<Path> before = tree.getSelectionModel().getSelectedItem();
+        boolean nested = mirroringIntoTree;
+        mirroringIntoTree = true;
+        try {
+            change.run();
+        } finally {
+            mirroringIntoTree = nested;
+        }
+        if (before != null && before != tree.getSelectionModel().getSelectedItem()
+                && before.getValue() != null && currentDir != null && currentAlbum == null) {
+            mirrorLocationIntoTree(currentDir);
+        }
+    }
+
+    /** Re-lists every tree node already listed, for folders created, moved or trashed. */
+    private void refreshTree() {
+        TreeItem<Path> root = tree.getRoot();
+        if (root instanceof DirTreeItem dir) {
+            dir.refreshLoaded();
+        } else if (root != null) {
+            for (TreeItem<Path> drive : root.getChildren()) {
+                if (drive instanceof DirTreeItem dir) dir.refreshLoaded();
+            }
+        }
+    }
+
+    /**
+     * Mirrors the browsed location into the tree. A location inside an archive
+     * selects the folder holding the archive: the tree shows the real
+     * filesystem only.
+     */
+    private void mirrorLocationIntoTree(Path dir) {
+        if (ArchivePaths.inArchive(dir)) {
+            ArchivePaths.hostArchive(dir)
+                    .map(archive -> archive.toAbsolutePath().normalize().getParent())
+                    .ifPresent(this::expandAndSelect);
+            return;
+        }
+        expandAndSelect(dir.toAbsolutePath().normalize());
+    }
+
+    /**
+     * Expands the tree down to {@code target} and selects it, or its deepest
+     * ancestor the tree can show. The nodes list their folders off the FX
+     * thread, so the walk pauses at a node still listing and resumes when that
+     * lands; the selection moves once, when the walk ends.
+     */
     private void expandAndSelect(Path target) {
+        mirrorIntoTree(target, ++treeMirrorSequence, false);
+    }
+
+    /**
+     * @param relisted whether a node missing a path component was already
+     *                 re-listed for this request (a folder created since the
+     *                 node was listed), so a hidden or missing one costs one
+     *                 listing, not a loop
+     */
+    private void mirrorIntoTree(Path target, int sequence, boolean relisted) {
         TreeItem<Path> node = tree.getRoot();
         Path root = node.getValue();
         if (root == null) {
@@ -2467,7 +2589,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 }
             }
             if (drive == null) {
-                drive = new DirTreeItem(targetRoot);
+                drive = new DirTreeItem(targetRoot, treeLoading);
                 node.getChildren().add(drive);
             }
             node = drive;
@@ -2475,13 +2597,24 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         } else if (!target.startsWith(root)) {
             Path targetRoot = target.getRoot();
             if (targetRoot == null) return;
-            node = new DirTreeItem(targetRoot);
+            node = new DirTreeItem(targetRoot, treeLoading);
             node.setExpanded(true);
-            tree.setRoot(node);
+            mirroringIntoTree = true;   // replacing the root drops the selection
+            try {
+                tree.setRoot(node);
+            } finally {
+                mirroringIntoTree = false;
+            }
             root = targetRoot;
         }
         outer:
         for (Path name : root.relativize(target)) {
+            if (node instanceof DirTreeItem listing && !listing.isSettled()) {
+                listing.whenLoaded(() -> {
+                    if (sequence == treeMirrorSequence) mirrorIntoTree(target, sequence, relisted);
+                });
+                return;
+            }
             for (TreeItem<Path> child : node.getChildren()) {
                 Path childName = child.getValue().getFileName();
                 if (childName != null && childName.equals(name)) {
@@ -2489,6 +2622,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     node = child;
                     continue outer;
                 }
+            }
+            if (!relisted && node instanceof DirTreeItem listed) {
+                listed.refresh();
+                listed.whenLoaded(() -> {
+                    if (sequence == treeMirrorSequence) mirrorIntoTree(target, sequence, true);
+                });
+                return;
             }
             break; // component not visible in the tree (hidden/missing): stop here
         }
@@ -2515,7 +2655,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         TreeItem<Path> computer = tree.getRoot();
         if (computer == null || computer.getValue() != null) return;
         computer.getChildren().setAll(roots.stream()
-                .<TreeItem<Path>>map(DirTreeItem::new)
+                .<TreeItem<Path>>map(drive -> new DirTreeItem(drive, treeLoading))
                 .toList());
     }
 
@@ -3979,13 +4119,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         return List.copyOf(result);
     }
 
-    private static TreeItem<Path> navigationTreeRoot(Path initialRoot) {
+    private TreeItem<Path> navigationTreeRoot(Path initialRoot) {
         if (!supportsComputerLocation(System.getProperty("os.name"))) {
-            return new DirTreeItem(initialRoot);
+            return new DirTreeItem(initialRoot, treeLoading);
         }
         var computer = new TreeItem<Path>(null);
         for (Path root : FileSystemRoots.discover()) {
-            computer.getChildren().add(new DirTreeItem(root));
+            computer.getChildren().add(new DirTreeItem(root, treeLoading));
         }
         return computer;
     }

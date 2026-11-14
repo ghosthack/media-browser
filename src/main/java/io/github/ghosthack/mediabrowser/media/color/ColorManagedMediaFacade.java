@@ -54,7 +54,7 @@ public final class ColorManagedMediaFacade implements MediaFacade {
     @Override
     public MediaProbe probe(Path file) {
         MediaProbe base = delegate.probe(file);
-        return base.kind() == MediaKind.IMAGE ? attachProfile(file, base) : base;
+        return base.kind() == MediaKind.IMAGE ? attachProfile(file, base, null, 0L) : base;
     }
 
     @Override
@@ -71,7 +71,7 @@ public final class ColorManagedMediaFacade implements MediaFacade {
                                       MediaEngineTrace.Recorder trace) {
         if (base.probe().kind() != MediaKind.IMAGE) return base;
         long started = trace == null ? 0L : trace.beginAttempt();
-        MediaProbe probe = attachProfile(file, base.probe());
+        MediaProbe probe = attachProfile(file, base.probe(), trace, started);
         if (base.frame().isEmpty()) {
             if (trace != null) trace.declined("ICC color management", started,
                     "skipped (no still raster)");
@@ -104,7 +104,7 @@ public final class ColorManagedMediaFacade implements MediaFacade {
         if (base.kind() != MediaKind.IMAGE) return base;
         long started = trace == null ? 0L : trace.beginAttempt();
         ColorProfile profile = base.colorProfile() != null
-                ? base.colorProfile() : profiles.profile(file).orElse(null);
+                ? base.colorProfile() : embeddedProfile(file, trace, started);
         if (base.frame().isEmpty()) {
             if (trace != null) trace.declined("ICC color management", started,
                     profile == null ? "skipped (untagged; no still raster)"
@@ -127,9 +127,29 @@ public final class ColorManagedMediaFacade implements MediaFacade {
                 : "bypassed (unmanaged; " + profile.name() + ")";
     }
 
-    private MediaProbe attachProfile(Path file, MediaProbe probe) {
+    private MediaProbe attachProfile(Path file, MediaProbe probe,
+                                     MediaEngineTrace.Recorder trace, long started) {
         if (probe.colorProfile() != null) return probe;
-        return probe.withColorProfile(profiles.profile(file).orElse(null));
+        return probe.withColorProfile(embeddedProfile(file, trace, started));
+    }
+
+    /**
+     * The file's own profile, null when it is untagged. A failed scan is not
+     * "untagged": it is recorded as this step's failure and rethrown, like a
+     * failed conversion, so the image is never shown (or its thumbnail cached)
+     * unmanaged on the strength of a read error.
+     */
+    private ColorProfile embeddedProfile(Path file, MediaEngineTrace.Recorder trace,
+                                         long started) {
+        try {
+            return profiles.profile(file).orElse(null);
+        } catch (RuntimeException e) {
+            if (trace != null) {
+                trace.failed("ICC color management", started,
+                        "profile read failed: " + MediaEngineTrace.failureDetail(e));
+            }
+            throw e;
+        }
     }
 
     private static void recordDecision(MediaEngineTrace.Recorder trace, long started,

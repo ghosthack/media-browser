@@ -16,9 +16,9 @@ import java.util.List;
  * line (see {@link ActionLogEntry#toJsonLine()}). Written by
  * {@link io.github.ghosthack.mediabrowser.ui.ActionLog} when the
  * {@code actionLog.file} setting is on — a diagnostic black box: entries are
- * only ever appended (each with its own open-append-close, so every line is
- * on disk the moment the move completes), never rewritten or trimmed, and the
- * file survives restarts so a runaway or crashed session leaves its trace.
+ * only ever appended (each with its own open-append-force-close, so every line
+ * is on disk the moment the move completes), never rewritten or trimmed, and
+ * the file survives restarts so a runaway or crashed session leaves its trace.
  *
  * <p>{@link #tail} reads only a bounded window off the end of the file, so
  * bootstrap stays cheap even after a runaway session has grown the file large.
@@ -32,6 +32,7 @@ public final class ActionLogFile {
     private static final int TAIL_WINDOW_BYTES = 64 * 1024;
 
     private final Path file;
+    /** Guarded by this instance's monitor, like the append itself. */
     private boolean appendFailureReported;
 
     /**
@@ -59,8 +60,14 @@ public final class ActionLogFile {
         }
     }
 
-    /** Appends {@code entry} as one JSONL line, creating the file and parents. */
-    public void append(ActionLogEntry entry) {
+    /**
+     * Appends {@code entry} as one JSONL line, creating the file and parents,
+     * and returns only once the line has been forced to the storage device —
+     * a crash or power loss after this returns cannot lose it. Blocking file
+     * IO: call it off the FX thread. Safe from any thread; appends through one
+     * instance are serialized, so concurrent callers never interleave lines.
+     */
+    public synchronized void append(ActionLogEntry entry) {
         byte[] line = (entry.toJsonLine() + System.lineSeparator())
                 .getBytes(StandardCharsets.UTF_8);
         try {
@@ -77,8 +84,17 @@ public final class ActionLogFile {
                 System.arraycopy(line, 0, joined, separator.length, line.length);
                 line = joined;
             }
-            Files.write(file, line, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
-                    StandardOpenOption.APPEND);
+            try (var channel = java.nio.channels.FileChannel.open(file,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                    StandardOpenOption.APPEND)) {
+                ByteBuffer pending = ByteBuffer.wrap(line);
+                while (pending.hasRemaining()) {
+                    channel.write(pending);
+                }
+                // Closing only hands the line to the OS cache; force it (and
+                // the grown file size) to the device before reporting it done.
+                channel.force(true);
+            }
         } catch (IOException e) {
             if (!appendFailureReported) {
                 appendFailureReported = true;

@@ -4128,19 +4128,41 @@ public final class MosaicWindow
         }
         // Accepts an archive locator (/discs/photos.iso!/DCIM) as well as a
         // plain path, mounting the container when needed.
-        Path target = ArchivePaths.parse(locationField.getText()).orElse(null);
-        try {
-            if (target != null) target = ArchivePaths.revive(target).toAbsolutePath().normalize();
-        } catch (IOException e) {
-            statusLabel.setText("Cannot open " + locationField.getText().trim() + ": "
-                    + e.getMessage());
+        String text = locationField.getText();
+        if (!MainWindow.mayMount(text)) {
+            // A plain path: nothing to mount, so no reason to queue it behind
+            // a move on the file-op thread.
+            Path plain = ArchivePaths.parse(text).orElse(null);
+            openParsedLocation(text, plain == null ? null : plain.toAbsolutePath().normalize());
             return;
         }
+        // The mount is real I/O: off the FX thread, like openArchive.
+        statusLabel.setText("Opening " + text.trim() + "…");
+        navigationRequests.resolve(service.fileOp(() -> {
+            Path parsed = ArchivePaths.parse(text).orElse(null);
+            if (parsed == null) return null;
+            try {
+                parsed = ArchivePaths.revive(parsed).toAbsolutePath().normalize();
+            } catch (IOException e) {
+                throw new MediaException(e.getMessage(), e);
+            }
+            // Answered here too: a stat inside a container is a read of it.
+            return ArchivePaths.isDirectory(parsed) ? parsed : null;
+        }), Platform::runLater, (target, error) -> {
+            if (error != null) {
+                statusLabel.setText("Cannot open " + text.trim() + ": " + rootMessage(error));
+                return;
+            }
+            openParsedLocation(text, target);
+        });
+    }
+
+    private void openParsedLocation(String text, Path target) {
         if (target != null && ArchivePaths.isDirectory(target)) {
             navigator.accept(target);
             canvas.requestFocus();
         } else {
-            statusLabel.setText("Not a folder: " + locationField.getText().trim());
+            statusLabel.setText("Not a folder: " + text.trim());
         }
     }
 
@@ -4373,7 +4395,7 @@ public final class MosaicWindow
                 rotateLeft, rotateRight, new SeparatorMenuItem(),
                 mirrorH, mirrorV, new SeparatorMenuItem(),
                 blackWhite, invert);
-        albumMenu = new AlbumMenu(albumStore, settings, this::albumSelectionPaths,
+        albumMenu = new AlbumMenu(service, albumStore, settings, this::albumSelectionPaths,
                 stage(), statusLabel::setText);
         tileMenu = new ContextMenu(copyPath, move, trash, exportMenu, albumMenu.menu(),
                 new SeparatorMenuItem(), adjustMenu);

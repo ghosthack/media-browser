@@ -8,6 +8,7 @@ import io.github.ghosthack.librawffm.libraw.libraw_iparams_t;
 import io.github.ghosthack.librawffm.libraw.libraw_output_params_t;
 import io.github.ghosthack.librawffm.libraw.libraw_processed_image_t;
 import io.github.ghosthack.librawffm.libraw.libraw_thumbnail_t;
+import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.ThumbnailMode;
@@ -17,7 +18,6 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Path;
-import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -48,13 +48,16 @@ import java.util.Set;
  *       exactly that happens and the file carries a preview at full raw
  *       resolution (Apple always writes one), the camera's own render is the
  *       decode. Capability routing on the reported unpack verdict, not a
- *       failure fallback: any other unpack error still surfaces loudly.</li>
+ *       failure fallback: any other unpack error still surfaces loudly.
+ *       Thumbnails take the preview on the same verdict.</li>
  * </ul>
  *
  * <p>Failures follow the backend's convention: a missing native means RAW
  * extensions are simply not claimed (logged loudly once); a file LibRaw
- * cannot decode surfaces as an error at decode time, never as a silent
- * substitute rendering.</p>
+ * cannot decode surfaces as a {@link MediaException} carrying LibRaw's own
+ * error at decode time, never as an empty result or a silent substitute
+ * rendering. {@link Attempt} keeps the two apart: {@link Declined} is only
+ * ever "this route does not apply"; a failure is thrown.</p>
  */
 final class LibRawStills {
 
@@ -105,19 +108,77 @@ final class LibRawStills {
                    float isoSpeed, float shutter, float aperture, float focalLen,
                    long timestampSeconds) {}
 
-    static Optional<RawInfo> info(Path file) {
+    /**
+     * One decode's verdict: pixels, or a genuine "this route does not apply"
+     * for the caller to report. A failure is neither — it is thrown as a
+     * {@link MediaException} carrying LibRaw's own error, the same split as
+     * {@link TurboJpegStills.Attempt}.
+     */
+    sealed interface Attempt permits Decoded, Declined {}
+
+    /** Upright pixels and the route that produced them, for the engine trace. */
+    record Decoded(RasterFrame frame, String route) implements Attempt {}
+
+    record Declined(String reason) implements Attempt {}
+
+    /** The work done on one opened LibRaw handle. */
+    private interface Session<T> {
+        T run(MemorySegment lr, Arena arena);
+    }
+
+    /**
+     * Opens {@code file} on a fresh handle, runs {@code body}, closes the
+     * handle. Every failure leaves as a {@link MediaException} naming the file
+     * and the cause; {@link Error}s (OutOfMemoryError, a broken native link)
+     * are never caught.
+     */
+    private static <T> T withOpenFile(Path file, Session<T> body) {
         if (!available()) {
-            return Optional.empty();
+            throw new MediaException("libraw-ffm natives unavailable; cannot read "
+                    + file.getFileName());
         }
         MemorySegment lr = LibRaw.libraw_init(0);
         if (lr.equals(MemorySegment.NULL)) {
-            return Optional.empty();
+            throw new MediaException("LibRaw cannot allocate a decoder for "
+                    + file.getFileName() + " (libraw_init returned NULL)");
         }
         try (Arena arena = Arena.ofConfined()) {
-            if (LibRaw.libraw_open_file(lr, arena.allocateFrom(file.toString()))
-                    != LibRaw.LIBRAW_SUCCESS()) {
-                return Optional.empty();
+            int rc = LibRaw.libraw_open_file(lr, arena.allocateFrom(file.toString()));
+            if (rc != LibRaw.LIBRAW_SUCCESS()) {
+                throw failure(file, "libraw_open_file", rc);
             }
+            return body.run(lr, arena);
+        } catch (MediaException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new MediaException("LibRaw failed on " + file.getFileName() + ": " + e, e);
+        } finally {
+            LibRaw.libraw_close(lr);
+        }
+    }
+
+    private static MediaException failure(Path file, String call, int rc) {
+        return new MediaException("LibRaw cannot decode " + file.getFileName()
+                + ": " + call + " failed: " + describe(rc));
+    }
+
+    /** LibRaw's own text for a return code; positive codes are errno values. */
+    static String describe(int rc) {
+        if (rc > 0) {
+            return "system error, errno " + rc;
+        }
+        MemorySegment text = LibRaw.libraw_strerror(rc);
+        return (text.equals(MemorySegment.NULL) ? "unknown error"
+                : text.reinterpret(Long.MAX_VALUE).getString(0)) + " (" + rc + ")";
+    }
+
+    /**
+     * Header facts, no pixel decode.
+     *
+     * @throws MediaException when LibRaw cannot open the file
+     */
+    static RawInfo info(Path file) {
+        return withOpenFile(file, (lr, arena) -> {
             MemorySegment data = lr.reinterpret(libraw_data_t.sizeof());
             int w = LibRaw.libraw_get_iwidth(lr);
             int h = LibRaw.libraw_get_iheight(lr);
@@ -129,115 +190,108 @@ final class LibRawStills {
             }
             MemorySegment idata = libraw_data_t.idata(data);
             MemorySegment other = libraw_data_t.other(data);
-            return Optional.of(new RawInfo(w, h,
+            return new RawInfo(w, h,
                     libraw_iparams_t.make(idata).getString(0),
                     libraw_iparams_t.model(idata).getString(0),
                     libraw_imgother_t.iso_speed(other),
                     libraw_imgother_t.shutter(other),
                     libraw_imgother_t.aperture(other),
                     libraw_imgother_t.focal_len(other),
-                    libraw_imgother_t.timestamp(other)));
-        } catch (Throwable t) {
-            return Optional.empty();
-        } finally {
-            LibRaw.libraw_close(lr);
-        }
+                    libraw_imgother_t.timestamp(other));
+        });
     }
 
     /**
      * Thumbnail via the embedded preview when it covers the box (and TurboJPEG
-     * is on), else via half-size raw decode. Empty = this file is not
-     * decodable here; the caller surfaces that, it does not substitute.
+     * is on), else via half-size raw decode. The preview routes decline by
+     * capability (no preview, not JPEG, too small) and the route taken is
+     * named in {@link Decoded#route}; {@link Declined} means LibRaw reports
+     * the raw compression unsupported and no preview applies either.
+     *
+     * @throws MediaException on any open, unpack, process or preview-decode
+     *         failure — never an empty result
      */
-    static Optional<RasterFrame> thumbnail(Path file, int maxEdge, ThumbnailMode mode,
-                                           boolean turboJpeg) {
-        if (!available() || maxEdge <= 0) {
-            return Optional.empty();
+    static Attempt thumbnail(Path file, int maxEdge, ThumbnailMode mode, boolean turboJpeg) {
+        if (!available()) {
+            return new Declined("libraw-ffm natives unavailable");
         }
-        MemorySegment lr = LibRaw.libraw_init(0);
-        if (lr.equals(MemorySegment.NULL)) {
-            return Optional.empty();
+        if (maxEdge <= 0) {
+            return new Declined("no target size");
         }
-        try (Arena arena = Arena.ofConfined()) {
-            if (LibRaw.libraw_open_file(lr, arena.allocateFrom(file.toString()))
-                    != LibRaw.LIBRAW_SUCCESS()) {
-                return Optional.empty();
-            }
+        return withOpenFile(file, (lr, arena) -> {
+            String previewDeclined = null;
             if (turboJpeg) {
-                Optional<RasterFrame> preview = previewThumbnail(lr, maxEdge, mode);
-                if (preview.isPresent()) {
+                Attempt preview = previewThumbnail(file, lr, maxEdge, mode);
+                if (preview instanceof Declined declined) {
+                    previewDeclined = declined.reason();
+                } else {
                     return preview;
                 }
             }
-            Optional<RasterFrame> full = rawDecode(lr, arena, true)
-                    .map(f -> Thumbnails.scale(f, maxEdge, mode));
-            if (full.isPresent() || turboJpeg) {
-                return full;
-            }
-            // JXL-stubbed DNGs under the plain ffmpeg-ffm backend: the raw
-            // decode is impossible here, so the embedded preview is the
-            // thumbnail — the same policy the -turbojpeg variant applies
-            // first. Fresh handle: the failed unpack poisons this one
-            // (unpack_thumb would fail as an out-of-order call).
-            return previewThumbnailFresh(file, maxEdge, mode);
-        } catch (Throwable t) {
-            return Optional.empty();
-        } finally {
-            LibRaw.libraw_close(lr);
-        }
-    }
-
-    /** {@link #previewThumbnail} on its own freshly opened handle. */
-    private static Optional<RasterFrame> previewThumbnailFresh(Path file, int maxEdge,
-                                                               ThumbnailMode mode) {
-        MemorySegment lr = LibRaw.libraw_init(0);
-        if (lr.equals(MemorySegment.NULL)) {
-            return Optional.empty();
-        }
-        try (Arena arena = Arena.ofConfined()) {
-            if (LibRaw.libraw_open_file(lr, arena.allocateFrom(file.toString()))
-                    != LibRaw.LIBRAW_SUCCESS()) {
-                return Optional.empty();
-            }
-            return previewThumbnail(lr, maxEdge, mode);
-        } catch (Throwable t) {
-            return Optional.empty();
-        } finally {
-            LibRaw.libraw_close(lr);
-        }
-    }
-
-    /** Full-quality decode for the viewer. */
-    static Optional<RasterFrame> fullDecode(Path file) {
-        if (!available()) {
-            return Optional.empty();
-        }
-        MemorySegment lr = LibRaw.libraw_init(0);
-        if (lr.equals(MemorySegment.NULL)) {
-            return Optional.empty();
-        }
-        try (Arena arena = Arena.ofConfined()) {
-            if (LibRaw.libraw_open_file(lr, arena.allocateFrom(file.toString()))
-                    != LibRaw.LIBRAW_SUCCESS()) {
-                return Optional.empty();
-            }
             int rc = LibRaw.libraw_unpack(lr);
             if (rc == LibRaw.LIBRAW_SUCCESS()) {
-                return processUnpacked(lr, arena, false);
+                RasterFrame frame = Thumbnails.scale(
+                        processUnpacked(file, lr, arena, true), maxEdge, mode);
+                return new Decoded(frame, previewDeclined == null ? "half-size demosaic"
+                        : "half-size demosaic (embedded preview declined: "
+                                + previewDeclined + ")");
             }
-            if (rc == LibRaw.LIBRAW_FILE_UNSUPPORTED()) {
-                // JXL-compressed DNG (see class doc): the camera's full-res
-                // render is the decode, not a downgraded stand-in. Fresh
-                // handle: after a failed unpack, LibRaw rejects unpack_thumb
-                // on this one as an out-of-order call.
-                return fullResPreview(file);
+            if (rc != LibRaw.LIBRAW_FILE_UNSUPPORTED()) {
+                throw failure(file, "libraw_unpack", rc);
             }
-            return Optional.empty();
-        } catch (Throwable t) {
-            return Optional.empty();
-        } finally {
-            LibRaw.libraw_close(lr);
+            String unsupported = "libraw_unpack: " + describe(rc);
+            if (turboJpeg) {
+                return new Declined(unsupported + "; embedded preview declined: "
+                        + previewDeclined);
+            }
+            // JXL-stubbed DNGs under the plain ffmpeg-ffm backend: LibRaw
+            // reports the raw decode unsupported, so the embedded preview is
+            // the thumbnail — the same policy the -turbojpeg variant applies
+            // first. Fresh handle: the failed unpack poisons this one
+            // (unpack_thumb would fail as an out-of-order call).
+            return switch (withOpenFile(file,
+                    (fresh, a) -> previewThumbnail(file, fresh, maxEdge, mode))) {
+                case Decoded d -> new Decoded(d.frame(),
+                        d.route() + " (raw decode unsupported: " + unsupported + ")");
+                case Declined d -> new Declined(unsupported
+                        + "; embedded preview declined: " + d.reason());
+            };
+        });
+    }
+
+    /**
+     * Full-quality decode for the viewer: the full-size demosaic, or — only on
+     * LibRaw's {@code LIBRAW_FILE_UNSUPPORTED} unpack verdict — the embedded
+     * full-resolution preview. {@link Declined} means neither applies.
+     *
+     * @throws MediaException on any other open, unpack, process or
+     *         preview-decode failure
+     */
+    static Attempt fullDecode(Path file) {
+        if (!available()) {
+            return new Declined("libraw-ffm natives unavailable");
         }
+        return withOpenFile(file, (lr, arena) -> {
+            int rc = LibRaw.libraw_unpack(lr);
+            if (rc == LibRaw.LIBRAW_SUCCESS()) {
+                return new Decoded(processUnpacked(file, lr, arena, false),
+                        "full-size demosaic");
+            }
+            if (rc != LibRaw.LIBRAW_FILE_UNSUPPORTED()) {
+                throw failure(file, "libraw_unpack", rc);
+            }
+            // JXL-compressed DNG (see class doc): the camera's full-res
+            // render is the decode, not a downgraded stand-in. Fresh
+            // handle: after a failed unpack, LibRaw rejects unpack_thumb
+            // on this one as an out-of-order call.
+            String unsupported = "libraw_unpack: " + describe(rc);
+            return switch (withOpenFile(file, (fresh, a) -> fullResPreview(file, fresh))) {
+                case Decoded d -> new Decoded(d.frame(),
+                        d.route() + " (raw decode unsupported: " + unsupported + ")");
+                case Declined d -> new Declined(unsupported
+                        + "; embedded preview declined: " + d.reason());
+            };
+        });
     }
 
     /**
@@ -245,95 +299,107 @@ final class LibRawStills {
      * visible resolution — a smaller preview is not a full-quality decode.
      * Requires the TurboJPEG native (ships with both FFM backends).
      */
-    private static Optional<RasterFrame> fullResPreview(Path file) {
-        if (!TurboJpegStills.available()) {
-            return Optional.empty();
+    private static Attempt fullResPreview(Path file, MemorySegment lr) {
+        if (unpackThumb(file, lr) instanceof Declined declined) {
+            return declined;
         }
-        MemorySegment lr = LibRaw.libraw_init(0);
-        if (lr.equals(MemorySegment.NULL)) {
-            return Optional.empty();
-        }
-        try (Arena arena = Arena.ofConfined()) {
-            if (LibRaw.libraw_open_file(lr, arena.allocateFrom(file.toString()))
-                    != LibRaw.LIBRAW_SUCCESS()
-                    || LibRaw.libraw_unpack_thumb(lr) != LibRaw.LIBRAW_SUCCESS()) {
-                return Optional.empty();
-            }
-            return decodePreview(lr);
-        } catch (Throwable t) {
-            return Optional.empty();
-        } finally {
-            LibRaw.libraw_close(lr);
-        }
-    }
-
-    private static Optional<RasterFrame> decodePreview(MemorySegment lr) {
-        MemorySegment data = lr.reinterpret(libraw_data_t.sizeof());
-        MemorySegment thumb = libraw_data_t.thumbnail(data);
-        int tlength = libraw_thumbnail_t.tlength(thumb);
-        if (libraw_thumbnail_t.tformat(thumb) != LibRaw.LIBRAW_THUMBNAIL_JPEG() || tlength <= 0) {
-            return Optional.empty();
-        }
+        MemorySegment thumb = libraw_data_t.thumbnail(lr.reinterpret(libraw_data_t.sizeof()));
         int tw = Short.toUnsignedInt(libraw_thumbnail_t.twidth(thumb));
         int th = Short.toUnsignedInt(libraw_thumbnail_t.theight(thumb));
-        if (tw < LibRaw.libraw_get_iwidth(lr) || th < LibRaw.libraw_get_iheight(lr)) {
-            return Optional.empty();
+        int iw = LibRaw.libraw_get_iwidth(lr);
+        int ih = LibRaw.libraw_get_iheight(lr);
+        if (tw < iw || th < ih) {
+            return new Declined("it is " + tw + "×" + th + ", smaller than the "
+                    + iw + "×" + ih + " raw");
         }
-        byte[] jpeg = new byte[tlength];
-        MemorySegment.copy(libraw_thumbnail_t.thumb(thumb).reinterpret(tlength),
-                ValueLayout.JAVA_BYTE, 0, jpeg, 0, tlength);
-        int orientation = flipToExifOrientation(
-                libraw_image_sizes_t.flip(libraw_data_t.sizes(data)));
-        return TurboJpegStills.decodeScaled(jpeg, Math.max(tw, th), ThumbnailMode.FIT)
-                .map(f -> RasterFrames.applyExifOrientation(f, orientation));
+        return decodePreview(lr, Math.max(tw, th), ThumbnailMode.FIT,
+                "embedded full-resolution preview");
     }
 
     /**
-     * Embedded JPEG preview through the TurboJPEG scaled decode. LibRaw's flip
-     * is the single orientation authority (the preview's own EXIF, when
-     * present, describes the same rotation — applying both would double it).
+     * Embedded JPEG preview through the TurboJPEG scaled decode, when it
+     * covers the requested box.
      */
-    private static Optional<RasterFrame> previewThumbnail(MemorySegment lr,
-                                                          int maxEdge, ThumbnailMode mode) {
-        if (LibRaw.libraw_unpack_thumb(lr) != LibRaw.LIBRAW_SUCCESS()) {
-            return Optional.empty();
+    private static Attempt previewThumbnail(Path file, MemorySegment lr,
+                                            int maxEdge, ThumbnailMode mode) {
+        if (unpackThumb(file, lr) instanceof Declined declined) {
+            return declined;
         }
-        MemorySegment data = lr.reinterpret(libraw_data_t.sizeof());
-        MemorySegment thumb = libraw_data_t.thumbnail(data);
-        int tlength = libraw_thumbnail_t.tlength(thumb);
-        if (libraw_thumbnail_t.tformat(thumb) != LibRaw.LIBRAW_THUMBNAIL_JPEG() || tlength <= 0) {
-            return Optional.empty();
-        }
+        MemorySegment thumb = libraw_data_t.thumbnail(lr.reinterpret(libraw_data_t.sizeof()));
         int tw = Short.toUnsignedInt(libraw_thumbnail_t.twidth(thumb));
         int th = Short.toUnsignedInt(libraw_thumbnail_t.theight(thumb));
         int covering = mode == ThumbnailMode.FILL ? Math.min(tw, th) : Math.max(tw, th);
         if (tw > 0 && th > 0 && covering < maxEdge) {
-            return Optional.empty(); // preview smaller than the box: decode raw instead
+            // preview smaller than the box: decode raw instead
+            return new Declined("it is " + tw + "×" + th + ", smaller than the "
+                    + maxEdge + " px box");
         }
+        return decodePreview(lr, maxEdge, mode, "embedded preview");
+    }
+
+    /**
+     * {@code libraw_unpack_thumb}, then the JPEG check. Null when a JPEG
+     * preview is loaded on the handle; a decline when the file has none LibRaw
+     * can hand over as JPEG.
+     *
+     * @throws MediaException on any other unpack_thumb verdict (I/O, corrupt
+     *         data, out of memory)
+     */
+    private static Declined unpackThumb(Path file, MemorySegment lr) {
+        int rc = LibRaw.libraw_unpack_thumb(lr);
+        if (rc == LibRaw.LIBRAW_NO_THUMBNAIL()
+                || rc == LibRaw.LIBRAW_UNSUPPORTED_THUMBNAIL()
+                || rc == LibRaw.LIBRAW_REQUEST_FOR_NONEXISTENT_THUMBNAIL()) {
+            return new Declined("libraw_unpack_thumb: " + describe(rc));
+        }
+        if (rc != LibRaw.LIBRAW_SUCCESS()) {
+            throw failure(file, "libraw_unpack_thumb", rc);
+        }
+        MemorySegment thumb = libraw_data_t.thumbnail(lr.reinterpret(libraw_data_t.sizeof()));
+        if (libraw_thumbnail_t.tformat(thumb) != LibRaw.LIBRAW_THUMBNAIL_JPEG()
+                || libraw_thumbnail_t.tlength(thumb) <= 0) {
+            return new Declined("it is not JPEG");
+        }
+        return null;
+    }
+
+    /**
+     * The unpacked JPEG preview through {@link TurboJpegStills#decodeScaled}.
+     * LibRaw's flip is the single orientation authority (the preview's own
+     * EXIF, when present, describes the same rotation — applying both would
+     * double it). A preview TurboJPEG declines, or decodes only with a data
+     * warning, is declined with that reason; a native failure throws.
+     */
+    private static Attempt decodePreview(MemorySegment lr, int maxEdge, ThumbnailMode mode,
+                                         String route) {
+        MemorySegment data = lr.reinterpret(libraw_data_t.sizeof());
+        MemorySegment thumb = libraw_data_t.thumbnail(data);
+        int tlength = libraw_thumbnail_t.tlength(thumb);
         byte[] jpeg = new byte[tlength];
         MemorySegment.copy(libraw_thumbnail_t.thumb(thumb).reinterpret(tlength),
                 ValueLayout.JAVA_BYTE, 0, jpeg, 0, tlength);
         int orientation = flipToExifOrientation(
                 libraw_image_sizes_t.flip(libraw_data_t.sizes(data)));
-        return TurboJpegStills.decodeScaled(jpeg, maxEdge, mode)
-                .map(f -> RasterFrames.applyExifOrientation(f, orientation));
+        return switch (TurboJpegStills.decodeScaled(jpeg, maxEdge, mode)) {
+            case TurboJpegStills.Declined declined ->
+                    new Declined("TurboJPEG declined it: " + declined.reason());
+            case TurboJpegStills.Decoded decoded -> decoded.warning() != null
+                    ? new Declined("its JPEG data is damaged: " + decoded.warning())
+                    : new Decoded(RasterFrames.applyExifOrientation(
+                            decoded.frame(), orientation), route);
+        };
     }
 
     /**
-     * Demosaic to 8-bit RGB (camera white balance, optional half-size) and
-     * repack as BGRA. LibRaw applies the orientation flip in
+     * Demosaic the unpacked raw to 8-bit RGB (camera white balance, optional
+     * half-size) and repack as BGRA. LibRaw applies the orientation flip in
      * {@code dcraw_make_mem_image}, so the frame arrives upright.
+     *
+     * @throws MediaException when LibRaw fails or hands back an image this
+     *         repack does not understand
      */
-    private static Optional<RasterFrame> rawDecode(MemorySegment lr, Arena arena,
-                                                   boolean halfSize) {
-        if (LibRaw.libraw_unpack(lr) != LibRaw.LIBRAW_SUCCESS()) {
-            return Optional.empty();
-        }
-        return processUnpacked(lr, arena, halfSize);
-    }
-
-    private static Optional<RasterFrame> processUnpacked(MemorySegment lr, Arena arena,
-                                                         boolean halfSize) {
+    private static RasterFrame processUnpacked(Path file, MemorySegment lr, Arena arena,
+                                               boolean halfSize) {
         MemorySegment data = lr.reinterpret(libraw_data_t.sizeof());
         MemorySegment params = libraw_data_t.params(data);
         libraw_output_params_t.use_camera_wb(params, 1);
@@ -341,13 +407,15 @@ final class LibRawStills {
             libraw_output_params_t.half_size(params, 1);
         }
         LibRaw.libraw_set_output_bps(lr, 8);
-        if (LibRaw.libraw_dcraw_process(lr) != LibRaw.LIBRAW_SUCCESS()) {
-            return Optional.empty();
+        int rc = LibRaw.libraw_dcraw_process(lr);
+        if (rc != LibRaw.LIBRAW_SUCCESS()) {
+            throw failure(file, "libraw_dcraw_process", rc);
         }
         MemorySegment errc = arena.allocate(ValueLayout.JAVA_INT);
         MemorySegment img = LibRaw.libraw_dcraw_make_mem_image(lr, errc);
         if (img.equals(MemorySegment.NULL)) {
-            return Optional.empty();
+            throw failure(file, "libraw_dcraw_make_mem_image",
+                    errc.get(ValueLayout.JAVA_INT, 0));
         }
         try {
             MemorySegment hdr = img.reinterpret(libraw_processed_image_t.sizeof());
@@ -356,9 +424,13 @@ final class LibRawStills {
             int colors = Short.toUnsignedInt(libraw_processed_image_t.colors(hdr));
             int bits = Short.toUnsignedInt(libraw_processed_image_t.bits(hdr));
             int dataSize = libraw_processed_image_t.data_size(hdr);
-            if (libraw_processed_image_t.type(hdr) != LibRaw.LIBRAW_IMAGE_BITMAP()
+            int type = libraw_processed_image_t.type(hdr);
+            if (type != LibRaw.LIBRAW_IMAGE_BITMAP()
                     || colors != 3 || bits != 8 || (long) w * h * 3 != dataSize) {
-                return Optional.empty();
+                throw new MediaException("LibRaw cannot decode " + file.getFileName()
+                        + ": unexpected processed image (type " + type + ", " + w + "×" + h
+                        + ", " + colors + " colors, " + bits + " bits, " + dataSize
+                        + " bytes); expected an 8-bit RGB bitmap");
             }
             byte[] rgb = new byte[dataSize];
             MemorySegment.copy(img.reinterpret(libraw_processed_image_t.data$offset() + dataSize),
@@ -371,7 +443,7 @@ final class LibRawStills {
                 bgra[o + 2] = rgb[i];
                 bgra[o + 3] = (byte) 0xFF;
             }
-            return Optional.of(new RasterFrame(w, h, bgra));
+            return new RasterFrame(w, h, bgra);
         } finally {
             LibRaw.libraw_dcraw_clear_mem(img);
         }

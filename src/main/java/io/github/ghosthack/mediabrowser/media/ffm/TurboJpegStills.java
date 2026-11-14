@@ -16,7 +16,6 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Optional;
 
 /**
  * JPEG thumbnail fast path over libjpeg-turbo (the
@@ -119,19 +118,17 @@ final class TurboJpegStills {
      * The scaled-decode core on raw JPEG bytes, orientation NOT applied —
      * for callers whose orientation authority is outside the JPEG (e.g. the
      * {@link LibRawStills} embedded-preview path, where LibRaw's flip wins).
-     * Empty on any decline, data warning or native failure: that caller
-     * decodes the raw instead.
+     * Same verdict split as {@link #attempt}: a decline is a capability gap
+     * the caller routes on, a data warning rides on {@link Decoded#warning}
+     * for the caller to judge.
+     *
+     * @throws MediaException when libjpeg-turbo fails on the bytes — never
+     *         reported as a decline
      */
-    static Optional<RasterFrame> decodeScaled(byte[] jpeg, int maxEdge, ThumbnailMode mode) {
-        if (!available() || maxEdge <= 0) {
-            return Optional.empty();
-        }
-        try {
-            return decode(jpeg, maxEdge, mode) instanceof Decoded d && d.warning() == null
-                    ? Optional.of(d.frame()) : Optional.empty();
-        } catch (Throwable t) {
-            return Optional.empty();
-        }
+    static Attempt decodeScaled(byte[] jpeg, int maxEdge, ThumbnailMode mode) {
+        if (!available()) return new Declined("turbojpeg-ffm natives unavailable");
+        if (maxEdge <= 0) return new Declined("no target size");
+        return decode(jpeg, maxEdge, mode);
     }
 
     private static Attempt decode(byte[] jpeg, int maxEdge, ThumbnailMode mode) {

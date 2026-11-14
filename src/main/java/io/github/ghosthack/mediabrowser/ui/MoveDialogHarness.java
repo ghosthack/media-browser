@@ -234,7 +234,12 @@ public final class MoveDialogHarness extends Application {
                     && (trimmed.endsWith("/") || trimmed.endsWith(File.separator))) {
                 trimmed = trimmed.substring(0, trimmed.length() - 1);
             }
-            Path p = Paths.get(trimmed);
+            Path p;
+            try {
+                p = Paths.get(trimmed);
+            } catch (java.nio.file.InvalidPathException e) {
+                return;   // not a path yet
+            }
             if (Files.isDirectory(p)) {
                 String abs = p.toAbsolutePath().toString();
                 MoveDialogLogic.expandMiniTreeToPath(model, abs, LOAD_CHILDREN);

@@ -3,7 +3,9 @@ package io.github.ghosthack.mediabrowser.ui;
 import io.github.ghosthack.mediabrowser.AppSettings;
 import io.github.ghosthack.mediabrowser.album.Album;
 import io.github.ghosthack.mediabrowser.album.AlbumStore;
+import io.github.ghosthack.mediabrowser.media.MediaService;
 
+import javafx.application.Platform;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
@@ -16,6 +18,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -31,6 +35,11 @@ import java.util.function.Supplier;
  * popped over a changing selection. Album files and recency are managed by
  * {@link AlbumStore} / {@link AppSettings}; this class is purely the view + the
  * thin glue that wires a menu item to an add.
+ *
+ * <p>The album directory listing and the album file rewrite run on the file-op
+ * thread, never the FX thread: the menu shows the recents it last knew and
+ * updates them when the listing lands, and an add reports its outcome (or its
+ * failure) in the status line when the write finishes.</p>
  */
 public final class AlbumMenu {
 
@@ -43,14 +52,29 @@ public final class AlbumMenu {
     private final Supplier<List<Path>> selection;
     private final Window owner;
     private final Consumer<String> status;
+    private final MoveController.FileOpRunner fileOps;
+    private final Executor fxThread;
+    /** Latest-wins ticket for {@link #refresh}: an older listing landing late is dropped. */
+    private int refreshSequence;
+    /** The recents on show, to leave the submenu alone when a listing changes nothing. */
+    private List<Album> shownRecents;
 
-    public AlbumMenu(AlbumStore store, AppSettings settings,
+    public AlbumMenu(MediaService service, AlbumStore store, AppSettings settings,
                      Supplier<List<Path>> selection, Window owner, Consumer<String> status) {
+        this(service::fileOp, Platform::runLater, store, settings, selection, owner, status);
+    }
+
+    AlbumMenu(MoveController.FileOpRunner fileOps, Executor fxThread,
+              AlbumStore store, AppSettings settings,
+              Supplier<List<Path>> selection, Window owner, Consumer<String> status) {
+        this.fileOps = fileOps;
+        this.fxThread = fxThread;
         this.store = store;
         this.settings = settings;
         this.selection = selection;
         this.owner = owner;
         this.status = status;
+        show(List.of());
         refresh();
     }
 
@@ -59,11 +83,34 @@ public final class AlbumMenu {
         return menu;
     }
 
-    /** Rebuilds the recent-album items; call when the owning menu is showing. */
+    /**
+     * Brings the recent-album items up to date; call when the owning menu is
+     * showing. The album directory is listed off the FX thread, so the items
+     * on show stay until the listing lands — a moment later, normally.
+     */
     public void refresh() {
+        int ticket = ++refreshSequence;
+        List<String> recentNames = List.copyOf(settings.albumRecents());   // FX-side state
+        CompletableFuture<List<Album>> listing;
+        try {
+            listing = fileOps.run(() -> recentAlbums(recentNames));
+        } catch (RuntimeException e) {       // the executor refusing the task
+            listing = CompletableFuture.failedFuture(e);
+        }
+        listing.whenComplete((recents, error) -> fxThread.execute(() -> {
+            if (ticket != refreshSequence) return;
+            if (error != null) {
+                status.accept("Cannot list albums: " + message(error));
+                return;
+            }
+            if (!recents.equals(shownRecents)) show(recents);
+        }));
+    }
+
+    private void show(List<Album> recents) {
+        shownRecents = recents;
         var items = menu.getItems();
         items.clear();
-        List<Album> recents = recentAlbums();
         if (recents.isEmpty()) {
             var none = new MenuItem("No recent albums");
             none.setDisable(true);
@@ -81,14 +128,14 @@ public final class AlbumMenu {
         items.add(manage);
     }
 
-    /** The recent albums that still exist on disk, most-recent first, capped. */
-    private List<Album> recentAlbums() {
+    /** The recent albums that still exist on disk, most-recent first, capped. Off the FX thread. */
+    private List<Album> recentAlbums(List<String> recentNames) {
         Map<String, Album> byFileName = new HashMap<>();
         for (Album album : store.albums()) {
             byFileName.put(album.fileName(), album);
         }
         List<Album> result = new ArrayList<>();
-        for (String fileName : settings.albumRecents()) {
+        for (String fileName : recentNames) {
             Album album = byFileName.get(fileName);
             if (album != null) {
                 result.add(album);
@@ -106,13 +153,30 @@ public final class AlbumMenu {
             status.accept("No items selected to add to an album.");
             return;
         }
+        List<Path> adding = List.copyOf(sources);
+        status.accept("Adding to " + album.name() + "\u2026");
+        CompletableFuture<AlbumStore.AddResult> write;
         try {
-            AlbumStore.AddResult result = store.addPaths(album, sources);
+            write = fileOps.run(() -> {
+                try {
+                    return store.addPaths(album, adding);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        } catch (RuntimeException e) {       // the executor refusing the task
+            write = CompletableFuture.failedFuture(e);
+        }
+        // No staleness guard: the user asked for this add, so its outcome is
+        // reported whatever they have done since.
+        write.whenComplete((result, error) -> fxThread.execute(() -> {
+            if (error != null) {
+                status.accept("Cannot add to " + album.name() + ": " + message(error));
+                return;
+            }
             recordUse(album);
             status.accept(addMessage(album, result));
-        } catch (IOException | UncheckedIOException e) {
-            status.accept("Cannot add to " + album.name() + ": " + message(e));
-        }
+        }));
     }
 
     private void openDialog() {

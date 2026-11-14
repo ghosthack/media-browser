@@ -1,6 +1,7 @@
 package io.github.ghosthack.mediabrowser.ui;
 
 import io.github.ghosthack.mediabrowser.media.AaeStore;
+import io.github.ghosthack.mediabrowser.media.BgraAlpha;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
@@ -22,7 +23,10 @@ import java.util.List;
  * {@code frames × width × height × 4} bytes — rather than per-frame JavaFX
  * images, so presentation can blit into a single reused
  * {@link javafx.scene.image.PixelBuffer} (the video path's PixelBuffer trick)
- * instead of churning N textures through Prism's VRAM cache.
+ * instead of churning N textures through Prism's VRAM cache. A PixelBuffer
+ * only accepts <em>premultiplied</em> BGRA while decoded {@link RasterFrame}s
+ * are straight alpha, so each frame is premultiplied once as it is buffered
+ * ({@link #presentationBytes}) and the per-tick blit stays a plain copy.
  *
  * <p>Decodes run strictly sequentially on the {@code media-facade} thread —
  * each completion enqueues the next — so a preload never floods the decode
@@ -107,7 +111,10 @@ final class FlipbookSession {
         return ready;
     }
 
-    /** The BGRA frame buffer, in directory order. Only meaningful once ready. */
+    /**
+     * The frame buffer, in directory order: <em>premultiplied</em> BGRA, ready
+     * for a {@code ByteBgraPre} PixelBuffer. Only meaningful once ready.
+     */
     List<byte[]> frames() {
         return frames;
     }
@@ -207,9 +214,20 @@ final class FlipbookSession {
             skipped++;
             return true;
         }
-        frames.add(frame.bgra());
-        bufferedBytes += frame.bgra().length;
+        byte[] presentable = presentationBytes(frame);
+        frames.add(presentable);
+        bufferedBytes += presentable.length;
         return true;
+    }
+
+    /**
+     * The bytes to blit into the flipbook's {@code ByteBgraPre} PixelBuffer for
+     * a straight-alpha frame: premultiplied BGRA. An opaque frame is returned
+     * as its own array (no copy); a frame with any translucency is converted
+     * into a new array, never in place — the decoded frame may be shared.
+     */
+    static byte[] presentationBytes(RasterFrame frame) {
+        return BgraAlpha.premultiplied(frame.bgra());
     }
 
     private void finish() {

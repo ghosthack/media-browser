@@ -186,10 +186,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             if (jxlDng.isPresent()) {
                 return new VisualResult(rawProbe(file), jxlDng);
             }
-            RasterFrame frame = LibRawStills.fullDecode(file)
-                    .orElseThrow(() -> new MediaException(
-                            "LibRaw could not decode " + file.getFileName()
-                            + " (lossy/JXL-compressed DNG without a full-size preview?)"));
+            RasterFrame frame = requireDecoded(file, LibRawStills.fullDecode(file)).frame();
             return new VisualResult(rawProbe(file), Optional.of(frame));
         }
         VisualResult result = firstFrameSteppingDownPcd(file);
@@ -223,12 +220,11 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             }
             long rawStarted = trace.beginAttempt();
             try {
-                RasterFrame frame = LibRawStills.fullDecode(file)
-                        .orElseThrow(() -> new MediaException(
-                                "LibRaw produced no full decode or embedded preview"));
+                LibRawStills.Decoded decoded =
+                        requireDecoded(file, LibRawStills.fullDecode(file));
                 trace.succeeded("LibRaw / embedded preview", rawStarted,
-                        rasterDetail(frame, "camera RAW"));
-                return new VisualResult(rawProbe(file), Optional.of(frame));
+                        rasterDetail(decoded.frame(), "camera RAW, " + decoded.route()));
+                return new VisualResult(rawProbe(file), Optional.of(decoded.frame()));
             } catch (RuntimeException | Error e) {
                 trace.failed("LibRaw / embedded preview", rawStarted, e);
                 throw e;
@@ -250,10 +246,11 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     @Override
     public Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
         if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
-            // Empty frame = visibly blank tile, the same failure surface as an
-            // FFmpeg thumbnail miss — never a substitute rendering.
-            return new Thumbnail(
-                    LibRawStills.thumbnail(file, maxEdge, mode, turboJpeg), MediaKind.IMAGE);
+            // A RAW that cannot be decoded throws, like an FFmpeg thumbnail
+            // failure: an empty frame here would be cached as a blank tile.
+            return new Thumbnail(Optional.of(requireDecoded(file,
+                    LibRawStills.thumbnail(file, maxEdge, mode, turboJpeg)).frame()),
+                    MediaKind.IMAGE);
         }
         boolean jpeg = isJpeg(file);
         if (jpeg && turboJpeg) {
@@ -268,6 +265,18 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             }
         }
         return ffmpegThumbnail(file, maxEdge, mode, jpeg);
+    }
+
+    /**
+     * LibRaw is the only route for a RAW extension, so a decline there has
+     * nowhere to go: it is this file's decode error, with LibRaw's reason.
+     */
+    private static LibRawStills.Decoded requireDecoded(Path file, LibRawStills.Attempt attempt) {
+        return switch (attempt) {
+            case LibRawStills.Decoded decoded -> decoded;
+            case LibRawStills.Declined declined -> throw new MediaException(
+                    "LibRaw cannot decode " + file.getFileName() + ": " + declined.reason());
+        };
     }
 
     private static Thumbnail turboThumbnail(TurboJpegStills.Decoded decoded) {
@@ -311,11 +320,12 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
             long started = trace.beginAttempt();
             try {
+                LibRawStills.Decoded decoded = requireDecoded(file,
+                        LibRawStills.thumbnail(file, maxEdge, mode, turboJpeg));
                 Thumbnail result = new Thumbnail(
-                        LibRawStills.thumbnail(file, maxEdge, mode, turboJpeg),
-                        MediaKind.IMAGE);
+                        Optional.of(decoded.frame()), MediaKind.IMAGE);
                 trace.succeeded("LibRaw thumbnail", started,
-                        thumbnailDetail(result, maxEdge, mode));
+                        thumbnailDetail(result, maxEdge, mode) + "; " + decoded.route());
                 return result;
             } catch (RuntimeException | Error e) {
                 trace.failed("LibRaw thumbnail", started, e);
@@ -388,9 +398,13 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         return DngJxlStills.fullDecode(ffmpeg, file);
     }
 
-    /** SmokeTest seam: the LibRaw decode / embedded-preview route alone. */
+    /**
+     * SmokeTest seam: the LibRaw decode / embedded-preview route alone. Empty
+     * only when LibRaw declines the file; a decode failure throws.
+     */
     public Optional<RasterFrame> debugJxlDngPreview(Path file) {
-        return LibRawStills.fullDecode(file);
+        return LibRawStills.fullDecode(file) instanceof LibRawStills.Decoded decoded
+                ? Optional.of(decoded.frame()) : Optional.empty();
     }
 
     @Override
@@ -527,9 +541,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
 
     /** Probe a RAW file via LibRaw metadata (no pixel decode). */
     private static MediaProbe rawProbe(Path file) {
-        LibRawStills.RawInfo info = LibRawStills.info(file)
-                .orElseThrow(() -> new MediaException(
-                        "LibRaw could not open " + file.getFileName()));
+        LibRawStills.RawInfo info = LibRawStills.info(file);
         String camera = (info.make() + " " + info.model()).trim();
         return new MediaProbe(file, MediaKind.IMAGE, extension(file),
                 fileSize(file), -1, -1, info.width(), info.height(),
@@ -538,11 +550,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     }
 
     private static Metadata rawMetadata(Path file) {
-        Optional<LibRawStills.RawInfo> maybe = LibRawStills.info(file);
-        if (maybe.isEmpty()) {
-            return Metadata.empty(file);
-        }
-        LibRawStills.RawInfo info = maybe.get();
+        LibRawStills.RawInfo info = LibRawStills.info(file);
         Metadata.Builder b = new Metadata.Builder(file);
         if (!info.make().isBlank()) {
             b.add("Camera", "Make", info.make());

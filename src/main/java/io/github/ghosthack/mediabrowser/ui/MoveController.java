@@ -10,6 +10,7 @@ import io.github.ghosthack.mediabrowser.media.move.MoveDialogLogic;
 import io.github.ghosthack.mediabrowser.media.move.MoveDialogModel;
 import io.github.ghosthack.mediabrowser.media.move.MovePlanner;
 import io.github.ghosthack.mediabrowser.media.move.SidecarCarrier;
+import io.github.ghosthack.mediabrowser.media.move.StrandedMoveException;
 import io.github.ghosthack.mediabrowser.media.move.TrashOps;
 import io.github.ghosthack.mediabrowser.media.move.TreeNode;
 
@@ -22,10 +23,13 @@ import javafx.stage.Stage;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -337,11 +341,11 @@ public final class MoveController implements MoveDialogIntents {
             fileOps.run(() -> {
                         awaitReleased(released);
                         try (var held = ArchivePaths.releaseForMutation(moving)) {
-                            return trash.apply(moving);
+                            return persistTrashed(trash.apply(moving));
                         }
                     })
-                    .whenComplete((result, error) -> fxThread.execute(() ->
-                            finishTrash(result, error, nextFocus)));
+                    .whenComplete((trashed, error) -> fxThread.execute(() ->
+                            finishTrash(trashed, error, nextFocus)));
         });
     }
 
@@ -398,8 +402,25 @@ public final class MoveController implements MoveDialogIntents {
         return alert.showAndWait().filter(button -> button == move).isPresent();
     }
 
+    /**
+     * Off the FX thread, straight after the bulk trash: write one entry per
+     * accepted item to the on-disk log, so the FX thread only has to show them.
+     */
+    private static Trashed persistTrashed(TrashOps.Result result) {
+        List<ActionLogEntry> entries = new ArrayList<>();
+        for (Path moved : result.moved()) {
+            ActionLogEntry entry = ActionLogEntry.trashed(moved);
+            ActionLog.get().persist(entry);
+            entries.add(entry);
+        }
+        return new Trashed(result, entries);
+    }
+
+    /** A bulk trash result with the entries already written for it. */
+    private record Trashed(TrashOps.Result result, List<ActionLogEntry> entries) {}
+
     /** Apply a native trash result back on the FX thread. */
-    private void finishTrash(TrashOps.Result result, Throwable error, Path nextFocus) {
+    private void finishTrash(Trashed trashed, Throwable error, Path nextFocus) {
         try {
             if (error != null) {
                 host.showStatus("Move to " + trashDestinationName() + " failed: "
@@ -407,9 +428,8 @@ public final class MoveController implements MoveDialogIntents {
                 return;
             }
 
-            for (Path moved : result.moved()) {
-                ActionLog.get().record(ActionLogEntry.trashed(moved));
-            }
+            TrashOps.Result result = trashed.result();
+            trashed.entries().forEach(ActionLog.get()::recordPersisted);
 
             if (!result.moved().isEmpty()) {
                 Path focus = result.failures().isEmpty()
@@ -555,8 +575,8 @@ public final class MoveController implements MoveDialogIntents {
     public void setTargetPath(String text) {
         model.setTargetPath(text);
         model.setInlineError(null);
-        syncTreeToTypedPath(text);
         sync();
+        revealTypedPath(text);   // after sync(): its ticket must outlive this intent only
     }
 
     @Override
@@ -762,34 +782,94 @@ public final class MoveController implements MoveDialogIntents {
         if (createDir) {
             try {
                 FileOps.createDirectoriesRecursive(Path.of(resolvedTarget));
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 return new Execution(moved, failures,
                         "Failed to create directory: " + message(e));
             }
         }
 
         if (rename) {
-            String source = sources.get(0);
-            try {
-                Path finalPath = FileOps.renameMove(Path.of(source), Path.of(renameTarget),
-                        sidecars);
-                moved.add(new Moved(Path.of(source), finalPath));
-            } catch (IOException e) {
-                failures.add(new File(source).getName() + ": " + message(e));
-            }
+            moveOne(sources.get(0), moved, failures, source ->
+                    FileOps.renameMove(source, Path.of(renameTarget), sidecars));
         } else {
-            Path targetDir = Path.of(resolvedTarget);
             for (String source : sources) {
-                try {
-                    Path finalPath = FileOps.moveWithAutoRename(Path.of(source), targetDir,
-                            sidecars);
-                    moved.add(new Moved(Path.of(source), finalPath));
-                } catch (IOException e) {
-                    failures.add(new File(source).getName() + ": " + message(e));
-                }
+                moveOne(source, moved, failures, path ->
+                        FileOps.moveWithAutoRename(path, Path.of(resolvedTarget), sidecars));
             }
         }
         return new Execution(moved, failures, null);
+    }
+
+    /** One source's relocation, returning the path it landed at. */
+    @FunctionalInterface
+    private interface Relocation {
+        Path apply(Path source) throws IOException;
+    }
+
+    /**
+     * Relocate one source and account for it before the next one starts: a
+     * file that landed is written to the on-disk action log here, on the
+     * file-operation thread, the moment its move completes — so a crash or
+     * forced quit mid-batch leaves a line for every file already moved.
+     *
+     * <p>Nothing escapes: an unchecked failure (a path the filesystem rejects,
+     * a listing dying on a flaky share) is that source's failure alone, since
+     * letting it fail the whole future would discard the record of the sources
+     * already moved and skip their refresh. A file stranded at the destination
+     * ({@link StrandedMoveException}) is both: logged where it now is, and
+     * reported as a failure in the wording that says so.</p>
+     */
+    private static void moveOne(String source, List<Moved> moved, List<String> failures,
+                                Relocation relocation) {
+        String name = new File(source).getName();
+        Path sourcePath;
+        Path landedAt;
+        try {
+            sourcePath = Path.of(source);
+            landedAt = relocation.apply(sourcePath);
+        } catch (StrandedMoveException e) {
+            failures.add(name + ": " + e.getMessage());
+            moved.add(landed(Path.of(source), e.landedAt()));
+            return;
+        } catch (IOException e) {
+            failures.add(name + ": " + failureText(e));
+            return;
+        } catch (RuntimeException e) {
+            // Unexpected, so the trace goes to stderr as well as the status.
+            e.printStackTrace();
+            failures.add(name + ": " + message(e));
+            return;
+        }
+        moved.add(landed(sourcePath, landedAt));
+    }
+
+    /**
+     * Durably logs a relocation that just completed (off the FX thread). The
+     * file has moved whatever the log does, so an unexpected logging failure
+     * is reported to stderr and the move still counts — like the append
+     * failures {@link io.github.ghosthack.mediabrowser.media.move.ActionLogFile}
+     * reports itself, it must not turn a finished move into a failed one.
+     */
+    private static Moved landed(Path source, Path finalPath) {
+        ActionLogEntry entry = ActionLogEntry.moveOrRename(source, finalPath);
+        try {
+            ActionLog.get().persist(entry);
+        } catch (RuntimeException e) {
+            System.err.println("Cannot write the action log entry for " + source + ": " + e);
+            e.printStackTrace();
+        }
+        return new Moved(source, finalPath, entry);
+    }
+
+    /**
+     * A per-file move failure's text. {@link FileOps} wraps a sidecar failure
+     * in a message of its own that says what became of the file ("nothing was
+     * moved"), with the carrier's reason already quoted inside it; unwrapping
+     * that to the root cause, as {@link #message} does, would drop the half
+     * the user needs. Anything else keeps the root-cause wording.
+     */
+    private static String failureText(IOException e) {
+        return e.getCause() != null && e.getMessage() != null ? e.getMessage() : message(e);
     }
 
     /**
@@ -893,6 +973,7 @@ public final class MoveController implements MoveDialogIntents {
         if (dialog == null) {
             return;
         }
+        revealSequence++;   // the dialog moved on: a typed-path reveal still in flight is stale
         dialog.setHistory(workingHistory);
         dialog.refresh();
     }
@@ -901,8 +982,23 @@ public final class MoveController implements MoveDialogIntents {
         return FileOps.listSubdirectories(dir, host.showHiddenDirectories());
     }
 
-    /** Reveal a typed path in the mini tree when it is an existing directory. */
-    private void syncTreeToTypedPath(String text) {
+    /**
+     * Latest-wins ticket for {@link #revealTypedPath}, bumped by every
+     * {@link #sync} — so by every later keystroke and every other intent. Read
+     * on the file-op thread too, to skip a lookup nobody is waiting for.
+     */
+    private volatile int revealSequence;
+
+    /**
+     * Reveals a typed path in the mini tree when it is an existing directory.
+     *
+     * <p>Runs on every keystroke, so the stat and the listing of each ancestor
+     * happen on the file-op thread; the result is applied only if nothing else
+     * touched the dialog meanwhile. It is a convenience and decides nothing:
+     * submit validates the target itself, against the text then in the
+     * field.</p>
+     */
+    private void revealTypedPath(String text) {
         if (text == null || text.isEmpty()) {
             return;
         }
@@ -911,12 +1007,60 @@ public final class MoveController implements MoveDialogIntents {
                 && (trimmed.endsWith("/") || trimmed.endsWith(File.separator))) {
             trimmed = trimmed.substring(0, trimmed.length() - 1);
         }
-        Path path = Path.of(trimmed);
-        if (Files.isDirectory(path)) {
-            String absolute = path.toAbsolutePath().toString();
-            MoveDialogLogic.expandMiniTreeToPath(model, absolute, loadChildren);
-            model.setMiniTreeHighlightedPath(absolute);
+        Path path;
+        try {
+            path = Path.of(trimmed);
+        } catch (InvalidPathException e) {
+            return;   // not a path yet (on Windows: a trailing space, an illegal character)
         }
+        int ticket = revealSequence;
+        MoveDialogModel typedInto = model;
+        boolean showHidden = host.showHiddenDirectories();
+        CompletableFuture<TypedPath> lookup;
+        try {
+            lookup = fileOps.run(() -> ticket == revealSequence ? lookUp(path, showHidden) : null);
+        } catch (RuntimeException e) {       // the executor refusing the task
+            lookup = CompletableFuture.failedFuture(e);
+        }
+        lookup.whenComplete((typed, error) -> fxThread.execute(() -> {
+            if (ticket != revealSequence || typedInto != model
+                    || dialog == null || !dialog.isShowing()) {
+                return;   // typed on, moved in the tree, reopened, or closed
+            }
+            if (error != null) {
+                model.setInlineError("Cannot read " + text + ": " + message(error));
+            } else if (typed != null) {
+                MoveDialogLogic.expandMiniTreeToPath(model, typed.absolute(),
+                        dir -> typed.children().getOrDefault(dir, List.of()));
+                model.setMiniTreeHighlightedPath(typed.absolute());
+            } else {
+                return;
+            }
+            sync();
+        }));
+    }
+
+    /** A typed directory and the subfolders of it and of each of its ancestors. */
+    private record TypedPath(String absolute, Map<Path, List<TreeNode>> children) {}
+
+    /** Off the FX thread. @return null when {@code path} is not an existing directory */
+    private static TypedPath lookUp(Path path, boolean showHidden) {
+        if (!Files.isDirectory(path)) {
+            return null;
+        }
+        Path absolute = path.toAbsolutePath();
+        Map<Path, List<TreeNode>> children = new HashMap<>();
+        // The same ancestors MoveDialogLogic.expandMiniTreeToPath walks.
+        Path root = absolute.getRoot();
+        if (root != null) {
+            children.put(root, FileOps.listSubdirectories(root, showHidden));
+        }
+        for (int i = 1; i <= absolute.getNameCount(); i++) {
+            Path sub = absolute.subpath(0, i);
+            Path ancestor = root != null ? root.resolve(sub) : sub;
+            children.put(ancestor, FileOps.listSubdirectories(ancestor, showHidden));
+        }
+        return new TypedPath(absolute.toString(), children);
     }
 
     private static String failureList(String heading, List<String> failures) {
@@ -935,18 +1079,23 @@ public final class MoveController implements MoveDialogIntents {
     }
 
     /**
-     * Log each completed relocation into the shared session {@link ActionLog}
-     * (classified move-vs-rename by whether the file left its directory). On
-     * the FX thread, from both finish handlers; a total failure logs nothing.
+     * Show each completed relocation in the shared session {@link ActionLog}.
+     * On the FX thread, from both finish handlers; a total failure shows
+     * nothing. In-memory only: every entry was already written to the on-disk
+     * log by {@link #landed} as its move completed, and is not appended again.
      */
     private static void recordActions(Execution execution) {
         for (Moved moved : execution.moved()) {
-            ActionLog.get().record(ActionLogEntry.moveOrRename(moved.source(), moved.finalPath()));
+            ActionLog.get().recordPersisted(moved.entry());
         }
     }
 
-    /** One completed relocation: the source and its resolved on-disk result. */
-    private record Moved(Path source, Path finalPath) {}
+    /**
+     * One completed relocation: the source, its resolved on-disk result, and
+     * the action-log entry already persisted for it (classified move-vs-rename
+     * by whether the file left its directory).
+     */
+    private record Moved(Path source, Path finalPath, ActionLogEntry entry) {}
 
     /** Outcome of the off-thread {@link #execute}. */
     private record Execution(List<Moved> moved, List<String> failures, String createError) {}

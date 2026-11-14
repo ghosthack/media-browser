@@ -13,7 +13,10 @@ import java.util.function.Function;
 
 /**
  * Bounded LRU over {@link EmbeddedProfileReader}, so probe, full view, and
- * thumbnail of the same item share one metadata scan (absence is cached too).
+ * thumbnail of the same item share one metadata scan. A completed scan that
+ * found no profile is cached too; a scan that failed is not — the loader's
+ * exception propagates and the next request scans again, so a transient read
+ * error is never remembered as "untagged".
  * Keys carry size and mtime, so a replaced file re-scans; the Path object
  * itself is part of the key, which keeps archive-entry paths distinct without
  * flattening them to strings.

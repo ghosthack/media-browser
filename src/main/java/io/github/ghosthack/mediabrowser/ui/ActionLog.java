@@ -21,10 +21,13 @@ import javafx.collections.ObservableList;
  *
  * <p>A process-wide singleton (like {@link ThemeManager}): the main, mosaic
  * and viewer windows' {@link MoveController}s all record into the same log,
- * and every hosted {@link ActionLogPanel} (browser + mosaic) observes it. All
- * access is on the FX thread — controllers record from their
- * {@code Platform.runLater} completion handlers, and the panels bind to
- * {@link #entries()} directly.
+ * and every hosted {@link ActionLogPanel} (browser + mosaic) observes it. The
+ * in-memory list is FX-thread only — the panels bind to {@link #entries()}
+ * directly — but the on-disk half is not: a controller calls {@link #persist}
+ * on its file-operation thread the moment each relocation completes (so a
+ * crash mid-batch still leaves every finished move in the file, and no file IO
+ * runs on the FX thread), then hands the same entry to {@link #recordPersisted}
+ * from its {@code Platform.runLater} completion handler to show it.
  *
  * <p>{@link #moveTargetsRevision()} is a change signal for state the panel
  * shows but this log does not own: the persisted move history (the F1–F4
@@ -51,9 +54,12 @@ public final class ActionLog {
             FXCollections.unmodifiableObservableList(entries);
     private final SimpleIntegerProperty moveTargetsRevision = new SimpleIntegerProperty();
 
-    /** Both set once at startup by {@link #attachFile}; null in harnesses/tests. */
-    private AppSettings settings;
-    private ActionLogFile file;
+    /**
+     * Both set once at startup by {@link #attachFile}; null in harnesses/tests.
+     * Volatile: {@link #persist} reads them off the FX thread.
+     */
+    private volatile AppSettings settings;
+    private volatile ActionLogFile file;
 
     private ActionLog() {}
 
@@ -79,10 +85,28 @@ public final class ActionLog {
     }
 
     /**
-     * Append an entry, trimming the oldest past {@link #LIMIT}; also appended
-     * to the on-disk log when that is attached and enabled. FX thread only.
+     * Append {@code entry} to the on-disk log when that is attached and
+     * enabled, returning once the line is durable ({@link ActionLogFile#append}).
+     * The off-FX-thread half of recording: blocking file IO, safe from any
+     * thread, to be called by the thread that performed the relocation as soon
+     * as it completes — not batched, and not deferred to the FX thread. Follow
+     * it with {@link #recordPersisted} on the FX thread.
      */
-    public void record(ActionLogEntry entry) {
+    public void persist(ActionLogEntry entry) {
+        ActionLogFile target = file;
+        AppSettings current = settings;
+        if (entry != null && target != null && current != null
+                && current.actionLogFileEnabled()) {
+            target.append(entry);
+        }
+    }
+
+    /**
+     * Show an entry already handed to {@link #persist}: appended to the
+     * in-memory log only (trimming the oldest past {@link #LIMIT}), never to
+     * the file a second time. FX thread only.
+     */
+    public void recordPersisted(ActionLogEntry entry) {
         if (entry == null) {
             return;
         }
@@ -90,9 +114,22 @@ public final class ActionLog {
         while (entries.size() > LIMIT) {
             entries.remove(0);
         }
-        if (file != null && settings != null && settings.actionLogFileEnabled()) {
-            file.append(entry);
-        }
+    }
+
+    /**
+     * {@link #persist} then {@link #recordPersisted} in one call, for a caller
+     * already on the FX thread with nowhere better to do the file append.
+     * Prefer the split pair: this blocks the FX thread on a forced write.
+     */
+    public void record(ActionLogEntry entry) {
+        persist(entry);
+        recordPersisted(entry);
+    }
+
+    /** Tests only: forget the file a test attached, so later suites write nowhere. */
+    void detachFileForTest() {
+        settings = null;
+        file = null;
     }
 
     /** Tests only: drop every in-memory entry a test recorded into the singleton. */
