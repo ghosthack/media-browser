@@ -21,11 +21,9 @@ import java.lang.foreign.MemorySegment;
  * un-tagged inputs so consumers can branch on orientation uniformly without
  * a separate "is it set?" check.
  * <p>
- * Producers that already bake the transform into the returned pixels (e.g.
- * the Apple {@code CGImageSource} path with
- * {@code kCGImageSourceCreateThumbnailWithTransform=true}) still report the
- * source tag value, so downstream encoders can re-embed it or consumers can
- * record it as metadata without re-opening the source.
+ * Producers that already bake the transform into the returned pixels still
+ * report the source tag value, so downstream encoders can re-embed it or
+ * consumers can record it as metadata without re-opening the source.
  * <p>
  * {@link #ORIENTATION_UNSET} ({@code 0}) is reserved as a sentinel for
  * callers / APIs that need to disambiguate "tag truly absent" from "tag

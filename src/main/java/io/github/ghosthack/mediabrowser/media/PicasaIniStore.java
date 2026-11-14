@@ -344,6 +344,85 @@ public final class PicasaIniStore {
         return packed;
     }
 
+    /**
+     * Carries {@code sourcePath}'s whole section (every key, ours and other
+     * tools') to {@code targetPath} after the file itself was moved or renamed,
+     * clearing the source entry so a different file that later takes the old
+     * name does not inherit it. A section already filed under the target name
+     * belongs to no file (the name was free on disk) and is dropped, so the
+     * moved file shows exactly what it showed before. The target sidecar is
+     * written first and restored if clearing the source then fails, so a
+     * failure leaves both sidecars as they were. No write occurs when neither
+     * name has a section.
+     *
+     * @throws IOException if either sidecar cannot be read or written; the
+     *                     source sidecar being unreadable is a failure, since
+     *                     whether it holds an entry to carry is then unknown
+     */
+    public synchronized void moveEntry(String sourcePath, String targetPath) throws IOException {
+        File source = new File(sourcePath);
+        File target = new File(targetPath);
+        File sourceDir = source.getParentFile();
+        File targetDir = target.getParentFile();
+        if (sourceDir == null || targetDir == null) {
+            throw new IOException("Cannot carry sidecar entry: no parent directory for "
+                    + (sourceDir == null ? sourcePath : targetPath));
+        }
+        IniDocument from = documentForDir(sourceDir);
+        if (from.readFailure != null) {
+            throw new IOException("Cannot read sidecar " + new File(sourceDir, iniFilename),
+                    from.readFailure);
+        }
+        IniDocument to = documentForDir(targetDir);
+        String fromName = source.getName();
+        String toName = target.getName();
+        LinkedHashMap<String, String> carried = from.sections.get(fromName);
+        if (carried == null && !to.sections.containsKey(toName)) {
+            return;
+        }
+
+        // Shallow snapshots suffice: only whole sections are added or removed.
+        var toBefore = new LinkedHashMap<String, LinkedHashMap<String, String>>(to.sections);
+        if (from == to) {
+            from.sections.remove(fromName);
+        }
+        if (carried == null) {
+            to.sections.remove(toName);
+        } else {
+            to.sections.put(toName, carried);
+        }
+        try {
+            writeDocument(new File(targetDir, iniFilename), to);
+        } catch (IOException e) {
+            restore(to, toBefore);
+            throw e;
+        }
+        if (from == to || carried == null) {
+            return;
+        }
+
+        var fromBefore = new LinkedHashMap<String, LinkedHashMap<String, String>>(from.sections);
+        from.sections.remove(fromName);
+        try {
+            writeDocument(new File(sourceDir, iniFilename), from);
+        } catch (IOException e) {
+            restore(from, fromBefore);
+            restore(to, toBefore);
+            try {
+                writeDocument(new File(targetDir, iniFilename), to);
+            } catch (IOException rollback) {
+                e.addSuppressed(rollback);
+            }
+            throw e;
+        }
+    }
+
+    private static void restore(IniDocument doc,
+                                LinkedHashMap<String, LinkedHashMap<String, String>> before) {
+        doc.sections.clear();
+        doc.sections.putAll(before);
+    }
+
     /** Drops the cached document for a directory so it is re-read on next access. */
     public synchronized void invalidate(String directoryPath) {
         if (directoryPath != null) {

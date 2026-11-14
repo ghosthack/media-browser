@@ -64,11 +64,13 @@ public final class SuperResolutionEngine {
     private final AtomicReference<Process> activeProcess = new AtomicReference<>();
     private final AtomicLong cancellationVersion = new AtomicLong();
 
-    public SuperResolutionEngine() {
-        this(Path.of(System.getProperty("user.home"), ".media-browser", "super-resolution"));
-    }
-
-    SuperResolutionEngine(Path root) {
+    /**
+     * Installs the runtime and models under {@code root} — the app passes a
+     * directory inside its application directory; there is no home default.
+     * {@code null} leaves the engine unconfigured: never ready, and
+     * {@link #enhance} refuses rather than writing anywhere.
+     */
+    public SuperResolutionEngine(Path root) {
         this.root = root;
         this.http = HttpClient.newBuilder()
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -92,7 +94,7 @@ public final class SuperResolutionEngine {
     /** Fast existence check used only to decide whether the first-use consent dialog is needed. */
     public boolean isReady(SuperResolutionModel model) {
         PlatformArtifact artifact = PlatformArtifact.detect();
-        if (artifact == null) return false;
+        if (artifact == null || root == null) return false;
         Path install = installDir();
         Path models = install.resolve("models");
         return Files.isRegularFile(install.resolve(artifact.executableName))
@@ -119,6 +121,9 @@ public final class SuperResolutionEngine {
         validateOutputSize(input.width(), input.height());
         PlatformArtifact artifact = PlatformArtifact.detect();
         if (artifact == null) throw new SuperResolutionException(unsupportedReason());
+        if (root == null) {
+            throw new SuperResolutionException("No super-resolution directory is configured");
+        }
         long cancellation = cancellationVersion.get();
 
         Consumer<String> notify = progress == null ? ignored -> { } : progress;

@@ -20,9 +20,8 @@ import javafx.stage.Modality;
 import javafx.stage.Stage;
 import javafx.stage.Window;
 
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Optional;
+import java.util.function.ToIntFunction;
 
 /** Modal album picker used by File ▸ Open Album…. */
 public final class OpenAlbumDialog {
@@ -32,9 +31,13 @@ public final class OpenAlbumDialog {
     private Album chosen;
 
     public OpenAlbumDialog(Window owner, AlbumStore store) {
+        this(owner, store, store::count);
+    }
+
+    /** {@code counter} runs off the FX thread (see {@link AlbumCounts}). */
+    OpenAlbumDialog(Window owner, AlbumStore store, ToIntFunction<Album> counter) {
         var albums = store.albums();
-        Map<Album, Integer> counts = new HashMap<>();
-        for (Album album : albums) counts.put(album, store.count(album));
+        var counts = new AlbumCounts(counter, list::refresh);
 
         list.getItems().setAll(albums);
         list.setPlaceholder(new Label("No albums yet"));
@@ -45,9 +48,7 @@ public final class OpenAlbumDialog {
                 if (empty || album == null) {
                     setText(null);
                 } else {
-                    int count = counts.getOrDefault(album, 0);
-                    setText(album.name() + "  (" + count + " item"
-                            + (count == 1 ? "" : "s") + ")");
+                    setText(counts.label(album));
                 }
             }
         });
@@ -100,6 +101,11 @@ public final class OpenAlbumDialog {
     private void choose() {
         chosen = list.getSelectionModel().getSelectedItem();
         if (chosen != null) stage.close();
+    }
+
+    /** The album list (tests lay it out without showing the dialog). */
+    ListView<Album> list() {
+        return list;
     }
 
     /** Shows the picker and returns the selected album, or empty on cancellation. */

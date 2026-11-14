@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import io.github.ghosthack.mediabrowser.media.FileAssociationCatalog;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.panama.media.fileassoc.Advapi32;
+import io.github.ghosthack.panama.media.fileassoc.RegistryException;
 import io.github.ghosthack.panama.media.fileassoc.Shell32;
 
 /**
@@ -21,9 +22,16 @@ import io.github.ghosthack.panama.media.fileassoc.Shell32;
  * MediaBrowser.AssocFile.<ext>                       (Default) = "Media Browser <KIND> file (.<ext>)"
  * MediaBrowser.AssocFile.<ext>\DefaultIcon            (Default) = "<exePath>,0"
  * MediaBrowser.AssocFile.<ext>\shell\open\command     (Default) = "\"<exePath>\" \"%1\""
- * .<ext>                                              (Default) = MediaBrowser.AssocFile.<ext>
+ * .<ext>                                              (Default) = MediaBrowser.AssocFile.<ext>   (only if unset)
  * .<ext>\OpenWithProgids\MediaBrowser.AssocFile.<ext> (Default) = ""
  * }</pre>
+ *
+ * <p>{@code .<ext>}'s default is written only when it is unset (or already
+ * ours): another app's per-user default is never overwritten, since
+ * {@link #unassociate} could not give it back. The app is still offered
+ * through {@code OpenWithProgids}, and {@link #query} reports
+ * {@link AssocState#AVAILABLE_NOT_DEFAULT}, so the dialog's Default Apps
+ * button is the way to take it over.</p>
  *
  * <p>Every {@link #associate} also (idempotently) registers the app itself
  * under the "Default Programs" scheme, so Windows Settings' Default Apps
@@ -65,12 +73,28 @@ public final class FileAssociationRegistry {
      * @param state       this app's live association state for the extension
      * @param liveProgId  the ProgId Explorer currently treats as the default
      *                    for the extension (ours, someone else's, or {@code null})
+     * @param command     our ProgId's open command as registered, or {@code null}
      */
-    public record AssocStatus(AssocState state, String liveProgId) {}
+    public record AssocStatus(AssocState state, String liveProgId, String command) {
+
+        /**
+         * Whether this association launches {@code exe}: false once the app
+         * has been reinstalled or moved elsewhere, leaving the registered
+         * command pointing at an executable that is no longer this one.
+         */
+        public boolean pointsAt(Path exe) {
+            return command != null && command.equalsIgnoreCase(commandFor(exe));
+        }
+    }
+
+    /** The open command {@link #associate} registers for {@code exe}. */
+    public static String commandFor(Path exe) {
+        return quote(exe) + " \"%1\"";
+    }
 
     /** The live association state for {@code extension} (no leading dot). */
     public static AssocStatus query(String extension) {
-        if (!Advapi32.isAvailable()) return new AssocStatus(AssocState.NOT_ASSOCIATED, null);
+        if (!Advapi32.isAvailable()) return new AssocStatus(AssocState.NOT_ASSOCIATED, null, null);
         String ourProgId = FileAssociationCatalog.progId(extension);
         try (Arena arena = Arena.ofConfined()) {
             String userChoiceProgId = readUserChoiceProgId(arena, extension);
@@ -78,12 +102,13 @@ public final class FileAssociationRegistry {
             String liveDefault = userChoiceProgId != null
                     ? userChoiceProgId
                     : readClassesExtensionDefault(arena, extension);
+            String command = readDefaultOrNull(arena, CLASSES_ROOT + ourProgId + "\\shell\\open\\command");
             if (ourProgId.equals(liveDefault)) {
-                return new AssocStatus(AssocState.DEFAULT, liveDefault);
+                return new AssocStatus(AssocState.DEFAULT, liveDefault, command);
             }
             return new AssocStatus(
                     openWithRegistered ? AssocState.AVAILABLE_NOT_DEFAULT : AssocState.NOT_ASSOCIATED,
-                    liveDefault);
+                    liveDefault, command);
         }
     }
 
@@ -91,20 +116,49 @@ public final class FileAssociationRegistry {
      * Registers this app for {@code extension}, pointing its command line at
      * {@code exePath}, and tells Explorer to pick the change up immediately.
      *
+     * <p>An association that fails part-way while our ProgId had no open
+     * command yet is rolled back, so a failure reported by the dialog never
+     * leaves a half-registered ProgId behind. That is decided from the
+     * command, not from {@link #query}'s state: a leftover Explorer
+     * UserChoice can still name our ProgId after it is gone. A
+     * re-association over a working command (repairing a moved executable)
+     * is left as far as it got: the entries it overwrites were already
+     * ours.</p>
+     *
      * @return the resulting live status (see the UserChoice caveat above —
      *         it may come back {@link AssocState#AVAILABLE_NOT_DEFAULT} even
      *         right after associating)
      */
     public static AssocStatus associate(String extension, MediaKind kind, Path exePath) {
         requireWindows();
+        boolean fresh = query(extension).command() == null;
+        try {
+            writeAssociation(extension, kind, exePath);
+        } catch (RuntimeException e) {
+            if (fresh) {
+                try {
+                    unassociate(extension);
+                } catch (RuntimeException rollback) {
+                    e.addSuppressed(rollback);
+                }
+            }
+            throw e;
+        }
+        Shell32.notifyAssociationsChanged();
+        return query(extension);
+    }
+
+    private static void writeAssociation(String extension, MediaKind kind, Path exePath) {
         String progId = FileAssociationCatalog.progId(extension);
-        String command = quote(exePath) + " \"%1\"";
         try (Arena arena = Arena.ofConfined()) {
             writeDefault(arena, CLASSES_ROOT + progId,
                     FileAssociationCatalog.description(extension, kind));
             writeDefault(arena, CLASSES_ROOT + progId + "\\DefaultIcon", quote(exePath) + ",0");
-            writeDefault(arena, CLASSES_ROOT + progId + "\\shell\\open\\command", command);
-            writeDefault(arena, CLASSES_ROOT + "." + extension, progId);
+            writeDefault(arena, CLASSES_ROOT + progId + "\\shell\\open\\command", commandFor(exePath));
+            String existing = readClassesExtensionDefault(arena, extension);
+            if (existing == null || existing.isEmpty() || existing.equals(progId)) {
+                writeDefault(arena, CLASSES_ROOT + "." + extension, progId);
+            }
 
             MemorySegment openWithKey = Advapi32.regCreateKeyEx(arena, Advapi32.HKEY_CURRENT_USER,
                     CLASSES_ROOT + "." + extension + "\\OpenWithProgids", Advapi32.KEY_WRITE);
@@ -123,8 +177,6 @@ public final class FileAssociationRegistry {
                 Advapi32.regCloseKey(fileAssocKey);
             }
         }
-        Shell32.notifyAssociationsChanged();
-        return query(extension);
     }
 
     /**
@@ -166,15 +218,26 @@ public final class FileAssociationRegistry {
      * zero values, so a key another app still uses (a second
      * {@code OpenWithProgids} entry, a {@code PerceivedType}, ...) is never
      * touched.</p>
+     *
+     * @throws RegistryException the first step that failed, with any later
+     *         failures suppressed into it — after every step was attempted
      */
     public static void unassociate(String extension) {
         requireWindows();
         String progId = FileAssociationCatalog.progId(extension);
+        int rw = Advapi32.KEY_READ | Advapi32.KEY_WRITE;
+        RegistryException failure = null;
+        // Every step is attempted even when an earlier one fails (a key
+        // another app or a policy locked), so whatever can go does go — the
+        // rollback of a part-written associate() relies on this. The ProgId
+        // tree goes first: it is what Explorer and query() resolve.
         try (Arena arena = Arena.ofConfined()) {
-            int rw = Advapi32.KEY_READ | Advapi32.KEY_WRITE;
-            MemorySegment extKey = Advapi32.regOpenKeyExOrNull(arena, Advapi32.HKEY_CURRENT_USER,
-                    CLASSES_ROOT + "." + extension, rw);
-            if (extKey != null) {
+            failure = attempt(failure, () ->
+                    Advapi32.regDeleteTree(arena, Advapi32.HKEY_CURRENT_USER, CLASSES_ROOT + progId));
+            failure = attempt(failure, () -> {
+                MemorySegment extKey = Advapi32.regOpenKeyExOrNull(arena, Advapi32.HKEY_CURRENT_USER,
+                        CLASSES_ROOT + "." + extension, rw);
+                if (extKey == null) return;
                 try {
                     String current = Advapi32.regQueryValueString(arena, extKey, null);
                     if (progId.equals(current)) {
@@ -183,39 +246,50 @@ public final class FileAssociationRegistry {
                 } finally {
                     Advapi32.regCloseKey(extKey);
                 }
-            }
-            MemorySegment openWithKey = Advapi32.regOpenKeyExOrNull(arena, Advapi32.HKEY_CURRENT_USER,
-                    CLASSES_ROOT + "." + extension + "\\OpenWithProgids", rw);
-            if (openWithKey != null) {
-                try {
-                    Advapi32.regDeleteValue(arena, openWithKey, progId);
-                } finally {
-                    Advapi32.regCloseKey(openWithKey);
-                }
-            }
-            Advapi32.regDeleteTree(arena, Advapi32.HKEY_CURRENT_USER, CLASSES_ROOT + progId);
+            });
+            failure = attempt(failure, () ->
+                    deleteValue(arena, CLASSES_ROOT + "." + extension + "\\OpenWithProgids", progId));
 
             // Order matters: .ext can only be empty once OpenWithProgids
             // (its subkey) is gone too.
-            deleteKeyIfEmpty(arena, CLASSES_ROOT + "." + extension + "\\OpenWithProgids");
-            deleteKeyIfEmpty(arena, CLASSES_ROOT + "." + extension);
+            failure = attempt(failure, () ->
+                    deleteKeyIfEmpty(arena, CLASSES_ROOT + "." + extension + "\\OpenWithProgids"));
+            failure = attempt(failure, () -> deleteKeyIfEmpty(arena, CLASSES_ROOT + "." + extension));
 
             // Keeps the Default-Apps-page listing in sync; the app's own
             // Capabilities/RegisteredApplications registration is left in
             // place even if this was the last extension — real installed
             // apps don't unregister themselves from Default Programs just
             // because one file type was unchecked.
-            MemorySegment fileAssocKey = Advapi32.regOpenKeyExOrNull(arena, Advapi32.HKEY_CURRENT_USER,
-                    CLIENT_ROOT + "\\FileAssociations", rw);
-            if (fileAssocKey != null) {
-                try {
-                    Advapi32.regDeleteValue(arena, fileAssocKey, "." + extension);
-                } finally {
-                    Advapi32.regCloseKey(fileAssocKey);
-                }
-            }
+            failure = attempt(failure, () ->
+                    deleteValue(arena, CLIENT_ROOT + "\\FileAssociations", "." + extension));
         }
         Shell32.notifyAssociationsChanged();
+        if (failure != null) throw failure;
+    }
+
+    /** Runs {@code step}, keeping the first registry failure and suppressing later ones into it. */
+    private static RegistryException attempt(RegistryException failure, Runnable step) {
+        try {
+            step.run();
+            return failure;
+        } catch (RegistryException e) {
+            if (failure == null) return e;
+            failure.addSuppressed(e);
+            return failure;
+        }
+    }
+
+    /** Deletes value {@code name} under {@code subKey}; a no-op when either is absent. */
+    private static void deleteValue(Arena arena, String subKey, String name) {
+        MemorySegment key = Advapi32.regOpenKeyExOrNull(arena, Advapi32.HKEY_CURRENT_USER,
+                subKey, Advapi32.KEY_READ | Advapi32.KEY_WRITE);
+        if (key == null) return;
+        try {
+            Advapi32.regDeleteValue(arena, key, name);
+        } finally {
+            Advapi32.regCloseKey(key);
+        }
     }
 
     /** Deletes {@code subKey} only if it exists and is verifiably empty; otherwise leaves it untouched. */
@@ -292,8 +366,12 @@ public final class FileAssociationRegistry {
     }
 
     private static String readClassesExtensionDefault(Arena arena, String extension) {
+        return readDefaultOrNull(arena, CLASSES_ROOT + "." + extension);
+    }
+
+    private static String readDefaultOrNull(Arena arena, String subKey) {
         MemorySegment key = Advapi32.regOpenKeyExOrNull(arena, Advapi32.HKEY_CURRENT_USER,
-                CLASSES_ROOT + "." + extension, Advapi32.KEY_READ);
+                subKey, Advapi32.KEY_READ);
         if (key == null) return null;
         try {
             return Advapi32.regQueryValueString(arena, key, null);

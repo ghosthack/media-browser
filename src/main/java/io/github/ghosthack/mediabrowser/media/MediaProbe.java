@@ -1,5 +1,7 @@
 package io.github.ghosthack.mediabrowser.media;
 
+import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
+
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -66,7 +68,7 @@ public record MediaProbe(
             rows.put("Renderings", io.github.ghosthack.mediabrowser.media.color.ProfileFacts
                     .of(colorProfile.iccData()).renderingsLine());
         }
-        rows.put("Path", path.toString());
+        rows.put("Path", ArchivePaths.format(path));
         return rows;
     }
 

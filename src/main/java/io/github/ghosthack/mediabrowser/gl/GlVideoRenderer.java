@@ -3,6 +3,7 @@ package io.github.ghosthack.mediabrowser.gl;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.opengl.CGL;
 import org.lwjgl.opengl.GL;
+import org.lwjgl.opengl.GL11;
 import org.lwjgl.system.MemoryStack;
 
 import java.lang.foreign.MemorySegment;
@@ -104,6 +105,10 @@ public final class GlVideoRenderer implements AutoCloseable {
      * the (post-rotation) result back into {@code dst} (capacity at least
      * outWidth*outHeight*4 — the same total bytes — position 0, top-down BGRA
      * rows).
+     *
+     * @throws io.github.ghosthack.mediabrowser.media.MediaException if OpenGL
+     *         reports an error for the frame (e.g. context loss), so a stale
+     *         readback is never presented as valid
      */
     public void render(MemorySegment bgraFrame, ByteBuffer dst) {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
@@ -121,6 +126,7 @@ public final class GlVideoRenderer implements AutoCloseable {
         glEnd();
 
         glReadPixels(0, 0, outWidth, outHeight, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, dst);
+        GlFrameCheck.afterReadback(GL11::glGetError, "GlVideoRenderer");
     }
 
     /**
@@ -169,6 +175,10 @@ public final class GlVideoRenderer implements AutoCloseable {
                     + err + "); zero-copy disabled for this renderer");
             nv12Failed = true;
             restoreFixedFunctionState();
+            // No glGetError drain here: CGLTexImageIOSurface2D reports through
+            // its return code and raises no GL flag (GlVideoRendererTest pins
+            // this), so any flag still pending is a real GL error that the
+            // CPU fallback frame's own check must surface.
             return false;
         }
 
@@ -188,6 +198,7 @@ public final class GlVideoRenderer implements AutoCloseable {
 
         restoreFixedFunctionState();
         glReadPixels(0, 0, outWidth, outHeight, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, dst);
+        GlFrameCheck.afterReadback(GL11::glGetError, "GlVideoRenderer");
         return true;
     }
 
@@ -199,7 +210,7 @@ public final class GlVideoRenderer implements AutoCloseable {
     }
 
     /** YUV→RGB conversion matrix, column-major for {@code glUniformMatrix3fv}. */
-    private static float[] yuvToRgbColumnMajor(boolean bt709, boolean fullRange) {
+    static float[] yuvToRgbColumnMajor(boolean bt709, boolean fullRange) {
         if (fullRange) {
             return bt709
                     ? new float[] {1f, 1f, 1f, 0f, -0.1873f, 1.8556f, 1.5748f, -0.4681f, 0f}
@@ -210,8 +221,8 @@ public final class GlVideoRenderer implements AutoCloseable {
                 : new float[] {1.164f, 1.164f, 1.164f, 0f, -0.392f, 2.017f, 1.596f, -0.813f, 0f};
     }
 
-    /** GLSL 1.20 fragment-only program (fixed-function vertex stage). */
-    private static final String NV12_FRAGMENT_SHADER = """
+    /** GLSL 1.20 fragment-only program (fixed-function vertex stage); shared with {@link MujglVideoRenderer}. */
+    static final String NV12_FRAGMENT_SHADER = """
             #version 120
             #extension GL_ARB_texture_rectangle : enable
             uniform sampler2DRect texY;

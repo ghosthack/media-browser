@@ -1,6 +1,7 @@
 package io.github.ghosthack.mediabrowser.media.ffm;
 
 import io.github.ghosthack.mediabrowser.media.ColorProfile;
+import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.ThumbnailMode;
@@ -28,11 +29,13 @@ import java.util.Optional;
  * backend variant ({@link FfmpegFfmMediaFacade#withTurboJpeg()}); there is no
  * system-property switch.
  *
- * <p><b>Declines instead of guessing.</b> {@link #thumbnail} returns empty for
- * anything outside the well-trodden path — CMYK/YCCK colorspaces, lossless
- * JPEG, parse trouble — and the caller decodes via FFmpeg instead (capability
- * routing, documented per backend). A missing native surfaces loudly at
- * backend creation via {@link #available()}, never as silent degradation.</p>
+ * <p><b>Declines instead of guessing.</b> {@link #attempt} declines anything
+ * outside the well-trodden path — progressive, CMYK/YCCK, lossless, 12/16-bit, or bytes
+ * that are not JPEG at all — and the caller decodes via FFmpeg instead
+ * (capability routing, documented per backend). A native failure on a JPEG
+ * the path did claim is not a decline: it throws, with libjpeg-turbo's own
+ * message. A missing native surfaces loudly at backend creation via
+ * {@link #available()}, never as silent degradation.</p>
  */
 final class TurboJpegStills {
 
@@ -65,107 +68,156 @@ final class TurboJpegStills {
     }
 
     /**
-     * Scaled decode of a baseline/progressive YCbCr-or-grayscale JPEG, upright
-     * per EXIF, sized per {@code maxEdge}/{@code mode}. Empty = caller decodes
-     * via FFmpeg instead.
+     * The fast path's verdict on one JPEG, from a single decode: pixels, or a
+     * genuine capability decline for FFmpeg to take. A native failure is
+     * neither — {@link #attempt} throws it.
      */
-    static Optional<RasterFrame> thumbnail(Path file, int maxEdge, ThumbnailMode mode) {
-        if (!available() || maxEdge <= 0) {
-            return Optional.empty();
-        }
+    sealed interface Attempt permits Decoded, Declined {}
+
+    /**
+     * Upright, sized pixels; {@code colorProfile} when requested and embedded;
+     * {@code warning} is libjpeg-turbo's non-fatal complaint about the data
+     * (e.g. extraneous bytes), or null.
+     */
+    record Decoded(RasterFrame frame, ColorProfile colorProfile, String warning)
+            implements Attempt {}
+
+    record Declined(String reason) implements Attempt {}
+
+    /** Runs as each fast-path attempt starts; a no-op outside tests. */
+    static volatile Runnable onAttempt = () -> {};
+
+    /**
+     * Scaled decode of a baseline YCbCr-or-grayscale JPEG, upright per EXIF,
+     * sized per {@code maxEdge}/{@code mode}, with the ICC profile extracted
+     * from the same bytes when {@code withProfile}.
+     *
+     * @throws MediaException when the file cannot be read or libjpeg-turbo
+     *         fails on it — never reported as a decline
+     */
+    static Attempt attempt(Path file, int maxEdge, ThumbnailMode mode, boolean withProfile) {
+        onAttempt.run();
+        if (!available()) return new Declined("turbojpeg-ffm natives unavailable");
+        if (maxEdge <= 0) return new Declined("no target size");
         byte[] jpeg;
         try {
             jpeg = Files.readAllBytes(file);
         } catch (IOException e) {
-            return Optional.empty();
+            throw new MediaException("cannot read " + file.getFileName()
+                    + ": " + e.getMessage(), e);
         }
+        Attempt attempt = decode(jpeg, maxEdge, mode);
+        if (!(attempt instanceof Decoded decoded)) return attempt;
         int orientation = exifOrientation(jpeg);
-        return decodeScaled(jpeg, maxEdge, mode)
-                .map(f -> RasterFrames.applyExifOrientation(f, orientation));
+        ColorProfile profile = withProfile
+                ? EmbeddedProfileReader.readJpeg(jpeg).orElse(null) : null;
+        return new Decoded(RasterFrames.applyExifOrientation(decoded.frame(), orientation),
+                profile, decoded.warning());
     }
-
-    /** Scaled decode plus ICC extracted from the same already-read JPEG bytes. */
-    static Optional<ProfiledFrame> profiledThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
-        if (!available() || maxEdge <= 0) {
-            return Optional.empty();
-        }
-        byte[] jpeg;
-        try {
-            jpeg = Files.readAllBytes(file);
-        } catch (IOException e) {
-            return Optional.empty();
-        }
-        int orientation = exifOrientation(jpeg);
-        ColorProfile profile = EmbeddedProfileReader.readJpeg(jpeg).orElse(null);
-        return decodeScaled(jpeg, maxEdge, mode)
-                .map(f -> new ProfiledFrame(
-                        RasterFrames.applyExifOrientation(f, orientation), profile));
-    }
-
-    record ProfiledFrame(RasterFrame frame, ColorProfile colorProfile) {}
 
     /**
      * The scaled-decode core on raw JPEG bytes, orientation NOT applied —
      * for callers whose orientation authority is outside the JPEG (e.g. the
      * {@link LibRawStills} embedded-preview path, where LibRaw's flip wins).
+     * Empty on any decline, data warning or native failure: that caller
+     * decodes the raw instead.
      */
     static Optional<RasterFrame> decodeScaled(byte[] jpeg, int maxEdge, ThumbnailMode mode) {
         if (!available() || maxEdge <= 0) {
             return Optional.empty();
         }
+        try {
+            return decode(jpeg, maxEdge, mode) instanceof Decoded d && d.warning() == null
+                    ? Optional.of(d.frame()) : Optional.empty();
+        } catch (Throwable t) {
+            return Optional.empty();
+        }
+    }
+
+    private static Attempt decode(byte[] jpeg, int maxEdge, ThumbnailMode mode) {
+        if (jpeg.length < 3 || (jpeg[0] & 0xFF) != 0xFF || (jpeg[1] & 0xFF) != 0xD8
+                || (jpeg[2] & 0xFF) != 0xFF) {
+            return new Declined("not JPEG data (no SOI marker)");
+        }
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handle = TurboJpeg.tj3InitVersion(
                     TurboJpeg.TJINIT_DECOMPRESS(), TurboJpeg.TURBOJPEG_VERSION_NUMBER());
             if (handle.equals(MemorySegment.NULL)) {
-                return Optional.empty();
+                throw new MediaException("TurboJPEG cannot create a decompressor: "
+                        + errorString(MemorySegment.NULL));
             }
             try {
                 MemorySegment buf = arena.allocate(jpeg.length);
                 MemorySegment.copy(jpeg, 0, buf, ValueLayout.JAVA_BYTE, 0, jpeg.length);
-                if (TurboJpeg.tj3DecompressHeader(handle, buf, jpeg.length) != 0) {
-                    return Optional.empty();
-                }
+                String warning = check(handle,
+                        TurboJpeg.tj3DecompressHeader(handle, buf, jpeg.length), "header");
                 int w = TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_JPEGWIDTH());
                 int h = TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_JPEGHEIGHT());
                 int cs = TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_COLORSPACE());
-                if (w <= 0 || h <= 0
-                        || cs == TurboJpeg.TJCS_CMYK() || cs == TurboJpeg.TJCS_YCCK()
-                        || TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_LOSSLESS()) != 0
-                        // Progressive: every scan spans the full image, so DCT
-                        // scaling saves little and FFmpeg measures ~35% faster
-                        // — decline and let the fallback take it.
-                        || TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_PROGRESSIVE()) != 0) {
-                    return Optional.empty();
+                if (w <= 0 || h <= 0) {
+                    throw new MediaException("TurboJPEG header reports " + w + "×" + h);
+                }
+                if (cs == TurboJpeg.TJCS_CMYK()) return new Declined("CMYK JPEG");
+                if (cs == TurboJpeg.TJCS_YCCK()) return new Declined("YCCK JPEG");
+                if (TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_LOSSLESS()) != 0) {
+                    return new Declined("lossless JPEG");
+                }
+                // tj3Decompress8 takes 8-bit samples only; a 12- or 16-bit
+                // JPEG is a capability gap, not a broken file — FFmpeg
+                // decodes it.
+                int precision = TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_PRECISION());
+                if (precision != 8) {
+                    return new Declined(precision + "-bit JPEG");
+                }
+                // Progressive: every scan spans the full image, so DCT scaling
+                // saves little and FFmpeg measures ~35% faster — decline.
+                if (TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_PROGRESSIVE()) != 0) {
+                    return new Declined("progressive JPEG (FFmpeg decodes these faster)");
                 }
 
                 int[] scaled = pickScalingFactor(arena, handle, w, h, maxEdge, mode);
-                if (scaled == null) {
-                    return Optional.empty();
-                }
                 int sw = scaled[0], sh = scaled[1];
                 MemorySegment dst = arena.allocate((long) sw * sh * 4);
-                if (TurboJpeg.tj3Decompress8(handle, buf, jpeg.length, dst, sw * 4,
-                        TurboJpeg.TJPF_BGRA()) != 0) {
-                    return Optional.empty();
-                }
+                String decodeWarning = check(handle, TurboJpeg.tj3Decompress8(
+                        handle, buf, jpeg.length, dst, sw * 4, TurboJpeg.TJPF_BGRA()), "decode");
+                if (decodeWarning != null) warning = decodeWarning;
                 byte[] bgra = new byte[sw * sh * 4];
                 MemorySegment.copy(dst, ValueLayout.JAVA_BYTE, 0, bgra, 0, bgra.length);
 
-                return Optional.of(Thumbnails.scale(new RasterFrame(sw, sh, bgra), maxEdge, mode));
+                return new Decoded(Thumbnails.scale(new RasterFrame(sw, sh, bgra), maxEdge, mode),
+                        null, warning);
             } finally {
                 TurboJpeg.tj3Destroy(handle);
             }
-        } catch (Throwable t) {
-            return Optional.empty(); // any native hiccup: fall back to FFmpeg
         }
+    }
+
+    /**
+     * Null on success; libjpeg-turbo's message for a non-fatal warning (the
+     * output is still produced); throws on a fatal error.
+     */
+    private static String check(MemorySegment handle, int status, String stage) {
+        if (status == 0) return null;
+        // Read the code first: fetching the string clears the instance error.
+        boolean warning = TurboJpeg.tj3GetErrorCode(handle) == TurboJpeg.TJERR_WARNING();
+        String message = errorString(handle);
+        if (warning) return message;
+        throw new MediaException("TurboJPEG " + stage + " failed: " + message);
+    }
+
+    private static String errorString(MemorySegment handle) {
+        MemorySegment text = TurboJpeg.tj3GetErrorStr(handle);
+        return text.equals(MemorySegment.NULL) ? "unknown error"
+                : text.reinterpret(Long.MAX_VALUE).getString(0);
     }
 
     /**
      * Smallest supported DCT scaling factor that still covers {@code maxEdge}
      * (never upscales), applied to the handle. FIT needs the scaled long edge
      * to cover the box; FILL center-crops a square, so the scaled short edge
-     * must cover it. Returns the scaled {@code {width, height}}, or null to
-     * decline.
+     * must cover it. Returns the scaled {@code {width, height}}.
+     *
+     * @throws MediaException when libjpeg-turbo offers or accepts no factor
      */
     private static int[] pickScalingFactor(Arena arena, MemorySegment handle,
                                            int w, int h, int maxEdge, ThumbnailMode mode) {
@@ -173,7 +225,8 @@ final class TurboJpegStills {
         MemorySegment factors = TurboJpeg.tj3GetScalingFactors(countPtr);
         int count = countPtr.get(ValueLayout.JAVA_INT, 0);
         if (factors.equals(MemorySegment.NULL) || count <= 0) {
-            return null;
+            throw new MediaException("TurboJPEG offers no scaling factors: "
+                    + errorString(MemorySegment.NULL));
         }
         factors = factors.reinterpret(tjscalingfactor.sizeof() * count);
         int bestNum = 1, bestDenom = 1;
@@ -200,7 +253,8 @@ final class TurboJpegStills {
         tjscalingfactor.num(chosen, bestNum);
         tjscalingfactor.denom(chosen, bestDenom);
         if (TurboJpeg.tj3SetScalingFactor(handle, chosen) != 0) {
-            return null;
+            throw new MediaException("TurboJPEG rejected scaling factor " + bestNum + "/"
+                    + bestDenom + ": " + errorString(handle));
         }
         return new int[] {tjScaled(w, bestNum, bestDenom), tjScaled(h, bestNum, bestDenom)};
     }

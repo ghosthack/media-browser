@@ -9,11 +9,12 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 
 /**
- * Panama downcalls for binding VideoToolbox output surfaces into the CGL
- * context: CoreVideo's {@code CVPixelBufferGetIOSurface}/{@code
- * CVPixelBufferGetPixelFormatType} and the OpenGL framework's
- * {@code CGLTexImageIOSurface2D} (absent from LWJGL's CGL binding, which
- * only covers PBuffers). macOS-only by construction; {@link #AVAILABLE} is
+ * Panama downcalls for VideoToolbox output surfaces: CoreVideo's
+ * {@code CVPixelBufferGetIOSurface}/{@code CVPixelBufferGetPixelFormatType},
+ * the OpenGL framework's {@code CGLTexImageIOSurface2D} (absent from LWJGL's
+ * CGL binding, which only covers PBuffers) for the CGL renderers, and the
+ * base-address lock and plane accessors for CPU readers such as
+ * {@link VImageVideoConverter}. macOS-only by construction; {@link #AVAILABLE} is
  * false anywhere the frameworks don't resolve, and callers fall back to the
  * CPU path.
  */
@@ -28,11 +29,22 @@ final class MacVideoSurfaces {
     private static final MethodHandle GET_IOSURFACE;
     private static final MethodHandle GET_PIXEL_FORMAT_TYPE;
     private static final MethodHandle TEX_IMAGE_IOSURFACE_2D;
+    private static final MethodHandle LOCK_BASE_ADDRESS;
+    private static final MethodHandle UNLOCK_BASE_ADDRESS;
+    private static final MethodHandle BASE_ADDRESS_OF_PLANE;
+    private static final MethodHandle BYTES_PER_ROW_OF_PLANE;
+
+    /** {@code kCVPixelBufferLock_ReadOnly}. */
+    static final long LOCK_READ_ONLY = 1;
 
     static {
         MethodHandle ioSurface = null;
         MethodHandle formatType = null;
         MethodHandle texImage = null;
+        MethodHandle lock = null;
+        MethodHandle unlock = null;
+        MethodHandle planeBase = null;
+        MethodHandle planeStride = null;
         boolean ok = false;
         try {
             Linker linker = Linker.nativeLinker();
@@ -60,6 +72,14 @@ final class MacVideoSurfaces {
                             ValueLayout.JAVA_INT,  // type
                             ValueLayout.ADDRESS,   // IOSurfaceRef
                             ValueLayout.JAVA_INT)); // plane
+            lock = linker.downcallHandle(cv.find("CVPixelBufferLockBaseAddress").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+            unlock = linker.downcallHandle(cv.find("CVPixelBufferUnlockBaseAddress").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+            planeBase = linker.downcallHandle(cv.find("CVPixelBufferGetBaseAddressOfPlane").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+            planeStride = linker.downcallHandle(cv.find("CVPixelBufferGetBytesPerRowOfPlane").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
             ok = true;
         } catch (Throwable t) {
             // Not macOS (or frameworks unresolvable): zero-copy simply absent.
@@ -67,6 +87,10 @@ final class MacVideoSurfaces {
         GET_IOSURFACE = ioSurface;
         GET_PIXEL_FORMAT_TYPE = formatType;
         TEX_IMAGE_IOSURFACE_2D = texImage;
+        LOCK_BASE_ADDRESS = lock;
+        UNLOCK_BASE_ADDRESS = unlock;
+        BASE_ADDRESS_OF_PLANE = planeBase;
+        BYTES_PER_ROW_OF_PLANE = planeStride;
         AVAILABLE = ok;
     }
 
@@ -106,6 +130,44 @@ final class MacVideoSurfaces {
                     MemorySegment.ofAddress(ioSurface), plane);
         } catch (Throwable t) {
             throw new IllegalStateException("CGLTexImageIOSurface2D failed", t);
+        }
+    }
+
+    /** {@code CVPixelBufferLockBaseAddress}; returns the CVReturn (0 = success). */
+    static int lockBaseAddress(long cvPixelBuffer, long flags) {
+        try {
+            return (int) LOCK_BASE_ADDRESS.invokeExact(MemorySegment.ofAddress(cvPixelBuffer), flags);
+        } catch (Throwable t) {
+            throw new IllegalStateException("CVPixelBufferLockBaseAddress failed", t);
+        }
+    }
+
+    /** {@code CVPixelBufferUnlockBaseAddress}; returns the CVReturn (0 = success). */
+    static int unlockBaseAddress(long cvPixelBuffer, long flags) {
+        try {
+            return (int) UNLOCK_BASE_ADDRESS.invokeExact(MemorySegment.ofAddress(cvPixelBuffer), flags);
+        } catch (Throwable t) {
+            throw new IllegalStateException("CVPixelBufferUnlockBaseAddress failed", t);
+        }
+    }
+
+    /** {@code CVPixelBufferGetBaseAddressOfPlane}: valid only while the buffer is locked. */
+    static MemorySegment baseAddressOfPlane(long cvPixelBuffer, int plane) {
+        try {
+            return (MemorySegment) BASE_ADDRESS_OF_PLANE.invokeExact(
+                    MemorySegment.ofAddress(cvPixelBuffer), (long) plane);
+        } catch (Throwable t) {
+            throw new IllegalStateException("CVPixelBufferGetBaseAddressOfPlane failed", t);
+        }
+    }
+
+    /** {@code CVPixelBufferGetBytesPerRowOfPlane}. */
+    static long bytesPerRowOfPlane(long cvPixelBuffer, int plane) {
+        try {
+            return (long) BYTES_PER_ROW_OF_PLANE.invokeExact(
+                    MemorySegment.ofAddress(cvPixelBuffer), (long) plane);
+        } catch (Throwable t) {
+            throw new IllegalStateException("CVPixelBufferGetBytesPerRowOfPlane failed", t);
         }
     }
 }

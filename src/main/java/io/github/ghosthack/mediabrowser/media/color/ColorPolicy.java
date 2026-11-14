@@ -1,5 +1,7 @@
 package io.github.ghosthack.mediabrowser.media.color;
 
+import java.util.function.Supplier;
+
 /**
  * Process-global still-image color policy read by the color-managed decode
  * path on every operation.
@@ -51,21 +53,58 @@ public final class ColorPolicy {
         }
     }
 
-    private static volatile Mode mode = Mode.MANAGED;
-    private static volatile Gamut gamut = Gamut.CLIP;
+    /**
+     * One consistent reading of the policy. {@link #signature()} names only
+     * what shapes the pixels (gamut is moot when unmanaged), so it can serve
+     * as part of a cached rendition's identity.
+     */
+    public record Snapshot(Mode mode, Gamut gamut) {
+        public Snapshot {
+            if (mode == null) mode = Mode.MANAGED;
+            if (gamut == null) gamut = Gamut.CLIP;
+        }
+
+        public String signature() {
+            return mode == Mode.UNMANAGED ? "unmanaged" : "managed/" + gamut;
+        }
+    }
+
+    private static volatile Snapshot current = new Snapshot(Mode.MANAGED, Gamut.CLIP);
+    /** A policy pinned for the current thread's operation; wins over {@link #current}. */
+    private static final ThreadLocal<Snapshot> PINNED = new ThreadLocal<>();
 
     private ColorPolicy() {}
 
     public static Mode mode() {
-        return mode;
+        return snapshot().mode();
     }
 
     public static Gamut gamut() {
-        return gamut;
+        return snapshot().gamut();
+    }
+
+    /** The policy in effect on this thread: its pinned one, else the global one. */
+    public static Snapshot snapshot() {
+        Snapshot pinned = PINNED.get();
+        return pinned != null ? pinned : current;
     }
 
     public static void set(Mode newMode, Gamut newGamut) {
-        mode = newMode == null ? Mode.MANAGED : newMode;
-        gamut = newGamut == null ? Gamut.CLIP : newGamut;
+        current = new Snapshot(newMode, newGamut);
+    }
+
+    /**
+     * Runs {@code work} on this thread under {@code policy}, regardless of any
+     * concurrent {@link #set}: a cached rendition keyed by a snapshot's
+     * signature is then rendered under exactly that snapshot.
+     */
+    public static <T> T pinned(Snapshot policy, Supplier<T> work) {
+        Snapshot previous = PINNED.get();
+        PINNED.set(policy);
+        try {
+            return work.get();
+        } finally {
+            if (previous == null) PINNED.remove(); else PINNED.set(previous);
+        }
     }
 }

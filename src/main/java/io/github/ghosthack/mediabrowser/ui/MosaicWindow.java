@@ -21,6 +21,7 @@ import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.Thumbnail;
 import io.github.ghosthack.mediabrowser.media.ThumbnailMode;
+import io.github.ghosthack.mediabrowser.media.move.SidecarCarrier;
 import io.github.ghosthack.mediabrowser.ui.icon.AppIcon;
 import io.github.ghosthack.mediabrowser.ui.icon.IconBinding;
 import io.github.ghosthack.mediabrowser.ui.icon.IconView;
@@ -114,6 +115,7 @@ import java.util.NavigableSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -233,7 +235,7 @@ public final class MosaicWindow
     /** The "Add to Album" submenu of {@link #tileMenu}; refreshed on each show. */
     private AlbumMenu albumMenu;
     /** Shared album store (numbered {@code album-NNN.csv} files in the app dir). */
-    private final AlbumStore albumStore = new AlbumStore();
+    private final AlbumStore albumStore = new AlbumStore(AppSettings.appDir());
 
     private final Canvas canvas = new Canvas();
     /**
@@ -507,6 +509,11 @@ public final class MosaicWindow
     private Supplier<String> virtualLocationSupplier = () -> null;
     /** Navigates the (shared) location into a folder or {@code ..}; set by the host. */
     private Consumer<Path> navigator = path -> { };
+    /** Re-reads the host's album listing, landing on the given path. */
+    private Consumer<Path> albumRefresher = focus -> { };
+    /** Drops a folder/archive target resolved off the FX thread once the location moved on. */
+    private NavigationRequests navigationRequests =
+            new NavigationRequests(() -> dirSupplier != null ? dirSupplier.get() : null);
     /** Enters a virtual parent that cannot be expressed as a {@link Path}. */
     private Runnable virtualParentHandler;
     /** Steps the shared location back/forward through history; set by the host. */
@@ -577,6 +584,12 @@ public final class MosaicWindow
      * fill mode, folder-grid, directory or monitor render scale).
      */
     private final FxImageCache<Path> scaled;
+    /**
+     * The color policy {@link #images} and {@link #scaled} were filled under;
+     * a change (e.g. a viewer's transient Color/Gamut override, or its reset)
+     * drops them, see {@link #dropTilesOnColorChange()}.
+     */
+    private final TileColorScope tileColor = new TileColorScope();
     /** The HiDPI render scale {@link #scaled} was built for; a change rebuilds it. */
     private double scaledScale = 1.0;
     /**
@@ -1138,7 +1151,8 @@ public final class MosaicWindow
         // The Move dialog (Cmd+M / Mosaic ▸ Move…): the same window-agnostic
         // controller the main window uses, driven by a host that exposes this
         // grid's selection, current dir, post-move focus and refresh.
-        this.moveController = new MoveController(service, settings, new MoveController.Host() {
+        this.moveController = new MoveController(service, settings,
+                SidecarCarrier.of(rotationStore, aaeStore), new MoveController.Host() {
             @Override public Stage owner() { return stage(); }
             @Override public Path currentDirectory() {
                 return dirSupplier != null ? dirSupplier.get() : null;
@@ -1147,7 +1161,7 @@ public final class MosaicWindow
             @Override public Path nextFocusAfterMove(List<Path> moving) { return MosaicWindow.this.nextFocusAfterMove(moving); }
             @Override public void refreshAfterMove(Path focusPath) { MosaicWindow.this.refreshAfterMove(focusPath); }
             @Override public void showStatus(String message) { statusLabel.setText(message); }
-            @Override public void releaseBeforeMove(List<Path> moving) { viewer.releaseBeforeMove(moving); }
+            @Override public CompletableFuture<Void> releaseBeforeMove(List<Path> moving) { return viewer.releaseBeforeMove(moving); }
         });
         this.metadataStripController = new MetadataStripController(service,
                 new MetadataStripController.Host() {
@@ -2023,6 +2037,21 @@ public final class MosaicWindow
         this.navigator = navigator != null ? navigator : path -> { };
     }
 
+    /**
+     * Shares the host's stale-navigation gate, so a target this grid resolves
+     * and one the host resolves supersede each other, and both compare against
+     * the host's full location (an album, the Computer view) rather than only
+     * its directory.
+     */
+    void setNavigationRequests(NavigationRequests requests) {
+        this.navigationRequests = Objects.requireNonNull(requests);
+    }
+
+    /** Sets the host callback that re-reads an album listing after a move or trash. */
+    void setAlbumRefresher(Consumer<Path> refresher) {
+        this.albumRefresher = Objects.requireNonNull(refresher);
+    }
+
     /** Sets the host callback used when a drive root's parent is Computer. */
     public void setVirtualParentHandler(Runnable handler) {
         this.virtualParentHandler = handler;
@@ -2190,6 +2219,7 @@ public final class MosaicWindow
         var result = new ArrayList<Image>();
         var seen = java.util.Collections.newSetFromMap(
                 new java.util.IdentityHashMap<Image, Boolean>());
+        dropTilesOnColorChange();
         for (DirEntry item : items) {
             Image image = images.get(item.path());
             if (image == null) image = scaled.get(item.path());
@@ -2288,20 +2318,34 @@ public final class MosaicWindow
      * focus target (or clears selection when {@code null}).
      */
     private void refreshAfterMove(Path focusPath) {
-        Path dir = dirSupplier != null ? dirSupplier.get() : null;
-        if (dir == null) return;
+        if (!canRelist()) return;
         pendingSelectPath = focusPath;
         autoOpenAfterRebuild = true;   // keep the viewer in step once the re-list lands
-        navigator.accept(dir);
+        relist(focusPath);
     }
 
     /** Re-lists after creating a sibling copy without forcing the viewer open. */
     private void refreshAfterStrip(Path output) {
-        Path dir = dirSupplier != null ? dirSupplier.get() : null;
-        if (dir == null) return;
+        if (!canRelist()) return;
         pendingSelectPath = output;
         autoOpenAfterRebuild = false;
-        navigator.accept(dir);
+        relist(output);
+    }
+
+    /** Whether there is a listing to re-read: a folder, or an album's virtual one. */
+    private boolean canRelist() {
+        return (dirSupplier != null && dirSupplier.get() != null)
+                || currentVirtualLocation() != null;
+    }
+
+    /**
+     * Re-reads the shared listing in place: re-navigates a folder, or asks the
+     * host to re-read the album, whose members a move or trash may have taken.
+     */
+    private void relist(Path focusPath) {
+        Path dir = dirSupplier != null ? dirSupplier.get() : null;
+        if (dir != null) navigator.accept(dir);
+        else albumRefresher.accept(focusPath);
     }
 
     /** Steps the on-screen tile size by {@code delta}px, clamped to the slider range. */
@@ -2473,8 +2517,7 @@ public final class MosaicWindow
             anchor = lead;
         }
         String locationText = locationText(dir, virtualLocation);
-        title.set((dir != null ? dir.getFileName() != null
-                ? dir.getFileName().toString() : dir.toString()
+        title.set((dir != null ? titleName(dir)
                 : virtualLocation != null ? virtualLocation
                 : MainWindow.COMPUTER_LOCATION_NAME) + " — Mosaic");
         locationField.setText(locationText);
@@ -2496,8 +2539,15 @@ public final class MosaicWindow
         return label == null || label.isBlank() ? null : label;
     }
 
-    private static String locationText(Path dir, String virtualLocation) {
-        if (dir != null) return dir.toString();
+    /** A folder's title name; an archive root (which has none) takes the archive's. */
+    static String titleName(Path dir) {
+        if (dir.getFileName() != null) return dir.getFileName().toString();
+        return ArchivePaths.inArchive(dir) ? ArchivePaths.displayName(dir) : dir.toString();
+    }
+
+    /** The location bar's text: the archive locator form, which Enter parses back. */
+    static String locationText(Path dir, String virtualLocation) {
+        if (dir != null) return ArchivePaths.format(dir);
         return virtualLocation != null ? virtualLocation : MainWindow.COMPUTER_LOCATION_NAME;
     }
 
@@ -2822,9 +2872,8 @@ public final class MosaicWindow
         if (!active) return;
         scanPending = true;
         if (target != null) {
-            locationField.setText(target.toString());
-            title.set((target.getFileName() != null
-                    ? target.getFileName().toString() : target.toString()) + " — Mosaic");
+            locationField.setText(locationText(target, null));
+            title.set(titleName(target) + " — Mosaic");
         }
         refreshLoadingState();
     }
@@ -3670,6 +3719,7 @@ public final class MosaicWindow
      */
     private Image imageFor(Path path) {
         if (!thumbnailsVisible.get()) return null;
+        dropTilesOnColorChange();
         Image img = images.get(path);
         // Once a full rendition has been evicted, its screen-sized derivative
         // remains sufficient for Mosaic and prevents an eviction/reload loop.
@@ -3680,6 +3730,7 @@ public final class MosaicWindow
         MosaicTelemetry.recordThumbnailRequested(pending.size());
         int gen = generation;
         int revision = thumbnailRevisions.getOrDefault(path, 0);
+        int colorEpoch = tileColor.epoch();
         long requestedAt = MosaicTelemetry.now();
         long submitStartedAt = MosaicTelemetry.now();
         service.thumbnail(path, maxEdge, thumbnailMode).whenComplete((thumb, error) -> {
@@ -3688,7 +3739,7 @@ public final class MosaicWindow
             Platform.runLater(() -> {
                 long fxStartedAt = MosaicTelemetry.now();
                 MosaicTelemetry.recordThumbnailFxDelay(elapsedBetween(completedAt, fxStartedAt));
-                onThumbnail(gen, revision, path, thumb, error);
+                onThumbnail(gen, revision, colorEpoch, path, thumb, error);
                 MosaicTelemetry.recordThumbnailFxApply(
                         MosaicTelemetry.elapsedSince(fxStartedAt), pending.size());
             });
@@ -3780,10 +3831,24 @@ public final class MosaicWindow
         return MediaService.Barren.UNKNOWN;
     }
 
-    private void onThumbnail(int gen, int revision, Path path,
+    /**
+     * Drops the tile images when the color policy now renders different
+     * pixels: the service keys its renditions by the policy, but these FX
+     * copies would otherwise keep showing the old policy's tiles. In-flight
+     * requests go too; their completions carry the old epoch and are ignored.
+     */
+    private void dropTilesOnColorChange() {
+        if (!tileColor.changed()) return;
+        images.clear();
+        scaled.clear();
+        pending.clear();
+    }
+
+    private void onThumbnail(int gen, int revision, int colorEpoch, Path path,
                              Thumbnail thumb, Throwable error) {
         if (gen != generation
-                || revision != thumbnailRevisions.getOrDefault(path, 0)) return;
+                || revision != thumbnailRevisions.getOrDefault(path, 0)
+                || colorEpoch != tileColor.epoch()) return;
         pending.remove(path);
         if (error != null || thumb == null) {
             empties.add(path); // draw a placeholder rather than retry endlessly
@@ -4050,9 +4115,14 @@ public final class MosaicWindow
         }
         // Accepts an archive locator (/discs/photos.iso!/DCIM) as well as a
         // plain path, mounting the container when needed.
-        Path target = ArchivePaths.parse(locationField.getText())
-                .map(p -> ArchivePaths.revive(p).toAbsolutePath().normalize())
-                .orElse(null);
+        Path target = ArchivePaths.parse(locationField.getText()).orElse(null);
+        try {
+            if (target != null) target = ArchivePaths.revive(target).toAbsolutePath().normalize();
+        } catch (IOException e) {
+            statusLabel.setText("Cannot open " + locationField.getText().trim() + ": "
+                    + e.getMessage());
+            return;
+        }
         if (target != null && ArchivePaths.isDirectory(target)) {
             navigator.accept(target);
             canvas.requestFocus();
@@ -4069,21 +4139,21 @@ public final class MosaicWindow
      */
     private void openArchive(Path archive) {
         statusLabel.setText("Opening " + archive.getFileName() + "…");
-        service.fileOp(() -> {
+        navigationRequests.resolve(service.fileOp(() -> {
             try {
                 // Lands inside a solitary top-level folder; see browseRoot.
                 return ArchivePaths.browseRoot(archive);
             } catch (IOException e) {
                 throw new MediaException(e.getMessage(), e);
             }
-        }).whenComplete((root, error) -> Platform.runLater(() -> {
+        }), Platform::runLater, (root, error) -> {
             if (error != null) {
                 statusLabel.setText("Cannot open " + archive.getFileName() + ": "
                         + rootMessage(error));
                 return;
             }
             navigator.accept(root);
-        }));
+        });
     }
 
     /** Backspace (and the viewer relaying parent navigation): navigates the
@@ -4365,11 +4435,11 @@ public final class MosaicWindow
         var paths = new ArrayList<String>();
         for (int i : selection) {
             if (i >= 0 && i < items.size()) {
-                paths.add(items.get(i).path().toAbsolutePath().normalize().toString());
+                paths.add(MainWindow.copyablePath(items.get(i).path()));
             }
         }
         if (paths.isEmpty() && selected >= 0 && selected < items.size()) {
-            paths.add(items.get(selected).path().toAbsolutePath().normalize().toString());
+            paths.add(MainWindow.copyablePath(items.get(selected).path()));
         }
         if (paths.isEmpty()) return;
         var content = new ClipboardContent();
@@ -4479,9 +4549,10 @@ public final class MosaicWindow
             navigator.accept(dir);
             return;
         }
-        service.fileOp(() -> MediaService.collapseChain(dir, MAX_CHAIN_DESCENT))
-                .whenComplete((target, error) -> Platform.runLater(() ->
-                        navigator.accept(error != null || target == null ? dir : target)));
+        navigationRequests.resolve(
+                service.fileOp(() -> MediaService.collapseChain(dir, MAX_CHAIN_DESCENT)),
+                Platform::runLater,
+                (target, error) -> navigator.accept(error != null || target == null ? dir : target));
     }
 
     private void activateSelected() {
@@ -4615,10 +4686,9 @@ public final class MosaicWindow
      */
     @Override
     public void refreshAfterExtensionFix(Path newPath) {
-        Path dir = dirSupplier != null ? dirSupplier.get() : null;
-        if (dir == null) return;
+        if (!canRelist()) return;
         pendingSelectPath = newPath;
-        navigator.accept(dir);
+        relist(newPath);
     }
 
     /**
@@ -4665,12 +4735,12 @@ public final class MosaicWindow
         return v < lo ? lo : Math.min(v, hi);
     }
 
-    /** Persists settings, swallowing IO errors (the live state still applies). */
+    /** Persists settings; a failed save keeps the live state but is reported, as in the browser. */
     private void saveSettingsQuietly() {
         try {
             settings.save();
-        } catch (java.io.IOException ignored) {
-            // a failed save is non-fatal; the live setting still applies
+        } catch (java.io.IOException e) {
+            statusLabel.setText("Cannot save settings: " + e.getMessage());
         }
     }
 

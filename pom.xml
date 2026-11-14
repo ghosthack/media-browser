@@ -53,7 +53,7 @@
     <!-- Bundled-FFmpeg backend (FFMPEG_FFM): FFM stubs + self-extracting
          from-source LGPL natives, built in ../ffmpeg-ffm, on Maven Central.
          Classifier jars exist for macos-arm64, windows-x64, and linux-x64. -->
-    <ffmpegffm.version>8.1.2-0.3.7</ffmpegffm.version>
+    <ffmpegffm.version>8.1.2-0.3.8</ffmpegffm.version>
     <ffmpegffm.natives>macos-arm64</ffmpegffm.natives>
     <!-- libjpeg-turbo JPEG-thumbnail fast path (TurboJpegStills): FFM stubs +
          self-extracting natives, built in ../turbojpeg-ffm. Same platform
@@ -555,7 +555,27 @@
         <configuration>
           <!-- Same runtime module the app needs: the pure decoders' DSP
                kernels (AvcDsp & co.) use the incubating Vector API. -->
-          <argLine>--add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED</argLine>
+          <!-- user.home is repointed at a build-scoped directory so nothing a
+               test loads can write under the real home: ffmpeg-ffm,
+               turbojpeg-ffm and libraw-ffm extract their natives to
+               ~/.cache/<name> with no override, and JavaFX (~/.openjfx) and
+               bytedeco (~/.javacpp) cache under it too. Set at JVM start, not
+               as a system property variable, so it precedes every read.
+               JavaFX runs on its Headless glass platform (software Prism), so
+               a test may show and hide real stages without a window ever
+               reaching the screen (MultiWindowShellCloseTest relies on it, and
+               checks the glass Application class before showing anything). -->
+          <argLine>--add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Duser.home=${project.build.directory}/test-home -Dglass.platform=Headless -Dprism.order=sw --add-exports=javafx.graphics/com.sun.glass.ui=ALL-UNNAMED</argLine>
+          <systemPropertyVariables>
+            <!-- The real home, only so a guard test can prove it is not in use. -->
+            <mediabrowser.test.realHome>${user.home}</mediabrowser.test.realHome>
+            <!-- libvips-ffm's documented cache override (it would otherwise
+                 honour XDG_CACHE_HOME / LOCALAPPDATA, which user.home misses). -->
+            <libvipsffm.cachedir>${project.build.directory}/test-home/native-cache/libvips-ffm</libvipsffm.cachedir>
+            <!-- Build-scoped base for AppDirIsolation's per-class application
+                 directories, so no test touches the real ~/.media-browser. -->
+            <mediabrowser.settings.dir>${project.build.directory}/test-app-dir</mediabrowser.settings.dir>
+          </systemPropertyVariables>
         </configuration>
         <!--
           The bytedeco fixture-minting tests must not share a JVM with anything

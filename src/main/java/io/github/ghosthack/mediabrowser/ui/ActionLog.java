@@ -95,6 +95,11 @@ public final class ActionLog {
         }
     }
 
+    /** Tests only: drop every in-memory entry a test recorded into the singleton. */
+    void clearForTest() {
+        entries.clear();
+    }
+
     /** Bumped whenever the quick-move targets or their enabled state change. */
     public ReadOnlyIntegerProperty moveTargetsRevision() {
         return moveTargetsRevision;

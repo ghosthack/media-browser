@@ -26,6 +26,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.ToIntFunction;
 
 /**
  * The "Albums…" dialog — a modal list of every album with the controls to add
@@ -45,9 +46,17 @@ public final class AlbumsDialog {
     private final ListView<Album> list = new ListView<>();
     private final Label feedback = new Label();
     private final Button addButton = new Button("Add to Album");
+    private final AlbumCounts counts;
 
     public AlbumsDialog(Window owner, AlbumStore store, AppSettings settings,
                         List<Path> selection, Consumer<String> status) {
+        this(owner, store, settings, selection, status, store::count);
+    }
+
+    /** {@code counter} runs off the FX thread (see {@link AlbumCounts}). */
+    AlbumsDialog(Window owner, AlbumStore store, AppSettings settings,
+                 List<Path> selection, Consumer<String> status, ToIntFunction<Album> counter) {
+        this.counts = new AlbumCounts(counter, list::refresh);
         this.store = store;
         this.settings = settings;
         this.selection = List.copyOf(selection);
@@ -64,9 +73,7 @@ public final class AlbumsDialog {
                 if (empty || album == null) {
                     setText(null);
                 } else {
-                    int count = store.count(album);
-                    setText(album.name() + "  (" + count + " item"
-                            + (count == 1 ? "" : "s") + ")");
+                    setText(counts.label(album));
                 }
             }
         });
@@ -168,6 +175,7 @@ public final class AlbumsDialog {
         }
         try {
             AlbumStore.AddResult result = store.addPaths(album, selection);
+            counts.invalidate(album);
             settings.recordAlbumUse(album.fileName());
             try {
                 settings.save();
@@ -187,6 +195,11 @@ public final class AlbumsDialog {
         feedback.setText(text);
         feedback.setVisible(true);
         feedback.setManaged(true);
+    }
+
+    /** The album list (tests lay it out without showing the dialog). */
+    ListView<Album> list() {
+        return list;
     }
 
     /** Show the dialog modally, blocking until it is closed. */

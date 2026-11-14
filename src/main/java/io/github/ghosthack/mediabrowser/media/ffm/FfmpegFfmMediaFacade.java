@@ -258,22 +258,25 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         boolean jpeg = isJpeg(file);
         if (jpeg && turboJpeg) {
             // libjpeg-turbo shrink-on-load fast path (the -turbojpeg backend
-            // variant only). Declines — progressive/CMYK/lossless, which
+            // variant only). Declines — progressive/CMYK/lossless/12-bit, which
             // TurboJPEG handles worse or not at all — fall through to the
             // ordinary FFmpeg decode below: capability routing, not a
-            // failure fallback.
-            if (captureColorProfiles) {
-                var fast = TurboJpegStills.profiledThumbnail(file, maxEdge, mode);
-                if (fast.isPresent()) {
-                    var decoded = fast.orElseThrow();
-                    return new Thumbnail(Optional.of(decoded.frame()), MediaKind.IMAGE,
-                            decoded.colorProfile());
-                }
-            } else {
-                var fast = TurboJpegStills.thumbnail(file, maxEdge, mode);
-                if (fast.isPresent()) return new Thumbnail(fast, MediaKind.IMAGE);
+            // failure fallback. A native failure throws instead.
+            if (TurboJpegStills.attempt(file, maxEdge, mode, captureColorProfiles)
+                    instanceof TurboJpegStills.Decoded decoded) {
+                return turboThumbnail(decoded);
             }
         }
+        return ffmpegThumbnail(file, maxEdge, mode, jpeg);
+    }
+
+    private static Thumbnail turboThumbnail(TurboJpegStills.Decoded decoded) {
+        return new Thumbnail(Optional.of(decoded.frame()), MediaKind.IMAGE,
+                decoded.colorProfile());
+    }
+
+    /** The FFmpeg thumbnail decode, past every fast path. */
+    private Thumbnail ffmpegThumbnail(Path file, int maxEdge, ThumbnailMode mode, boolean jpeg) {
         Thumbnail thumb = thumbnailSteppingDownPcd(file, maxEdge, mode);
         if (jpeg && thumb.frame().isPresent()) {
             int orientation = TurboJpegStills.exifOrientation(file);
@@ -319,37 +322,32 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                 throw e;
             }
         }
-        if (isJpeg(file) && turboJpeg) {
+        boolean jpeg = isJpeg(file);
+        if (jpeg && turboJpeg) {
             long turboStarted = trace.beginAttempt();
+            TurboJpegStills.Attempt attempt;
             try {
-                Thumbnail result = null;
-                if (captureColorProfiles) {
-                    Optional<TurboJpegStills.ProfiledFrame> fast =
-                            TurboJpegStills.profiledThumbnail(file, maxEdge, mode);
-                    if (fast.isPresent()) {
-                        var decoded = fast.orElseThrow();
-                        result = new Thumbnail(Optional.of(decoded.frame()),
-                                MediaKind.IMAGE, decoded.colorProfile());
-                    }
-                } else {
-                    Optional<RasterFrame> fast = TurboJpegStills.thumbnail(file, maxEdge, mode);
-                    if (fast.isPresent()) result = new Thumbnail(fast, MediaKind.IMAGE);
-                }
-                if (result != null) {
-                    trace.succeeded("TurboJPEG scaled decode", turboStarted,
-                            thumbnailDetail(result, maxEdge, mode));
-                    return result;
-                }
-                trace.declined("TurboJPEG scaled decode", turboStarted,
-                        "JPEG is outside the fast path (for example progressive, CMYK, or lossless)");
+                attempt = TurboJpegStills.attempt(file, maxEdge, mode, captureColorProfiles);
             } catch (RuntimeException | Error e) {
                 trace.failed("TurboJPEG scaled decode", turboStarted, e);
                 throw e;
             }
+            switch (attempt) {
+                case TurboJpegStills.Decoded decoded -> {
+                    Thumbnail result = turboThumbnail(decoded);
+                    trace.succeeded("TurboJPEG scaled decode", turboStarted,
+                            thumbnailDetail(result, maxEdge, mode)
+                                    + (decoded.warning() == null ? ""
+                                            : "; libjpeg-turbo warning: " + decoded.warning()));
+                    return result;
+                }
+                case TurboJpegStills.Declined declined -> trace.declined(
+                        "TurboJPEG scaled decode", turboStarted, declined.reason());
+            }
         }
         long started = trace.beginAttempt();
         try {
-            Thumbnail result = loadThumbnail(file, maxEdge, mode);
+            Thumbnail result = ffmpegThumbnail(file, maxEdge, mode, jpeg);
             trace.succeeded("Bundled FFmpeg thumbnail", started,
                     thumbnailDetail(result, maxEdge, mode));
             return result;

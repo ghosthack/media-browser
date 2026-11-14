@@ -28,21 +28,17 @@ import java.util.List;
  */
 public final class ActionLogFile {
 
-    /** Lives beside {@code app.properties} and the album CSVs. */
-    private static final Path DEFAULT_FILE = Path.of(System.getProperty("user.home"),
-            ".media-browser", "action-log.jsonl");
-
     /** How far back {@link #tail} looks: plenty for its few-entry callers. */
     private static final int TAIL_WINDOW_BYTES = 64 * 1024;
 
     private final Path file;
     private boolean appendFailureReported;
 
-    public ActionLogFile() {
-        this(DEFAULT_FILE);
-    }
-
-    /** At an explicit path — for tests and harnesses. */
+    /**
+     * At {@code file}: the app passes the one beside {@code app.properties}
+     * and the album CSVs. There is no default, so nothing can bypass the
+     * application-directory override and write under the real home.
+     */
     public ActionLogFile(Path file) {
         this.file = file;
     }
@@ -52,6 +48,17 @@ public final class ActionLogFile {
         return file;
     }
 
+    /** Whether the file is non-empty and its last byte is not a line feed. */
+    private boolean endsMidLine() throws IOException {
+        if (!Files.isRegularFile(file)) return false;
+        try (var channel = java.nio.channels.FileChannel.open(file, StandardOpenOption.READ)) {
+            long size = channel.size();
+            if (size == 0) return false;
+            var last = java.nio.ByteBuffer.allocate(1);
+            return channel.read(last, size - 1) == 1 && last.get(0) != '\n';
+        }
+    }
+
     /** Appends {@code entry} as one JSONL line, creating the file and parents. */
     public void append(ActionLogEntry entry) {
         byte[] line = (entry.toJsonLine() + System.lineSeparator())
@@ -59,6 +66,16 @@ public final class ActionLogFile {
         try {
             if (file.getParent() != null) {
                 Files.createDirectories(file.getParent());
+            }
+            if (endsMidLine()) {
+                // A crash mid-append left a torn last line: close it so this
+                // entry starts its own line instead of fusing with the fragment
+                // (the reader then skips the fragment as unparseable).
+                byte[] separator = System.lineSeparator().getBytes(StandardCharsets.UTF_8);
+                byte[] joined = new byte[separator.length + line.length];
+                System.arraycopy(separator, 0, joined, 0, separator.length);
+                System.arraycopy(line, 0, joined, separator.length, line.length);
+                line = joined;
             }
             Files.write(file, line, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
                     StandardOpenOption.APPEND);

@@ -82,7 +82,13 @@ import java.util.Optional;
  * installer-side registration: jpackage's MSI has no per-type confirm step
  * and would write opaque hashed ProgIds this dialog could never recognize,
  * whereas everything registered here shares the app's own
- * {@code MediaBrowser.AssocFile.<ext>} ProgIds.</p>
+ * {@code MediaBrowser.AssocFile.<ext>} ProgIds. The proposal applies once:
+ * after a Confirm every row shows the registry again, so an extension the
+ * user unchecked stays unchecked and a second Confirm cannot register it.</p>
+ *
+ * <p>An association whose registered command points at a different
+ * executable (the app was reinstalled or moved since) is shown as such and
+ * re-registered for this executable on Confirm while it stays checked.</p>
  */
 public final class FileAssociationsDialog {
 
@@ -92,7 +98,7 @@ public final class FileAssociationsDialog {
         final MediaKind kind;
         final SimpleBooleanProperty selected = new SimpleBooleanProperty(false);
         final SimpleStringProperty description = new SimpleStringProperty("");
-        AssocStatus status = new AssocStatus(AssocState.NOT_ASSOCIATED, null);
+        AssocStatus status = new AssocStatus(AssocState.NOT_ASSOCIATED, null, null);
 
         Row(String extension, MediaKind kind) {
             this.extension = extension;
@@ -102,9 +108,14 @@ public final class FileAssociationsDialog {
     }
 
     private final Stage stage = new Stage();
-    private final Optional<Path> packagedExe = LaunchInvocation.resolvePackagedExe();
-    /** First-launch mode: pre-check curated, not-yet-associated extensions as a proposal. */
+    private final Optional<Path> packagedExe;
+    /** First-launch mode: shows the proposal banner. */
     private final boolean proposeCurated;
+    /**
+     * Whether a load still pre-checks curated, not-yet-associated extensions:
+     * true only for the first-launch dialog until its first Confirm.
+     */
+    private boolean proposing;
     private final Map<MediaKind, List<Row>> rowsByKind = new EnumMap<>(MediaKind.class);
     private final Map<MediaKind, Boolean> loadedKinds = new EnumMap<>(MediaKind.class);
 
@@ -113,11 +124,14 @@ public final class FileAssociationsDialog {
     private final Button confirmButton = new Button("Confirm");
 
     public FileAssociationsDialog(Window owner) {
-        this(owner, false);
+        this(owner, false, LaunchInvocation.resolvePackagedExe());
     }
 
-    private FileAssociationsDialog(Window owner, boolean proposeCurated) {
+    /** {@code packagedExe} is passed in so a test can drive a packaged-build dialog. */
+    FileAssociationsDialog(Window owner, boolean proposeCurated, Optional<Path> packagedExe) {
+        this.packagedExe = packagedExe;
         this.proposeCurated = proposeCurated;
+        this.proposing = proposeCurated;
         buildUi(owner);
         if (proposeCurated) {
             // Every page is loaded now so Confirm covers curated extensions on
@@ -136,7 +150,7 @@ public final class FileAssociationsDialog {
      * gets the same disabled dialog and banner as always.
      */
     public static FileAssociationsDialog firstRunProposal(Window owner) {
-        return new FileAssociationsDialog(owner, true);
+        return new FileAssociationsDialog(owner, true, LaunchInvocation.resolvePackagedExe());
     }
 
     private void buildUi(Window owner) {
@@ -393,16 +407,32 @@ public final class FileAssociationsDialog {
     private void refreshRow(Row row) {
         AssocStatus status = FileAssociationRegistry.query(row.extension);
         row.status = status;
-        boolean associated = status.state() != AssocState.NOT_ASSOCIATED;
-        // The proposal only ever adds: an extension already associated stays
-        // checked, and one the registry doesn't know is checked iff curated.
-        row.selected.set(associated
-                || (proposeCurated && FileAssociationCatalog.curated(row.kind).contains(row.extension)));
-        row.description.set(withStatusSuffix(row.extension, status));
+        row.selected.set(checkedOnLoad(status,
+                FileAssociationCatalog.curated(row.kind).contains(row.extension), proposing));
+        row.description.set(withStatusSuffix(row.extension, status, packagedExe.orElse(null)));
     }
 
-    private static String withStatusSuffix(String extension, AssocStatus status) {
+    /**
+     * A row's checkbox as loaded: the proposal only ever adds — an extension
+     * already associated stays checked, and one the registry doesn't know is
+     * checked iff it is curated and the proposal is still pending.
+     */
+    static boolean checkedOnLoad(AssocStatus status, boolean curated, boolean proposing) {
+        return status.state() != AssocState.NOT_ASSOCIATED || (proposing && curated);
+    }
+
+    /** Whether a still-checked association must be re-registered because it launches another executable. */
+    static boolean needsRepair(AssocStatus status, Path exe) {
+        return exe != null && status.state() != AssocState.NOT_ASSOCIATED && !status.pointsAt(exe);
+    }
+
+    private static String withStatusSuffix(String extension, AssocStatus status, Path exe) {
         String base = FileAssociationCatalog.formatDescription(extension);
+        if (needsRepair(status, exe)) {
+            return status.command() == null
+                    ? base + " — Registration incomplete (Confirm to fix)"
+                    : base + " — Opens another copy of Media Browser (Confirm to fix)";
+        }
         return switch (status.state()) {
             case DEFAULT -> base + " — Default";
             case AVAILABLE_NOT_DEFAULT -> base + " — Available (not default)";
@@ -418,10 +448,12 @@ public final class FileAssociationsDialog {
         openDefaultAppsButton.setManaged(any);
     }
 
-    private void confirm() {
+    /** The Confirm button's action. */
+    void confirm() {
         Path exe = packagedExe.orElse(null);
         if (exe == null) return;
         int associated = 0;
+        int repaired = 0;
         int removed = 0;
         List<String> failures = new ArrayList<>();
         for (MediaKind kind : MediaKind.values()) {
@@ -433,9 +465,13 @@ public final class FileAssociationsDialog {
             for (Row row : rowsByKind.get(kind)) {
                 boolean wasAssociated = row.status.state() != AssocState.NOT_ASSOCIATED;
                 boolean nowChecked = row.selected.get();
-                if (wasAssociated == nowChecked) continue;
+                boolean repair = wasAssociated && nowChecked && needsRepair(row.status, exe);
+                if (wasAssociated == nowChecked && !repair) continue;
                 try {
-                    if (nowChecked) {
+                    if (repair) {
+                        FileAssociationRegistry.associate(row.extension, row.kind, exe);
+                        repaired++;
+                    } else if (nowChecked) {
                         FileAssociationRegistry.associate(row.extension, row.kind, exe);
                         associated++;
                     } else {
@@ -447,18 +483,23 @@ public final class FileAssociationsDialog {
                 }
             }
         }
+        // The proposal was answered: from here on every row is the registry's
+        // word, so a curated extension the user unchecked stays unchecked.
+        proposing = false;
         for (MediaKind kind : MediaKind.values()) {
             if (loadedKinds.getOrDefault(kind, false)) {
                 loadedKinds.put(kind, false);
                 refreshKind(kind);
             }
         }
-        showSummary(associated, removed, failures);
+        showSummary(associated, repaired, removed, failures);
     }
 
-    private void showSummary(int associated, int removed, List<String> failures) {
+    private void showSummary(int associated, int repaired, int removed, List<String> failures) {
         StringBuilder sb = new StringBuilder();
-        sb.append("Associated ").append(associated).append(", removed ").append(removed).append('.');
+        sb.append("Associated ").append(associated);
+        if (repaired > 0) sb.append(", repaired ").append(repaired);
+        sb.append(", removed ").append(removed).append('.');
         if (!failures.isEmpty()) {
             sb.append(' ').append(failures.size()).append(" failed: ").append(String.join(", ", failures));
         }
@@ -472,6 +513,20 @@ public final class FileAssociationsDialog {
             t = t.getCause();
         }
         return t.getMessage() == null ? t.toString() : t.getMessage();
+    }
+
+    /** Every row's checkbox, by extension, for {@code kind}. */
+    Map<String, Boolean> checked(MediaKind kind) {
+        Map<String, Boolean> out = new java.util.LinkedHashMap<>();
+        for (Row row : rowsByKind.get(kind)) out.put(row.extension, row.selected.get());
+        return out;
+    }
+
+    /** Sets one row's checkbox, as a click would. */
+    void setChecked(String extension, boolean checked) {
+        rowsByKind.values().stream().flatMap(List::stream)
+                .filter(r -> r.extension.equals(extension))
+                .forEach(r -> r.selected.set(checked));
     }
 
     /** Show the dialog modally, blocking until it is closed. */

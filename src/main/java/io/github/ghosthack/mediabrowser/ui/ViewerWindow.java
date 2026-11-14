@@ -21,6 +21,7 @@ import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionModel;
 import io.github.ghosthack.mediabrowser.media.VideoPlayer;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 import io.github.ghosthack.mediabrowser.media.move.FileOps;
+import io.github.ghosthack.mediabrowser.media.move.SidecarCarrier;
 import io.github.ghosthack.mediabrowser.ui.icon.AppIcon;
 import io.github.ghosthack.mediabrowser.ui.icon.IconBinding;
 
@@ -96,13 +97,13 @@ import javafx.stage.Stage;
 import javafx.util.Duration;
 
 import java.io.UncheckedIOException;
-import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 /**
@@ -197,16 +198,19 @@ public final class ViewerWindow implements AppShell.ShellView {
     /** The "Add to Album" submenu of {@link #viewMenu}; refreshed on each show. */
     private AlbumMenu albumMenu;
     /** Shared album store (numbered {@code album-NNN.csv} files in the app dir). */
-    private final AlbumStore albumStore = new AlbumStore();
+    private final AlbumStore albumStore = new AlbumStore(AppSettings.appDir());
     /**
-     * The upright (pre-user-rotation) frame of the on-screen still, retained so a
-     * rotate re-bakes from it without re-decoding. {@code null} for audio-only,
-     * errored or video-playback states.
+     * The on-screen still's untouched decoded master (so a later crop can
+     * expand a prior crop) and its upright (pre-user-rotation) frame (so a
+     * rotate re-bakes without re-decoding); empty for audio-only, errored or
+     * video-playback states. A superseded decode can land after navigation
+     * (the monotonic {@code shownSequence} guard still paints it) but is never
+     * retained, and every consumer goes through {@link #retainedStillItem()},
+     * never {@code index} alone, so a crop, export or enhancement can never
+     * write one item's pixels or dimensions under another item's name.
      */
-    private RasterFrame lastUprightFrame;
-    /** Untouched decoded master retained so a later crop can expand a prior crop. */
-    private RasterFrame lastMasterFrame;
-    /** Optional transient 4× AI rendition of {@link #lastUprightFrame}. */
+    private final RetainedStill retained = new RetainedStill();
+    /** Optional transient 4× AI rendition of the retained upright frame. */
     private RasterFrame enhancedUprightFrame;
     /** Original/enhanced comparison state; enhancement is deliberately session-only. */
     private final BooleanProperty enhancedVisible = new SimpleBooleanProperty(false);
@@ -294,7 +298,8 @@ public final class ViewerWindow implements AppShell.ShellView {
     private static final double SCROLLBAR_BREADTH = 12;
     private final Label placeholder = new Label();
     private final Label statusLabel = new Label();
-    /** Shows the active video presentation path while playing ("GL · CGL" / "GL · GLFW" / "PixelBuffer"). */
+    /** Shows the active video presentation path while playing ("GL · CGL · LWJGL", "PixelBuffer · tiled", …). */
+    private static final String PRESENTER_TOOLTIP = "Active video presentation path";
     private final Label presenterLabel = new Label();
     private final Label positionLabel = new Label();
     private final HBox statusBar;
@@ -461,9 +466,13 @@ public final class ViewerWindow implements AppShell.ShellView {
     private BakedPngExportController bakedPngExportController;
 
 
-    /** Active playback, if any. The session counter voids stale callbacks. */
-    private VideoPlayer player;
-    private int playSession;
+    /**
+     * The session token that voids stale playback callbacks, the file the
+     * live (or still preparing) session opened — the fix target on stop and
+     * what a move must take back ({@link #releaseBeforeMove}) — and the
+     * active player, if any, which only the claim closes.
+     */
+    private final PlaybackClaim playback = new PlaybackClaim();
     private long playDurationMicros = -1;
     private long playPositionMicros;
 
@@ -473,13 +482,6 @@ public final class ViewerWindow implements AppShell.ShellView {
      * is reported once and never retried on every re-open.
      */
     private final Set<Path> extensionFixAttempted = new HashSet<>();
-    /** The file the live playback session opened; the fix target on stop. */
-    private Path playbackPath;
-    /**
-     * Whether the session delivered its {@code begin()} — the proof the file
-     * really plays, required before its extension may be fixed on stop.
-     */
-    private boolean playbackProven;
 
     public ViewerWindow(AppShell shell, MediaService service, AppSettings settings,
                         RotationStore rotationStore, AaeStore aaeStore) {
@@ -496,10 +498,8 @@ public final class ViewerWindow implements AppShell.ShellView {
                 enhancedVisible.set(false);
                 return;
             }
-            if (lastUprightFrame != null && player == null
-                    && index >= 0 && index < siblings.size()) {
-                rebakeCurrentAdjustments(siblings.get(index));
-            }
+            MediaItem still = retainedStillItem();
+            if (still != null) rebakeCurrentAdjustments(still);
         });
 
         IconBinding.install(prevButton, AppIcon.PREVIOUS, "◀", "",
@@ -909,7 +909,7 @@ public final class ViewerWindow implements AppShell.ShellView {
 
         var spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        presenterLabel.setTooltip(new Tooltip("Active video presentation path"));
+        presenterLabel.setTooltip(new Tooltip(PRESENTER_TOOLTIP));
         statusBar = new HBox(8, statusPin, statusLabel, spacer, presenterLabel, positionLabel);
         statusBar.setAlignment(Pos.CENTER_LEFT);
         statusBar.setPadding(new Insets(4, 8, 4, 8));
@@ -1139,12 +1139,13 @@ public final class ViewerWindow implements AppShell.ShellView {
         // controller the main window and mosaic use, here driven by a host that
         // exposes the single on-screen item as the move source and folds a
         // completed move back into the navigation ring (and the opener's listing).
-        this.moveController = new MoveController(service, settings, new MoveController.Host() {
+        this.moveController = new MoveController(service, settings,
+                SidecarCarrier.of(rotationStore, aaeStore), new MoveController.Host() {
             @Override public Stage owner() { return stage(); }
             @Override public Path currentDirectory() { return currentMoveDirectory(); }
             @Override public MoveController.Selection currentSelection() { return currentMoveSelection(); }
             @Override public Path nextFocusAfterMove(List<Path> moving) { return ViewerWindow.this.nextFocusAfterMove(moving); }
-            @Override public void releaseBeforeMove(List<Path> moving) { ViewerWindow.this.releaseBeforeMove(moving); }
+            @Override public CompletableFuture<Void> releaseBeforeMove(List<Path> moving) { return ViewerWindow.this.releaseBeforeMove(moving); }
             @Override public void refreshAfterMove(Path focusPath) { ViewerWindow.this.refreshAfterMove(focusPath); }
             @Override public void showStatus(String message) { statusLabel.setText(message); }
         });
@@ -1166,19 +1167,13 @@ public final class ViewerWindow implements AppShell.ShellView {
                 service, rotationStore, aaeStore, new BakedPngExportController.Host() {
                     @Override public Stage owner() { return stage(); }
                     @Override public Path currentStill() {
-                        if (index < 0 || index >= siblings.size()
-                                || siblings.get(index).kind() != MediaKind.IMAGE
-                                || lastUprightFrame == null || player != null) {
-                            return null;
-                        }
-                        return siblings.get(index).path();
+                        MediaItem still = retainedStillItem();
+                        return still == null || still.kind() != MediaKind.IMAGE
+                                ? null : still.path();
                     }
                     @Override public RasterFrame currentRenderedFrame(Path source) {
-                        if (index < 0 || index >= siblings.size()
-                                || !siblings.get(index).path().equals(source)
-                                || lastUprightFrame == null || player != null) {
-                            return null;
-                        }
+                        MediaItem still = retainedStillItem();
+                        if (still == null || !still.path().equals(source)) return null;
                         return RasterFrames.apply(currentUprightFrame(),
                                 rotationStore.adjustments(source));
                     }
@@ -1496,7 +1491,7 @@ public final class ViewerWindow implements AppShell.ShellView {
         if (!takeFocus && !shell.revealPassive(AppShell.AppView.VIEWER)) return;
         this.host = host;
         this.onItemShown = host != null ? host::mirrorViewerItem : i -> { };
-        boolean keepPlayback = player != null && index >= 0
+        boolean keepPlayback = playback.player() != null && index >= 0
                 && siblings.get(index).path().equals(item.path());
         siblings = dirListing.isEmpty() ? List.of(item) : List.copyOf(dirListing);
         index = 0;
@@ -1955,7 +1950,7 @@ public final class ViewerWindow implements AppShell.ShellView {
     private void applyColorPolicy(boolean redecode) {
         ColorPolicy.set(effectiveColorMode(), effectiveGamut());
         syncColorMenus();
-        if (redecode && player == null && index >= 0 && index < siblings.size()) {
+        if (redecode && playback.player() == null && index >= 0 && index < siblings.size()) {
             loadCurrent();
         }
     }
@@ -1995,8 +1990,11 @@ public final class ViewerWindow implements AppShell.ShellView {
     private void saveSettingsQuietly() {
         try {
             settings.save();
-        } catch (java.io.IOException ignored) {
-            // ignored: the in-memory policy still applies for the session
+        } catch (java.io.IOException e) {
+            // The in-memory value still applies for the session, but it will
+            // not survive a restart: say so instead of losing it silently.
+            infoPanel.showMessage("Cannot save settings: " + e.getMessage());
+            System.err.println("[ViewerWindow] cannot save settings: " + e.getMessage());
         }
     }
 
@@ -2006,6 +2004,10 @@ public final class ViewerWindow implements AppShell.ShellView {
             imageView.setImage(null);
         }
         resetColorOverridesOnNavigation();
+        // The previous item's retained frames must not outlive it: until this
+        // item's decode lands, crop/export/enhance/rotate have nothing of its
+        // own to work on and refuse (see retainedStillItem).
+        clearRetainedStill();
         // Navigating away from a video that played fine is one of the two
         // moments the automatic extension fix may run (the other: clean
         // end-of-stream) — the handle is being released anyway.
@@ -2085,16 +2087,18 @@ public final class ViewerWindow implements AppShell.ShellView {
                     // strict latest-only guard would drop every frame and freeze
                     // the view until the user pauses.
                     if (seq <= shownSequence) return;
+                    // Never reached with the crop editor open: it opens only on
+                    // this load's retained frame (so seq == shownSequence), and
+                    // the next load closes it before taking a new seq.
                     shownSequence = seq;
                     if (error != null) {
                         logError("Cannot display " + item.fileName(), error);
                         infoPanel.showMessage(rootMessage(error));
                         // Live playback owns the viewport; only blank it for a
                         // still that itself failed to decode.
-                        if (player == null) {
+                        if (playback.player() == null) {
                             hideLoadingIndicator();
-                            lastMasterFrame = null;
-                            lastUprightFrame = null;
+                            clearRetainedStill();
                             updateSuperResolutionState();
                             updateCropButtonState();
                             imageView.setImage(null);
@@ -2114,7 +2118,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                     updateColorStatus(result.probe().colorProfile());
                     onItemProbed.accept(result.probe());
                     // live playback owns the viewport; never paint a still over it
-                    if (player != null) {
+                    if (playback.player() != null) {
                         diagnosticsPanel.refresh();
                         return;
                     }
@@ -2130,10 +2134,18 @@ public final class ViewerWindow implements AppShell.ShellView {
                         // invert) sit on top — and the upright frame is retained
                         // as the bake base so re-bakes need no re-decode (a no-op
                         // when there is no usable sidecar).
-                        lastMasterFrame = visual.get();
-                        lastUprightFrame = RasterFrames.applyAae(lastMasterFrame,
+                        RasterFrame master = visual.get();
+                        RasterFrame upright = RasterFrames.applyAae(master,
                                 aaeStore.forImage(item.path()).orElse(null));
-                        RasterFrame shown = RasterFrames.apply(lastUprightFrame,
+                        // Only this load's own decode becomes the bake base; a
+                        // superseded one (another item, or this item under an
+                        // older colour policy) is painted to keep rapid
+                        // navigation moving, but never retained.
+                        retained.land(seq, loadSequence, item.path(),
+                                index >= 0 && index < siblings.size()
+                                        ? siblings.get(index).path() : null,
+                                master, upright);
+                        RasterFrame shown = RasterFrames.apply(upright,
                                 rotationStore.adjustments(item.path()));
                         hideLoadingIndicator();
                         imageView.setImage(FxImages.toImage(shown));
@@ -2145,8 +2157,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                         updateCropButtonState();
                     } else {
                         hideLoadingIndicator();
-                        lastMasterFrame = null;
-                        lastUprightFrame = null;
+                        clearRetainedStill();
                         updateSuperResolutionState();
                         updateCropButtonState();
                         imageView.setImage(null);
@@ -2353,7 +2364,7 @@ public final class ViewerWindow implements AppShell.ShellView {
      */
     private void copyCurrentPath() {
         if (index < 0 || index >= siblings.size()) return;
-        String path = siblings.get(index).path().toAbsolutePath().normalize().toString();
+        String path = MainWindow.copyablePath(siblings.get(index).path());
         var content = new ClipboardContent();
         content.putString(path);
         Clipboard.getSystemClipboard().setContent(content);
@@ -2372,23 +2383,23 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /** Shortcut/context command: preserve and edit a valid saved rectangle. */
     private void beginCropShortcut() {
-        boolean editExisting = false;
-        if (player == null && lastMasterFrame != null
-                && index >= 0 && index < siblings.size()
-                && siblings.get(index).kind() == MediaKind.IMAGE) {
-            AaeSidecar edit = aaeStore.forImage(siblings.get(index).path()).orElse(null);
-            editExisting = edit != null && edit.crop().isPresent()
-                    && edit.masterWidth() == lastMasterFrame.width()
-                    && edit.masterHeight() == lastMasterFrame.height();
+        if (cropEditing) return;
+        // The same rule that enables the Crop… menu item (updateCropButtonState).
+        MediaItem still = requireRetainedStill("crop");
+        // Only the sidecar setCrop writes may seed the editor, never an
+        // IMG_E copy's fallback to the original's IMG_####.AAE.
+        AaeSidecar edit = still == null ? null : aaeStore.ownSidecar(still.path()).orElse(null);
+        switch (retained.shortcutCrop(still, edit)) {
+            case UNAVAILABLE -> { }
+            case NEW -> beginCrop(false);
+            case EDIT_EXISTING -> beginCrop(true);
         }
-        beginCrop(editExisting);
     }
 
     private void beginCrop(boolean editExisting) {
-        if (cropEditing || player != null || lastMasterFrame == null) return;
-        if (index < 0 || index >= siblings.size()) return;
-        MediaItem item = siblings.get(index);
-        if (item.kind() != MediaKind.IMAGE) return;
+        if (cropEditing) return;
+        MediaItem item = requireRetainedStill("crop");
+        if (!RetainedStill.cropAvailable(item)) return;
 
         // Freeze the item beneath the modal-in-place editor. Menu Previous/Next
         // bind to these same disabled properties, and the key filter below
@@ -2397,20 +2408,23 @@ public final class ViewerWindow implements AppShell.ShellView {
         prevButton.setDisable(true);
         nextButton.setDisable(true);
 
-        AaeSidecar existing = aaeStore.forImage(item.path()).orElse(null);
-        cropPreviewFrame = lastMasterFrame;
+        // The write target's own sidecar, not forImage's edited-copy fallback:
+        // the selection must live in the geometry the written AAE applies to.
+        AaeSidecar existing = aaeStore.ownSidecar(item.path()).orElse(null);
+        RasterFrame master = retained.master();
+        cropPreviewFrame = master;
         if (existing != null && existing.straightenAngleRadians() != 0
-                && existing.masterWidth() == lastMasterFrame.width()
-                && existing.masterHeight() == lastMasterFrame.height()) {
+                && existing.masterWidth() == master.width()
+                && existing.masterHeight() == master.height()) {
             // Crop coordinates live after straighten in the same-size master
             // canvas, so preview that geometry while leaving user adjustments
             // (rotation/mirror/colour) above the editor.
-            cropPreviewFrame = RasterFrames.straighten(lastMasterFrame,
+            cropPreviewFrame = RasterFrames.straighten(master,
                     existing.straightenAngleRadians());
         }
         boolean matchingMaster = existing != null
-                && existing.masterWidth() == lastMasterFrame.width()
-                && existing.masterHeight() == lastMasterFrame.height();
+                && existing.masterWidth() == master.width()
+                && existing.masterHeight() == master.height();
         cropSelection = editExisting && matchingMaster
                 ? existing.crop().orElse(null) : null;
         // A photo with no prior crop starts like macOS screen capture: a clean
@@ -2437,16 +2451,16 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /** Applies the selection by replacing only the AAE Crop adjustment. */
     private void applyCrop() {
-        if (!cropEditing || cropSelection == null || lastMasterFrame == null) return;
-        if (index < 0 || index >= siblings.size()) return;
-        MediaItem item = siblings.get(index);
+        if (!cropEditing || cropSelection == null) return;
+        MediaItem item = requireRetainedStill("crop");
+        if (item == null) return;
         try {
-            aaeStore.setCrop(item.path(), lastMasterFrame.width(), lastMasterFrame.height(),
-                    cropSelection);
+            RasterFrame master = retained.master();
+            aaeStore.setCrop(item.path(), master.width(), master.height(), cropSelection);
             AaeSidecar edit = aaeStore.forImage(item.path()).orElseThrow(
                     () -> new java.io.IOException("The written AAE could not be read back"));
             applyCropItem.setSelected(true);
-            lastUprightFrame = RasterFrames.applyAae(lastMasterFrame, edit);
+            retained.reupright(RasterFrames.applyAae(master, edit));
 
             discardEnhancedAfterCropChange();
 
@@ -2454,7 +2468,7 @@ public final class ViewerWindow implements AppShell.ShellView {
             updateCropButtonState();
             rebakeCurrentAdjustments(item);
             statusLabel.setText(item.fileName() + " — cropped to "
-                    + lastUprightFrame.width() + " × " + lastUprightFrame.height()
+                    + retained.upright().width() + " × " + retained.upright().height()
                     + " (original unchanged)");
             if (host != null) host.mirrorViewerCrop(item.path());
         } catch (java.io.IOException | RuntimeException e) {
@@ -2464,34 +2478,33 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /** Synchronizes the toolbar drop-down with the currently decoded still. */
     private void updateCropButtonState() {
-        boolean stillLoaded = player == null && lastMasterFrame != null
-                && index >= 0 && index < siblings.size()
-                && siblings.get(index).kind() == MediaKind.IMAGE;
+        MediaItem still = retainedStillItem();
+        boolean stillLoaded = RetainedStill.cropAvailable(still);
         AaeSidecar edit = stillLoaded
-                ? aaeStore.forImage(siblings.get(index).path()).orElse(null) : null;
-        boolean hasCrop = edit != null && edit.crop().isPresent()
-                && edit.masterWidth() == lastMasterFrame.width()
-                && edit.masterHeight() == lastMasterFrame.height();
+                ? aaeStore.forImage(still.path()).orElse(null) : null;
+        boolean hasCrop = stillLoaded && retained.hasMatchingCrop(edit);
+        AaeSidecar own = stillLoaded
+                ? aaeStore.ownSidecar(still.path()).orElse(null) : null;
+        boolean hasOwnCrop = stillLoaded && retained.hasMatchingCrop(own);
         cropButton.setDisable(!stillLoaded);
         newCropItem.setDisable(!stillLoaded);
-        editCropItem.setDisable(!hasCrop);
+        editCropItem.setDisable(!hasOwnCrop);
         applyCropItem.setDisable(!hasCrop);
         if (!hasCrop) applyCropItem.setSelected(true);
     }
 
     /** Session-only show-original/show-crop switch; no sidecar write occurs. */
     private void toggleCropApplied() {
-        if (player != null || lastMasterFrame == null
-                || index < 0 || index >= siblings.size()) return;
-        MediaItem item = siblings.get(index);
+        MediaItem item = retainedStillItem();
+        if (item == null) return;
         AaeSidecar edit = aaeStore.forImage(item.path()).orElse(null);
         if (edit == null || edit.crop().isEmpty()) {
             applyCropItem.setSelected(true);
             updateCropButtonState();
             return;
         }
-        lastUprightFrame = RasterFrames.applyAae(lastMasterFrame, edit,
-                applyCropItem.isSelected());
+        retained.reupright(RasterFrames.applyAae(retained.master(), edit,
+                applyCropItem.isSelected()));
         discardEnhancedAfterCropChange();
         rebakeCurrentAdjustments(item);
         statusLabel.setText(item.fileName() + (applyCropItem.isSelected()
@@ -2513,9 +2526,8 @@ public final class ViewerWindow implements AppShell.ShellView {
     private void cancelCrop() {
         if (!cropEditing) return;
         closeCropOverlay();
-        if (index >= 0 && index < siblings.size() && lastUprightFrame != null) {
-            rebakeCurrentAdjustments(siblings.get(index));
-        }
+        MediaItem still = retainedStillItem();
+        if (still != null) rebakeCurrentAdjustments(still);
     }
 
     private void closeCropOverlay() {
@@ -2703,8 +2715,9 @@ public final class ViewerWindow implements AppShell.ShellView {
      * for this item and the Show Enhanced check toggles comparison instantly.
      */
     private void enhanceCurrent(SuperResolutionModel model) {
-        if (superResolutionBusy || player != null || lastUprightFrame == null) return;
-        if (index < 0 || index >= siblings.size()) return;
+        if (superResolutionBusy) return;
+        MediaItem item = requireRetainedStill("enhance");
+        if (item == null) return;
         if (!service.supportsSuperResolution()) {
             statusLabel.setText(service.superResolutionUnsupportedReason());
             return;
@@ -2713,8 +2726,7 @@ public final class ViewerWindow implements AppShell.ShellView {
             return;
         }
 
-        MediaItem item = siblings.get(index);
-        RasterFrame source = lastUprightFrame;
+        RasterFrame source = retained.upright();
         int seq = loadSequence;
         superResolutionBusy = true;
         updateSuperResolutionState();
@@ -2764,8 +2776,8 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /** Reconciles menu disabled state after load/playback/inference transitions. */
     private void updateSuperResolutionState() {
-        superResolutionDisabled.set(superResolutionBusy || player != null
-                || lastUprightFrame == null || !service.supportsSuperResolution());
+        superResolutionDisabled.set(superResolutionBusy || retainedStillItem() == null
+                || !service.supportsSuperResolution());
         enhancedAvailable.set(enhancedUprightFrame != null);
         if (enhancedUprightFrame == null && enhancedVisible.get()) {
             enhancedVisible.set(false);
@@ -2775,13 +2787,12 @@ public final class ViewerWindow implements AppShell.ShellView {
     /** Upright bake source selected by the original/enhanced comparison toggle. */
     private RasterFrame currentUprightFrame() {
         return enhancedVisible.get() && enhancedUprightFrame != null
-                ? enhancedUprightFrame : lastUprightFrame;
+                ? enhancedUprightFrame : retained.upright();
     }
 
     private void rotateCurrent(int delta) {
-        if (player != null || lastUprightFrame == null) return;
-        if (index < 0 || index >= siblings.size()) return;
-        MediaItem item = siblings.get(index);
+        MediaItem item = requireRetainedStill("rotate");
+        if (item == null) return;
         rotationStore.rotate(item.path(), delta);
         rebakeCurrentAdjustments(item);
         noteIfSessionOnly(item.path());
@@ -2800,9 +2811,8 @@ public final class ViewerWindow implements AppShell.ShellView {
      * scope) or with no still loaded.
      */
     private void toggleAdjustment(Adjustment which) {
-        if (player != null || lastUprightFrame == null) return;
-        if (index < 0 || index >= siblings.size()) return;
-        MediaItem item = siblings.get(index);
+        MediaItem item = requireRetainedStill("adjust");
+        if (item == null) return;
         switch (which) {
             case MIRROR_H -> rotationStore.toggleMirrorH(item.path());
             case MIRROR_V -> rotationStore.toggleMirrorV(item.path());
@@ -2836,11 +2846,41 @@ public final class ViewerWindow implements AppShell.ShellView {
      * loaded.
      */
     public void refreshAdjustments(Path path) {
-        if (player != null || lastUprightFrame == null) return;
-        if (index < 0 || index >= siblings.size()) return;
-        MediaItem item = siblings.get(index);
-        if (!item.path().equals(path)) return;
+        MediaItem item = retainedStillItem();
+        if (item == null || !item.path().equals(path)) return;
         rebakeCurrentAdjustments(item);
+    }
+
+    /**
+     * The on-screen item when the retained frames are <em>its own</em> decode,
+     * else {@code null}: no still retained (audio, error, playback, flipbook),
+     * or the retained frames belong to another item (navigation cleared them,
+     * or a superseded decode landed after the cursor moved on).
+     */
+    private MediaItem retainedStillItem() {
+        if (playback.player() != null || index < 0 || index >= siblings.size()) return null;
+        return retained.owner(siblings.get(index));
+    }
+
+    /**
+     * {@link #retainedStillItem()}, but when the current item is a still whose
+     * own frame isn't retained (still decoding, or failed), says so in the
+     * status bar instead of acting silently on nothing — or on another item's
+     * pixels.
+     */
+    private MediaItem requireRetainedStill(String action) {
+        MediaItem still = retainedStillItem();
+        if (still == null && playback.player() == null && index >= 0 && index < siblings.size()
+                && siblings.get(index).kind() == MediaKind.IMAGE) {
+            statusLabel.setText(siblings.get(index).fileName() + " — cannot " + action
+                    + " until its decoded image is shown");
+        }
+        return still;
+    }
+
+    /** Drops the retained frames and the path they belong to. */
+    private void clearRetainedStill() {
+        retained.clear();
     }
 
     /**
@@ -3077,8 +3117,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                 PixelFormat.getByteBgraPreInstance());
         service.cancelSuperResolution();
         superResolutionBusy = false;
-        lastMasterFrame = null;
-        lastUprightFrame = null;
+        clearRetainedStill();
         enhancedUprightFrame = null;
         updateSuperResolutionState();
         updateCropButtonState();
@@ -3284,6 +3323,9 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     /** Exports the visible original/enhanced still with all edits baked into PNG. */
     public void exportBakedPng() {
+        // The controller's generic "select one still" would misdescribe an
+        // image whose decode simply hasn't landed yet; say that instead.
+        if (requireRetainedStill("export") == null) return;
         bakedPngExportController.exportCurrent();
     }
 
@@ -3324,21 +3366,31 @@ public final class ViewerWindow implements AppShell.ShellView {
      * Releases the on-screen item's native handles before it is moved: if the
      * item being moved is the one currently playing, end playback so its source
      * file is closed. On Windows an open file cannot be moved or renamed, so the
-     * decoder must let go first; {@link #stopPlayback()} blocks until the
-     * playback thread has returned and released its native resources. Runs on the
-     * FX thread just before the async move launches.
+     * decoder must let go first. {@link #stopPlayback()} does not wait for the
+     * playback thread, so this returns when it — and any earlier closed player
+     * still holding a moving file — has let go; the move awaits that off the FX
+     * thread ({@link MoveController}). Runs on the FX thread just before the
+     * async move launches.
      *
      * <p>Also called by the browser's and mosaic's move hosts: leaving the
      * viewer only pauses playback (so returning to the same item resumes), so
      * a video watched here stays open until a move — from any view — asks for
      * its file back.</p>
+     *
+     * <p>The selection may name a folder above the file, or the archive it is
+     * played out of ({@link PlaybackClaim#affects}). A preparation still in
+     * flight (autoplay extracting on the file-op thread, no player yet) is
+     * invalidated the same way: the claim ends, so its completion closes the
+     * prepared player instead of starting it at the old path.</p>
      */
-    void releaseBeforeMove(List<Path> moving) {
-        if (player == null || index < 0 || index >= siblings.size()) return;
-        Path current = siblings.get(index).path();
-        if (moving.contains(current)) {
-            stopPlayback();
-        }
+    CompletableFuture<Void> releaseBeforeMove(List<Path> moving) {
+        return playback.takeBack(moving, currentPath(), ArchivePaths::hostArchive,
+                this::stopPlayback);
+    }
+
+    /** The on-screen item's path, or {@code null} with none. */
+    private Path currentPath() {
+        return index >= 0 && index < siblings.size() ? siblings.get(index).path() : null;
     }
 
     /**
@@ -3380,6 +3432,7 @@ public final class ViewerWindow implements AppShell.ShellView {
 
     private void onPlayToggled() {
         MediaItem item = siblings.get(index);
+        VideoPlayer player = playback.player();
         if (playButton.isSelected()) {
             if (player == null) {
                 startPlayback(item);
@@ -3396,18 +3449,15 @@ public final class ViewerWindow implements AppShell.ShellView {
                 // A preparation future may still be extracting an archive
                 // entry. Invalidate its session so completion cannot start a
                 // player after the user has switched Play off.
-                playSession++;
-                playbackPath = null;
+                playback.end();
             }
         }
     }
 
     private void startPlayback(MediaItem item) {
-        int session = ++playSession;
+        int session = playback.begin(item.path());
         playDurationMicros = -1;
         playPositionMicros = 0;
-        playbackPath = item.path();
-        playbackProven = false;
 
         // Honor the persisted user rotation: the presenter bakes it into each
         // frame (free on the GPU for the GL paths, a per-frame permutation for
@@ -3417,35 +3467,36 @@ public final class ViewerWindow implements AppShell.ShellView {
         int turns = rotationStore.quarterTurns(item.path());
         boolean swapDims = (turns & 1) == 1;
 
-        var presenter = new FallbackVideoSink(imageView, turns);
-        var sink = new VideoPlayer.FrameSink() {
+        var presenter = new FallbackVideoSink(imageView, turns,
+                io.github.ghosthack.mediabrowser.VideoPresentation.current());
+        var sink = new ObservedFrameSink(presenter, new ObservedFrameSink.Observer() {
             private long lastStatusMicros = Long.MIN_VALUE;
 
             @Override
-            public void begin(int width, int height, long durationMicros) {
-                presenter.begin(width, height, durationMicros);
+            public void begun(int width, int height, long durationMicros) {
                 int dw = swapDims ? height : width;
                 int dh = swapDims ? width : height;
                 Platform.runLater(() -> {
-                    if (session != playSession) return;
+                    if (!playback.isLive(session)) return;
                     hideLoadingIndicator();
-                    playbackProven = true;
+                    playback.markProven();
                     playDurationMicros = durationMicros;
                     placeholder.setText("");
                     presenterLabel.setText(presenter.activePresenter());
+                    presenterLabel.getTooltip().setText(presenter.glFailure() == null
+                            ? PRESENTER_TOOLTIP
+                            : PRESENTER_TOOLTIP + "\nGL unavailable: " + presenter.glFailure());
                     statusLabel.setText(item.fileName() + " — " + dw + " × "
                             + dh + " — playing");
                 });
             }
 
             @Override
-            public void frame(MemorySegment bgra, int width, int height,
-                              long positionMicros) {
-                presenter.frame(bgra, width, height, positionMicros);
+            public void presented(long positionMicros) {
                 if (positionMicros - lastStatusMicros < 250_000) return;
                 lastStatusMicros = positionMicros;
                 Platform.runLater(() -> {
-                    if (session != playSession) return;
+                    if (!playback.isLive(session)) return;
                     playPositionMicros = positionMicros;
                     statusLabel.setText(item.fileName() + " — playing — "
                             + timecode(positionMicros)
@@ -3453,16 +3504,11 @@ public final class ViewerWindow implements AppShell.ShellView {
                                     ? " / " + timecode(playDurationMicros) : ""));
                 });
             }
-
-            @Override
-            public void close() {
-                presenter.close();
-            }
-        };
+        });
 
         service.newVideoPlayer(item.path(), sink,
                 () -> Platform.runLater(() -> {
-                    if (session != playSession) return;
+                    if (!playback.isLive(session)) return;
                     if (repeatToggle.isSelected()) {
                         repeatPlayback(item);
                     } else {
@@ -3474,7 +3520,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                     finishPlaybackError(session, item, error);
                 }))
                 .whenComplete((prepared, error) -> Platform.runLater(() -> {
-                    if (session != playSession || !playButton.isSelected()) {
+                    if (!playback.isLive(session) || !playButton.isSelected()) {
                         if (prepared != null) prepared.close();
                         sink.close();
                         return;
@@ -3484,16 +3530,16 @@ public final class ViewerWindow implements AppShell.ShellView {
                         finishPlaybackError(session, item, error);
                         return;
                     }
-                    player = prepared;
+                    playback.attach(prepared);
                     updateSuperResolutionState();
                     updateCropButtonState();
-                    player.play();
+                    prepared.play();
                 }));
     }
 
     /** Applies a preparation/playback failure on the FX thread. */
     private void finishPlaybackError(int session, MediaItem item, Throwable error) {
-        if (session != playSession) return;
+        if (!playback.isLive(session)) return;
         hideLoadingIndicator();
         logError("Cannot play " + item.fileName(), error);
         stopPlayback();
@@ -3511,9 +3557,7 @@ public final class ViewerWindow implements AppShell.ShellView {
      * from firing after navigation or stop.
      */
     private void repeatPlayback(MediaItem item) {
-        if (player != null) {
-            player.close();
-            player = null;
+        if (playback.closePlayer(null) != null) {
             updateSuperResolutionState();
             updateCropButtonState();
         }
@@ -3527,12 +3571,11 @@ public final class ViewerWindow implements AppShell.ShellView {
     private void pausePlayback() {
         if (!playButton.isSelected()) return;
         playButton.setSelected(false);
-        if (player == null) {
-            playSession++;
-            playbackPath = null;
+        if (playback.player() == null) {
+            playback.end();
             return;
         }
-        player.pause();
+        playback.player().pause();
         statusLabel.setText(siblings.get(index).fileName() + " — paused at "
                 + timecode(playPositionMicros));
     }
@@ -3543,9 +3586,12 @@ public final class ViewerWindow implements AppShell.ShellView {
     }
 
     /**
-     * Ends any playback session; safe to call when none is active. With
+     * Ends any playback session; safe to call when none is active. Does not
+     * wait for the playback thread (see {@link VideoPlayer#close}): the closed
+     * player is handed to the claim until it lets go of its file. With
      * {@code fixExtension} true, a session that proved its file plays (its
-     * {@code begin()} arrived, no error) offers the released file the
+     * {@code begin()} arrived, no error: {@link PlaybackClaim#stopPlayer})
+     * offers the released file the
      * automatic extension fix once the handle is closed — the close must come
      * first, since on Windows an open file cannot be renamed. Callers pass
      * {@code false} when the file is about to be moved
@@ -3553,25 +3599,12 @@ public final class ViewerWindow implements AppShell.ShellView {
      * (the playback error hook).
      */
     private void stopPlayback(boolean fixExtension) {
-        Path played = playbackPath;
-        boolean proven = playbackProven;
-        playbackPath = null;
-        playbackProven = false;
-        playSession++;
+        playback.end();
         playButton.setSelected(false);
         presenterLabel.setText("");
-        if (player == null) {
-            updateSuperResolutionState();
-            updateCropButtonState();
-            return;
-        }
-        player.close();
-        player = null;
+        playback.stopPlayer(fixExtension ? this::maybeFixExtension : null);
         updateSuperResolutionState();
         updateCropButtonState();
-        if (fixExtension && proven && played != null) {
-            maybeFixExtension(played);
-        }
     }
 
     /**
@@ -3598,7 +3631,8 @@ public final class ViewerWindow implements AppShell.ShellView {
             if (extension == null) return (Path) null; // uncertain: keep the name
             try {
                 return FileOps.renameInPlaceWithAutoRename(path,
-                        path.getFileName() + "." + extension);
+                        path.getFileName() + "." + extension,
+                        SidecarCarrier.of(rotationStore, aaeStore));
             } catch (java.io.IOException e) {
                 throw new UncheckedIOException(e);
             }

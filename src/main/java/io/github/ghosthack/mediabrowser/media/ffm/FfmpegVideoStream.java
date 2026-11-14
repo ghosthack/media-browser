@@ -51,6 +51,8 @@ final class FfmpegVideoStream implements VideoStream {
 
     private long ptsMicros = -1;
     private int srcW = -1, srcH = -1, srcFmt = -1;
+    /** The colour tags last stated to {@link #sws}; {@code MIN_VALUE} forces a restate. */
+    private int srcColorspace = Integer.MIN_VALUE, srcColorRange = Integer.MIN_VALUE;
     private boolean packetPending, draining, ended, closed;
 
     // Hardware decode (HwDecode policy): the device reference, the hw pixel
@@ -262,7 +264,8 @@ final class FfmpegVideoStream implements VideoStream {
             return null;
         }
         return new VideoStream.GpuFrame(pixelBuffer, width, height, containerTurns,
-                ff.frameColorspace(frame) == 1 /* AVCOL_SPC_BT709 */,
+                UntaggedMatrix.resolve(ff.frameColorspace(frame), ff.frameWidth(frame),
+                        ff.frameHeight(frame)) == UntaggedMatrix.AVCOL_SPC_BT709,
                 ff.frameColorRange(frame) == 2 /* AVCOL_RANGE_JPEG */);
     }
 
@@ -308,11 +311,16 @@ final class FfmpegVideoStream implements VideoStream {
                 }
                 continue;
             }
-            int r = ff.readFrame(ctx, pkt);
-            if (r < 0) {
+            int r = FfmpegReads.readFrame(ff, ctx, pkt);
+            if (r == ff.averrorEof()) {
                 ff.sendPacket(cctx, MemorySegment.NULL);
                 draining = true;
                 continue;
+            }
+            if (r < 0) {
+                // An I/O or demux failure (unplugged drive, corrupt file) is
+                // an error, never "ended" — Repeat would replay it in a loop.
+                throw new MediaException("ffmpeg: read failed: " + ff.errStr(r));
             }
             if (ff.packetStreamIndex(pkt) == videoIndex && ff.packetHasPayload(pkt)) {
                 int sr = ff.sendPacket(cctx, pkt);
@@ -334,15 +342,18 @@ final class FfmpegVideoStream implements VideoStream {
 
     /** Per-frame bookkeeping at decode time: policy check, counters, pts. */
     private void frameDecoded() {
+        boolean hwActive = hwPixFmt >= 0 && ff.frameFormat(frame) == hwPixFmt;
+        // Every frame, not just the first: a mid-stream decoder reinit (SPS or
+        // resolution change) re-runs get_format, which falls back to software
+        // when the hw format is not offered.
+        if (hwRequired && !hwActive) {
+            throw new MediaException("ffmpeg: hardware decode required but the decoder"
+                    + " fell back to software (" + ff.pixFmtName(ff.frameFormat(frame)) + ")");
+        }
         if (!firstFrameSeen) {
             firstFrameSeen = true;
-            boolean hwActive = hwPixFmt >= 0 && ff.frameFormat(frame) == hwPixFmt;
             hardwareActive = hwActive;
             decodedPixelFormat = ff.pixFmtName(ff.frameFormat(frame));
-            if (hwRequired && !hwActive) {
-                throw new MediaException("ffmpeg: hardware decode required but the decoder"
-                        + " fell back to software (" + ff.pixFmtName(ff.frameFormat(frame)) + ")");
-            }
             HwDecode.recordSession(hwActive);
         }
         cpuReady = false;
@@ -382,6 +393,16 @@ final class FfmpegVideoStream implements VideoStream {
             srcW = w;
             srcH = h;
             srcFmt = fmt;
+            srcColorspace = Integer.MIN_VALUE;   // a new context: restate the tags
+        }
+        // The tags come from the decoded frame, not the hardware read-back copy:
+        // av_hwframe_transfer_data moves pixels only, not frame properties.
+        int colorspace = UntaggedMatrix.resolve(ff.frameColorspace(frame), w, h);
+        int colorRange = ff.frameColorRange(frame);
+        if (colorspace != srcColorspace || colorRange != srcColorRange) {
+            ff.swsSetSourceColor(sws, colorspace, colorRange);
+            srcColorspace = colorspace;
+            srcColorRange = colorRange;
         }
         ff.swsScale(sws, ff.frameData(src), ff.frameLinesize(src),
                 0, h, dstData, dstStride);

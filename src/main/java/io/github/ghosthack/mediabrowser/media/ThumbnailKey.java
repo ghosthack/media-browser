@@ -15,22 +15,24 @@ import java.util.HexFormat;
  * {@link ThumbnailMode} it was rendered in (FIT and FILL cache separately),
  * and the recoverable AAE geometry baked into the rendition. Changing only an
  * adjacent sidecar therefore misses the old master-only cache entry even though
- * the original image's timestamp and size correctly remain untouched.
+ * the original image's timestamp and size correctly remain untouched. The
+ * {@link io.github.ghosthack.mediabrowser.media.color.ColorPolicy} signature
+ * the pixels were rendered under is part of the identity too, so a managed and
+ * an unmanaged rendition never stand in for each other.
  * Usable as a map key directly (record equality) and, via {@link #hash()}, as a
  * stable filename for a future on-disk cache tier — both tiers share one key.
  */
 public record ThumbnailKey(Path path, long mtimeMillis, long size, int maxEdge,
-                           ThumbnailMode mode, String editSignature) {
-
-    public ThumbnailKey(Path path, long mtimeMillis, long size, int maxEdge,
-                        ThumbnailMode mode) {
-        this(path, mtimeMillis, size, maxEdge, mode, "");
-    }
+                           ThumbnailMode mode, String editSignature,
+                           String colorSignature) {
 
     public ThumbnailKey {
         path = path.toAbsolutePath().normalize();
         if (mode == null) throw new IllegalArgumentException("mode is null");
         if (editSignature == null) editSignature = "";
+        if (colorSignature == null) {
+            throw new IllegalArgumentException("colorSignature is null");
+        }
     }
 
     /**
@@ -46,7 +48,8 @@ public record ThumbnailKey(Path path, long mtimeMillis, long size, int maxEdge,
         // equality is already safe, since an archive Path carries its
         // filesystem identity.
         String material = ArchivePaths.format(path) + "\0" + mtimeMillis + "\0" + size
-                + "\0" + maxEdge + "\0" + mode + "\0" + editSignature;
+                + "\0" + maxEdge + "\0" + mode + "\0" + editSignature
+                + "\0" + colorSignature;
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
                     .digest(material.getBytes(StandardCharsets.UTF_8));

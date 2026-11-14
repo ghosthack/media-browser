@@ -76,7 +76,9 @@ final class PdfFlateImages {
 
         int predictor = parameter(descriptor, "Predictor", 1);
         boolean pngPredictor = predictor >= 10;
-        int encodedRowBytes = rowBytes + (predictor == 15 ? 1 : 0);
+        // Every PNG predictor (10..15) prefixes each row with a filter-type
+        // byte (PDF 32000-1 §7.4.4.4), not only the per-row "optimum" 15.
+        int encodedRowBytes = rowBytes + (pngPredictor ? 1 : 0);
         int inflatedLength;
         try {
             inflatedLength = Math.multiplyExact(encodedRowBytes, descriptor.height());
@@ -155,7 +157,7 @@ final class PdfFlateImages {
         return image;
     }
 
-    private static byte[] undoPngPredictor(
+    static byte[] undoPngPredictor(
             byte[] encoded,
             int height,
             int rowBytes,
@@ -167,7 +169,9 @@ final class PdfFlateImages {
         int bytesPerPixel = Math.max(1, (components * bits + 7) / 8);
         int source = 0;
         for (int y = 0; y < height; y++) {
-            int filter = predictor == 15 ? encoded[source++] & 0xff : predictor - 10;
+            // The row's own tag byte is authoritative; the Predictor value
+            // only says which filter the encoder intended to prefer.
+            int filter = encoded[source++] & 0xff;
             if (filter > 4) throw new IOException("invalid PNG predictor filter " + filter);
             int row = y * rowBytes;
             int prior = row - rowBytes;

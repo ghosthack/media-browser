@@ -26,8 +26,12 @@ import java.util.Properties;
  */
 public final class AppSettings {
 
-    private static final Path FILE = Path.of(System.getProperty("user.home"),
-            ".media-browser", "app.properties");
+    /**
+     * System property that relocates the whole application directory. The test
+     * suite points it at a throwaway per-class directory so no test can read or
+     * write the real {@code ~/.media-browser}.
+     */
+    public static final String DIR_PROPERTY = "mediabrowser.settings.dir";
     private static final String WINDOW_DECORATIONS_KEY = "window.decorations";
     private static final String UNDECORATED_RESIZABLE_KEY = "window.undecorated.resizable";
     private static final String MAXIMIZE_OVERSCAN_KEY = "window.maximize.overscan";
@@ -43,6 +47,11 @@ public final class AppSettings {
     private static final String STARTUP_TWO_WINDOW_KEY = "startup.twoWindow";
     private static final String BACKEND_KEY = "media.backend";
     private static final String DECODE_DEVICE_KEY = "decode.device";
+    private static final String UNTAGGED_MATRIX_KEY = "video.untaggedMatrix";
+    private static final String VIDEO_PRESENTER_KEY = "video.presenter";
+    private static final String VIDEO_GL_LIBRARY_KEY = "video.glLibrary";
+    private static final String VIDEO_CPU_ROTATION_KEY = "video.cpuRotation";
+    private static final String VIDEO_GL_READBACK_KEY = "video.glReadback";
     private static final String DETECTION_KEY = "media.detection";
     private static final String THEME_KEY = "ui.theme";
     private static final String ICON_PACK_KEY = "ui.iconPack";
@@ -233,6 +242,8 @@ public final class AppSettings {
     private StartupLayout startupLayout;
     private String mediaBackend;
     private String decodeDevice;
+    private String untaggedMatrix;
+    private VideoPresentation.Config videoPresentation;
     private String detectionMode;
     private Theme theme;
     private IconPack iconPack;
@@ -323,9 +334,35 @@ public final class AppSettings {
 
     private AppSettings() {}
 
+    /**
+     * The application directory: {@code ~/.media-browser}, or the
+     * {@value #DIR_PROPERTY} override when set. Resolved on every call so the
+     * override can change between test classes. Holds {@code app.properties},
+     * the album CSVs, the action log, the super-resolution runtime and the
+     * single-instance lock; the decode-layer classes that store there take it
+     * as an argument and have no home-directory default of their own.
+     */
+    public static Path appDir() {
+        String override = System.getProperty(DIR_PROPERTY);
+        if (override != null && !override.isBlank()) {
+            return Path.of(override.trim());
+        }
+        return Path.of(System.getProperty("user.home"), ".media-browser");
+    }
+
+    /** The settings file inside {@link #appDir()}. */
+    public static Path settingsFile() {
+        return appDir().resolve("app.properties");
+    }
+
+    /** The append-only action-log file inside {@link #appDir()}. */
+    public static Path actionLogFile() {
+        return appDir().resolve("action-log.jsonl");
+    }
+
     /** Reads the default settings file; missing file or bad values mean defaults. */
     public static AppSettings load() {
-        return load(FILE);
+        return load(settingsFile());
     }
 
     /**
@@ -379,6 +416,17 @@ public final class AppSettings {
         settings.mediaBackend = props.getProperty(
                 BACKEND_KEY, MediaBackend.defaultBackend().settingsValue());
         settings.decodeDevice = props.getProperty(DECODE_DEVICE_KEY, "auto");
+        settings.untaggedMatrix = props.getProperty(UNTAGGED_MATRIX_KEY, "auto");
+        VideoPresentation.Config video = VideoPresentation.Config.DEFAULT;
+        settings.videoPresentation = new VideoPresentation.Config(
+                VideoPresentation.parse(VideoPresentation.Presenter.class,
+                        props.getProperty(VIDEO_PRESENTER_KEY), video.presenter()),
+                VideoPresentation.parse(VideoPresentation.GlLibrary.class,
+                        props.getProperty(VIDEO_GL_LIBRARY_KEY), video.glLibrary()),
+                VideoPresentation.parse(VideoPresentation.CpuRotation.class,
+                        props.getProperty(VIDEO_CPU_ROTATION_KEY), video.cpuRotation()),
+                VideoPresentation.parse(VideoPresentation.GlReadback.class,
+                        props.getProperty(VIDEO_GL_READBACK_KEY), video.glReadback()));
         settings.detectionMode = props.getProperty(DETECTION_KEY, "extension");
         settings.theme = Theme.fromSettings(props.getProperty(THEME_KEY), DEFAULT_THEME);
         settings.iconPack = IconPack.fromSettings(
@@ -635,7 +683,7 @@ public final class AppSettings {
 
     /** Writes the current values back to the default settings file. */
     public void save() throws IOException {
-        save(FILE);
+        save(settingsFile());
     }
 
     /**
@@ -703,6 +751,11 @@ public final class AppSettings {
         props.setProperty(STARTUP_LAYOUT_KEY, startupLayout.name());
         props.setProperty(BACKEND_KEY, mediaBackend);
         props.setProperty(DECODE_DEVICE_KEY, decodeDevice);
+        props.setProperty(UNTAGGED_MATRIX_KEY, untaggedMatrix);
+        props.setProperty(VIDEO_PRESENTER_KEY, videoPresentation.presenter().name());
+        props.setProperty(VIDEO_GL_LIBRARY_KEY, videoPresentation.glLibrary().name());
+        props.setProperty(VIDEO_CPU_ROTATION_KEY, videoPresentation.cpuRotation().name());
+        props.setProperty(VIDEO_GL_READBACK_KEY, videoPresentation.glReadback().name());
         props.setProperty(DETECTION_KEY, detectionMode);
         props.setProperty(THEME_KEY, theme.name());
         props.setProperty(ICON_PACK_KEY, iconPack.name());
@@ -1078,6 +1131,35 @@ public final class AppSettings {
     public void setDecodeDevice(String decodeDevice) {
         this.decodeDevice = decodeDevice == null || decodeDevice.isBlank()
                 ? "auto" : decodeDevice;
+    }
+
+    /**
+     * YCbCr matrix for video frames that carry no matrix tag, on the
+     * bundled-FFmpeg backends: {@code "auto"} (default; BT.709 for HD frames,
+     * BT.601 below), {@code "bt601"} (FFmpeg's own), or {@code "bt709"}. Tagged frames
+     * always use their tag. Applied by {@code media.ffm.UntaggedMatrix}.
+     */
+    public String untaggedMatrix() {
+        return untaggedMatrix;
+    }
+
+    public void setUntaggedMatrix(String untaggedMatrix) {
+        this.untaggedMatrix = untaggedMatrix == null || untaggedMatrix.isBlank()
+                ? "auto" : untaggedMatrix;
+    }
+
+    /**
+     * Video presenter, OpenGL binding, CPU rotation and mujgl readback
+     * (default: Auto, LWJGL, Tiled, Sync). Applied by
+     * {@link VideoPresentation#configure}.
+     */
+    public VideoPresentation.Config videoPresentation() {
+        return videoPresentation;
+    }
+
+    public void setVideoPresentation(VideoPresentation.Config videoPresentation) {
+        this.videoPresentation = videoPresentation == null
+                ? VideoPresentation.Config.DEFAULT : videoPresentation;
     }
 
     /** Media detection method: {@code "extension"} (default) or {@code "content"}. */

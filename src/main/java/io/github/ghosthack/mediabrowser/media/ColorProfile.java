@@ -45,10 +45,39 @@ public final class ColorProfile {
             String name = profileName(copy).orElse("Embedded RGB ICC profile");
             String normalized = name.toLowerCase(Locale.ROOT)
                     .replace("-", "").replace("_", "").replace(" ", "");
-            boolean srgb = Arrays.equals(copy, JDK_SRGB) || normalized.contains("srgb");
+            // The name alone is not enough: "Linear sRGB" / "sRGB-elle-V4-g10"
+            // share sRGB's primaries but not its curve, and skipping their
+            // conversion shows linear data as if it were gamma-encoded.
+            boolean srgb = Arrays.equals(copy, JDK_SRGB)
+                    || (normalized.contains("srgb") && encodesLikeSrgb(profile));
             return Optional.of(new ColorProfile(copy, name, srgb));
         } catch (IllegalArgumentException ex) {
             return Optional.empty();
+        }
+    }
+
+    /** Mid-greys must come back within this of themselves for a profile to pass as sRGB. */
+    private static final float SRGB_PROBE_TOLERANCE = 12f / 255f;
+
+    /**
+     * Whether neutral greys survive a conversion to sRGB roughly unchanged. A
+     * linear curve moves mid-grey by about 60/255 and gamma 1.8 by about 19;
+     * genuine sRGB variants (v2/v4, table or parametric curve) stay within a
+     * few. A profile the JDK cannot evaluate keeps the name's verdict, as
+     * before this probe existed.
+     */
+    private static boolean encodesLikeSrgb(ICC_Profile profile) {
+        try {
+            var space = new java.awt.color.ICC_ColorSpace(profile);
+            for (float grey : new float[] {0.25f, 0.5f, 0.75f}) {
+                float[] rgb = space.toRGB(new float[] {grey, grey, grey});
+                for (float channel : rgb) {
+                    if (Math.abs(channel - grey) > SRGB_PROBE_TOLERANCE) return false;
+                }
+            }
+            return true;
+        } catch (RuntimeException unprobeable) {
+            return true;
         }
     }
 

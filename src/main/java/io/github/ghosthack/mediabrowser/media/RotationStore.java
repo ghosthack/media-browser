@@ -236,6 +236,23 @@ public final class RotationStore {
         }
     }
 
+    /**
+     * Carries {@code source}'s persisted adjustments to {@code target} once the
+     * file itself has been moved or renamed there, clearing the source entry
+     * (see {@link PicasaIniStore#moveEntry}). Goes through this store's own
+     * cached sidecars so every view sees the result without a re-read. Nothing
+     * inside an archive is ever persisted, so there is nothing to carry.
+     *
+     * @throws IOException if a sidecar cannot be read or written; both are then
+     *                     left as they were
+     */
+    public synchronized void moveEntry(Path source, Path target) throws IOException {
+        if (ArchivePaths.inArchive(source) || ArchivePaths.inArchive(target)) {
+            return;
+        }
+        delegate.moveEntry(source.toString(), target.toString());
+    }
+
     // --- internals -----------------------------------------------------------
 
     /** Toggles one packed flag bit and returns its new state. */

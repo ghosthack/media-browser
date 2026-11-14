@@ -3,9 +3,9 @@ package io.github.ghosthack.panama.media.core;
 /**
  * Common RGB-family pixel formats shared across image decode modules.
  * <p>
- * Most panama-media image modules decode to {@link #RGBA}. Modules with
- * domain-specific formats (e.g., dav1d's YUV planes, FFmpeg's AVPixelFormat)
- * define their own enums implementing {@link BasePixelFormat}.
+ * Most panama-media image modules decode to {@link #RGBA}. Bindings with
+ * domain-specific native formats can define their own enums implementing
+ * {@link BasePixelFormat}.
  */
 public enum PixelFormat implements BasePixelFormat {
     /** 8-bit RGBA (4 bytes per pixel, red first). */

@@ -4,16 +4,20 @@ import io.github.ghosthack.mediabrowser.media.archive.iso.IsoFileSystemProvider;
 import io.github.ghosthack.mediabrowser.media.archive.stream.StreamFileSystemProvider;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystemAlreadyExistsException;
 import java.nio.file.FileSystems;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.WeakHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.function.Consumer;
 
 /**
  * The open archives: one {@link FileSystem} per container, opened on first
@@ -71,6 +75,45 @@ public final class ArchiveMounts {
      */
     private final Map<FileSystem, Path> byFileSystem = new WeakHashMap<>();
 
+    /**
+     * Mounts taken out of {@link #byArchive} whose close has not finished,
+     * with the archive each belongs to. Until {@code close()} returns, the
+     * provider still hands the dying filesystem to anyone re-opening that
+     * archive, so {@link #mount} waits these out instead of adopting one.
+     */
+    private final Map<FileSystem, Closing> closing = new IdentityHashMap<>();
+
+    private record Closing(Path archive, CountDownLatch done) {}
+
+    /**
+     * Files and folders being moved, renamed or trashed (see {@link #fence});
+     * a container at or under one is not mounted until its fence is lifted.
+     * A list, not a set: two moves may fence the same path.
+     */
+    private final List<Path> fences = new ArrayList<>();
+
+    /** Mount attempts before a container that keeps closing fails loudly. */
+    private static final int MAX_MOUNT_ATTEMPTS = 8;
+
+    /** Runs just before each close; a no-op outside tests. */
+    private final Consumer<FileSystem> beforeClose;
+
+    /** Runs when a mount starts waiting for a close; a no-op outside tests. */
+    private final Runnable awaitingClose;
+
+    /** Runs just before each mount opens its container; a no-op outside tests. */
+    volatile Consumer<Path> beforeOpen = key -> {};
+
+    private ArchiveMounts() {
+        this(fs -> {}, () -> {});
+    }
+
+    /** For tests that must act in the middle of a close. */
+    ArchiveMounts(Consumer<FileSystem> beforeClose, Runnable awaitingClose) {
+        this.beforeClose = beforeClose;
+        this.awaitingClose = awaitingClose;
+    }
+
     public static ArchiveMounts shared() {
         return SHARED;
     }
@@ -83,32 +126,136 @@ public final class ArchiveMounts {
      */
     public Path mount(Path archive) throws IOException {
         Path key = archive.toAbsolutePath().normalize();
-        synchronized (tableLock) {
-            FileSystem existing = byArchive.get(key);
-            if (existing != null && existing.isOpen()) return rootOf(existing);
-            if (existing != null) byArchive.remove(key);      // closed elsewhere
-        }
-
-        // Opened with no lock held: this reads and parses the container, and is
-        // exactly the work that must not block a tile paint.
-        ArchiveFormat format = ArchiveFormat.of(key)
-                .orElseThrow(() -> new IOException("not a readable archive: " + key));
-        FileSystem opened = open(format, key);
-
-        List<FileSystem> evicted;
-        synchronized (tableLock) {
-            FileSystem raced = byArchive.get(key);
-            if (raced != null && raced.isOpen() && raced != opened) {
-                // Another thread mounted it while we were opening; keep theirs.
-                closeQuietly(opened);
-                return rootOf(raced);
+        ArchiveFormat format = null;
+        for (int attempt = 1; ; attempt++) {
+            CountDownLatch pending;
+            synchronized (tableLock) {
+                FileSystem existing = byArchive.get(key);
+                if (existing != null && existing.isOpen()) return rootOf(existing);
+                if (existing != null) byArchive.remove(key);      // closed elsewhere
+                if (isFenced(key)) throw beingMoved(key);
+                pending = closingOf(key);
             }
-            byArchive.put(key, opened);
-            byFileSystem.put(opened, key);
-            evicted = takeEvictable();
+            if (pending == null) {
+                if (format == null) {
+                    ArchiveFormat known = ArchiveFormat.of(key).orElse(null);
+                    if (known == null) throw new IOException("not a readable archive: " + key);
+                    format = known;
+                }
+                // Opened with no lock held: this reads and parses the container,
+                // and is exactly the work that must not block a tile paint.
+                beforeOpen.accept(key);
+                FileSystem opened = open(format, key);
+                if (opened != null) {
+                    List<FileSystem> evicted = null;
+                    FileSystem raced = null;
+                    boolean fenced;
+                    boolean discard;
+                    synchronized (tableLock) {
+                        // A move may have fenced the container while it opened.
+                        fenced = isFenced(key);
+                        // A close may have begun since the check above, and the
+                        // provider hands out a closing mount until it finishes.
+                        pending = closingOf(key);
+                        boolean registered = false;
+                        if (!fenced && pending == null && opened.isOpen()) {
+                            raced = byArchive.get(key);
+                            if (raced == null || !raced.isOpen() || raced == opened) {
+                                raced = null;
+                                byArchive.put(key, opened);
+                                byFileSystem.put(opened, key);
+                                evicted = takeEvictable();
+                                registered = true;
+                            }
+                        }
+                        // Opened here but left out of the table (fenced, or the
+                        // old mount's close still pending): nothing would track
+                        // it, so a throw below would strand it open in the
+                        // provider, holding the file and keyed on its path.
+                        // Close it, as closing, so no mount adopts it meanwhile;
+                        // never a mount another thread owns or is closing.
+                        discard = !registered && raced == null && opened.isOpen()
+                                && !closing.containsKey(opened)
+                                && !byArchive.containsValue(opened);
+                        if (discard) closing.put(opened, new Closing(key, new CountDownLatch(1)));
+                    }
+                    if (discard) {
+                        closeTaken(List.of(opened));
+                        if (fenced) throw beingMoved(key);
+                    }
+                    if (raced != null) {
+                        // Another thread mounted it while we were opening; keep theirs.
+                        closeQuietly(opened);
+                        return rootOf(raced);
+                    }
+                    if (evicted != null) {
+                        closeTaken(evicted);                     // I/O, unlocked
+                        return rootOf(opened);
+                    }
+                }
+            }
+            if (attempt >= MAX_MOUNT_ATTEMPTS) {
+                throw new IOException("cannot open " + key + ": it was closed "
+                        + attempt + " times while mounting");
+            }
+            if (pending != null) {
+                awaitingClose.run();
+                try {
+                    pending.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new InterruptedIOException("interrupted waiting for " + key + " to close");
+                }
+            }
         }
-        for (FileSystem victim : evicted) closeQuietly(victim);   // I/O, unlocked
-        return rootOf(opened);
+    }
+
+    /** A mutation in progress on a container; lifted by {@link #close}. */
+    public interface Fence extends AutoCloseable {
+        @Override void close();
+    }
+
+    /**
+     * Refuses to mount {@code target} — or, for a directory, any container
+     * under it — until the returned fence is closed. For a move, rename or
+     * trash: between releasing a container's mount and moving the file, an
+     * in-flight thumbnail or decode would otherwise revive the mount at the
+     * old path, holding the file open (Windows refuses the move) or leaving a
+     * mount keyed on a path that no longer exists. Such a mount fails loudly
+     * ("being moved") instead. Raise the fence before {@link #release}.
+     */
+    public Fence fence(Path target) {
+        Path key = target.toAbsolutePath().normalize();
+        synchronized (tableLock) {
+            fences.add(key);
+        }
+        var lifted = new java.util.concurrent.atomic.AtomicBoolean();
+        return () -> {
+            if (!lifted.compareAndSet(false, true)) return;
+            synchronized (tableLock) {
+                fences.remove(key);
+            }
+        };
+    }
+
+    /** Whether a move fences {@code archive}; under the table lock. */
+    private boolean isFenced(Path archive) {
+        for (Path fence : fences) {
+            if (archive.startsWith(fence)) return true;
+        }
+        return false;
+    }
+
+    private static IOException beingMoved(Path archive) {
+        return new IOException("cannot open " + archive + ": it is being moved");
+    }
+
+    /** The close in progress on {@code archive}'s mount, if any; under the table lock. */
+    private CountDownLatch closingOf(Path archive) {
+        for (Closing c : closing.values()) {
+            if (c.archive().equals(archive)) return c.done();
+        }
+        return null;
     }
 
     /**
@@ -150,26 +297,45 @@ public final class ArchiveMounts {
                 var mount = mounts.next();
                 if (mount.getKey().startsWith(key)) {
                     victims.add(mount.getValue());
+                    closing.put(mount.getValue(), new Closing(mount.getKey(), new CountDownLatch(1)));
                     mounts.remove();
                 }
             }
             // byFileSystem is left alone, exactly as after an eviction.
         }
-        for (FileSystem victim : victims) closeQuietly(victim);   // I/O, unlocked
+        closeTaken(victims);                                      // I/O, unlocked
+    }
+
+    /**
+     * Runs {@code action} while holding the mount table's lock; for tests that
+     * must prove a path does not wait on it.
+     */
+    void whileHoldingTableLock(Runnable action) {
+        synchronized (tableLock) {
+            action.run();
+        }
     }
 
     /** Closes every mount; for shutdown and tests. */
     public void closeAll() {
-        List<FileSystem> open;
+        List<FileSystem> open = new ArrayList<>();
         synchronized (tableLock) {
-            open = new ArrayList<>(byArchive.values());
+            for (var mount : byArchive.entrySet()) {
+                open.add(mount.getValue());
+                closing.put(mount.getValue(), new Closing(mount.getKey(), new CountDownLatch(1)));
+            }
             byArchive.clear();
             // byFileSystem is left alone: paths handed out before the close must
             // still be revivable, exactly as after an eviction.
         }
-        for (FileSystem fs : open) closeQuietly(fs);
+        closeTaken(open);
     }
 
+    /**
+     * Opens {@code key}, or adopts the provider's mount when another thread
+     * won the race to open it; null when that mount vanished in between (its
+     * close completed), for the caller to try again.
+     */
     private static FileSystem open(ArchiveFormat format, Path key) throws IOException {
         try {
             return switch (format) {
@@ -184,7 +350,6 @@ public final class ArchiveMounts {
             FileSystem existing = format == ArchiveFormat.ISO || format == ArchiveFormat.CUE
                     ? IsoFileSystemProvider.instance().mounted(key)
                     : StreamFileSystemProvider.instance().mounted(key);
-            if (existing == null) throw new IOException("cannot open " + key, e);
             return existing;
         }
     }
@@ -200,12 +365,34 @@ public final class ArchiveMounts {
         for (Path key : keys) {
             if (byArchive.size() <= MAX_MOUNTS) break;
             FileSystem fs = byArchive.remove(key);
-            if (fs != null) victims.add(fs);
+            if (fs != null) {
+                victims.add(fs);
+                closing.put(fs, new Closing(key, new CountDownLatch(1)));
+            }
         }
         return victims;
     }
 
-    private static void closeQuietly(FileSystem fs) {
+    /**
+     * Closes mounts taken out of the table (each registered in
+     * {@link #closing}), then lets any mount waiting on them proceed.
+     */
+    private void closeTaken(List<FileSystem> victims) {
+        for (FileSystem victim : victims) {
+            try {
+                closeQuietly(victim);
+            } finally {
+                Closing done;
+                synchronized (tableLock) {
+                    done = closing.remove(victim);
+                }
+                if (done != null) done.done().countDown();
+            }
+        }
+    }
+
+    private void closeQuietly(FileSystem fs) {
+        beforeClose.accept(fs);
         try {
             fs.close();
         } catch (IOException | UnsupportedOperationException e) {

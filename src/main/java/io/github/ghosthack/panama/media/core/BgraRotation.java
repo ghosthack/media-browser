@@ -1,16 +1,11 @@
 package io.github.ghosthack.panama.media.core;
 
 /**
- * The single BGRA quarter-turn pixel permutation shared by the panama-media
- * native bindings (Apple AVFoundation and Windows Media Foundation) to bake a
- * container's display rotation into decoded video frames and posters.
+ * A shared BGRA quarter-turn pixel permutation for baking a container's
+ * display rotation into decoded video frames and posters.
  *
- * <p>Both bindings deliberately produce the <b>exact same pixel mapping</b> as
- * the application's canonical {@code media.RasterFrames#rotateCw} (and
- * {@code ui.VideoPresenter#rotateInto}); that equivalence is pinned by a
- * cross-test ({@code BgraRotationTest}) so the still/poster/playback/user-rotation
- * paths can never silently diverge. It lives in {@code core} — which every
- * binding already depends on — rather than being copied into each binding.</p>
+ * <p>The implementation lives in {@code core} so every binding uses the same
+ * pixel mapping rather than carrying a subtly different local copy.</p>
  */
 public final class BgraRotation {
 

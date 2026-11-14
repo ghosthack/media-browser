@@ -54,7 +54,7 @@ import java.util.Objects;
  * equivalent of the predecessor's {@code suppressTargetSync} / {@code suppressQuickMoveSync}
  * / {@code suppressTreeExpansionEvents} flags.
  */
-public final class MoveDialog {
+public final class MoveDialog implements MoveController.DialogView {
 
     private final Stage stage = new Stage();
     private final MoveDialogModel model;
@@ -554,6 +554,10 @@ public final class MoveDialog {
     /** Close the dialog (called by the driver in response to a cancel/submit). */
     public void close() {
         stage.close();
+    }
+
+    public boolean isShowing() {
+        return stage.isShowing();
     }
 
     public Stage stage() {

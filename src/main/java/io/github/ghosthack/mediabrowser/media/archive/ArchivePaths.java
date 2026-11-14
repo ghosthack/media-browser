@@ -4,7 +4,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
@@ -75,12 +77,55 @@ public final class ArchivePaths {
      * the file itself can be moved, renamed or trashed. Without this the
      * reader's open handle blocks the rename on Windows, and on any platform
      * the mount would survive keyed on the old path, failing every later read.
-     * A no-op for a target nothing is held on; a later browse at the new
-     * location mounts afresh.
+     * A later browse at the new location mounts afresh.
+     *
+     * <p>Until the returned fence is closed, nothing re-mounts those
+     * containers: a thumbnail or decode already in flight that tries to
+     * revive one fails loudly instead of re-opening the file mid-move. Close
+     * it once the mutation is done, whether or not it succeeded.</p>
      */
-    public static void releaseForMutation(Path target) {
-        ArchiveMounts.shared().release(target);
-        ArchiveEntryCache.shared().invalidateHostedUnder(target);
+    public static ArchiveMounts.Fence releaseForMutation(Path target) {
+        return releaseForMutation(ArchiveMounts.shared(), ArchiveEntryCache.shared(), target);
+    }
+
+    /**
+     * {@link #releaseForMutation(Path)} over the given layer. A release that
+     * throws (a provider's {@code close()} failing unchecked) lifts the fence
+     * before propagating: the caller never receives it to close, and left up
+     * it would refuse every later mount under {@code target} until restart.
+     */
+    static ArchiveMounts.Fence releaseForMutation(ArchiveMounts mounts, ArchiveEntryCache cache,
+                                                  Path target) {
+        ArchiveMounts.Fence fence = mounts.fence(target);
+        try {
+            mounts.release(target);
+            cache.invalidateHostedUnder(target);
+        } catch (RuntimeException | Error e) {
+            fence.close();
+            throw e;
+        }
+        return fence;
+    }
+
+    /** {@link #releaseForMutation(Path)} for each target, as one fence. */
+    public static ArchiveMounts.Fence releaseForMutation(List<Path> targets) {
+        return releaseForMutation(ArchiveMounts.shared(), ArchiveEntryCache.shared(), targets);
+    }
+
+    /**
+     * {@link #releaseForMutation(List)} over the given layer; a target that
+     * fails lifts the fences already raised for the targets before it.
+     */
+    static ArchiveMounts.Fence releaseForMutation(ArchiveMounts mounts, ArchiveEntryCache cache,
+                                                  List<Path> targets) {
+        var fences = new ArrayList<ArchiveMounts.Fence>(targets.size());
+        try {
+            for (Path target : targets) fences.add(releaseForMutation(mounts, cache, target));
+        } catch (RuntimeException | Error e) {
+            fences.forEach(ArchiveMounts.Fence::close);
+            throw e;
+        }
+        return () -> fences.forEach(ArchiveMounts.Fence::close);
     }
 
     /**
@@ -178,16 +223,29 @@ public final class ArchivePaths {
      * The path denoted by {@code text}, mounting the container when the text
      * carries a {@code !/} locator.
      *
-     * @return empty when the container cannot be opened or the text is not a
-     *         usable path at all; the caller reports "not a folder" as it
-     *         would for any bad input
+     * <p>{@code !/} is legal in a real name, so the container is the shortest
+     * prefix before a {@code !/} that is an archive file on disk: a folder named
+     * {@code Help!} is walked through, not mistaken for one. Text with no such
+     * prefix is a plain path.</p>
+     *
+     * @return empty when the container cannot be opened — including one named
+     *         like an archive that no longer exists (a moved disc image, an
+     *         unplugged volume) — when the text names both an archive entry
+     *         and a real file (an {@code a.zip} beside an {@code a.zip!}
+     *         folder), or when it is not a usable path at all; the caller
+     *         reports "not a folder" as it would for any bad input
      */
     public static Optional<Path> parse(String text) {
         if (text == null || text.isBlank()) return Optional.empty();
         String trimmed = text.trim();
-        int mark = trimmed.indexOf(SEPARATOR);
         try {
-            if (mark < 0) return Optional.of(Path.of(trimmed));
+            int mark = archiveMark(trimmed);
+            Path plain = Path.of(trimmed);
+            if (mark < 0) {
+                return !Files.exists(plain) && namesAMissingArchive(trimmed)
+                        ? Optional.empty() : Optional.of(plain);
+            }
+            if (Files.exists(plain)) return Optional.empty();      // ambiguous
             Path archive = Path.of(trimmed.substring(0, mark));
             String inside = trimmed.substring(mark + SEPARATOR.length());
             Path root = ArchiveMounts.shared().mount(archive);
@@ -195,6 +253,43 @@ public final class ArchivePaths {
         } catch (IOException | InvalidPathException e) {
             return Optional.empty();
         }
+    }
+
+    /**
+     * Index of the first {@code !/} in {@code text} whose prefix is a regular
+     * file named like an archive, or -1 when there is none.
+     */
+    private static int archiveMark(String text) {
+        for (int mark = text.indexOf(SEPARATOR); mark >= 0;
+                mark = text.indexOf(SEPARATOR, mark + 1)) {
+            Path prefix;
+            try {
+                prefix = Path.of(text.substring(0, mark));
+            } catch (InvalidPathException e) {
+                continue;
+            }
+            if (ArchiveFormat.looksLikeArchive(prefix) && Files.isRegularFile(prefix)) {
+                return mark;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Whether some {@code !/} in {@code text} follows a name that looks like
+     * an archive but does not exist on disk.
+     */
+    private static boolean namesAMissingArchive(String text) {
+        for (int mark = text.indexOf(SEPARATOR); mark >= 0;
+                mark = text.indexOf(SEPARATOR, mark + 1)) {
+            try {
+                Path prefix = Path.of(text.substring(0, mark));
+                if (ArchiveFormat.looksLikeArchive(prefix) && !Files.exists(prefix)) return true;
+            } catch (InvalidPathException e) {
+                // not a path: no archive named here
+            }
+        }
+        return false;
     }
 
     /**
@@ -207,11 +302,24 @@ public final class ArchivePaths {
      * costs a re-open of the container and is invisible to the user, which is
      * the point: navigating back into an archive browsed a while ago should
      * just work.</p>
+     *
+     * @throws IOException when the container cannot be re-mounted (moved,
+     *         deleted, now unreadable); never hands back the dead path
      */
-    public static Path revive(Path path) {
+    public static Path revive(Path path) throws IOException {
         if (path == null || !inArchive(path)) return path;
         if (path.getFileSystem().isOpen()) return path;
-        return parse(format(path)).orElse(path);
+        Path host = hostArchive(path).orElseThrow();
+        Path root;
+        try {
+            root = ArchiveMounts.shared().mount(host);
+        } catch (IOException e) {
+            throw new IOException("its archive was closed and cannot be re-opened: "
+                    + e.getMessage(), e);
+        }
+        String inside = path.toAbsolutePath().normalize().toString();
+        if (inside.startsWith("/")) inside = inside.substring(1);
+        return inside.isEmpty() ? root : root.resolve(inside);
     }
 
     /**

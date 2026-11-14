@@ -1194,10 +1194,10 @@ public final class AVFoundation {
                 // AVFoundation's naturalSize is the track's *display* size (pixel
                 // aspect ratio / clean aperture applied), which can differ from the
                 // actual decoded CVPixelBuffer — e.g. a 176x144 QCIF clip whose
-                // naturalSize is 320x240. The presentation pipeline (GL renderer,
-                // pooled PixelBuffer slots) is sized from width()/height() before the
-                // first frame, so it must use the true pixel dimensions or it shrinks
-                // every live frame into a corner of an oversized image. Prime frame 0
+                // naturalSize is 320x240. Callers size their output buffers from
+                // width()/height() before the first frame, so those must be the true
+                // pixel dimensions or every live frame lands in a corner of an
+                // oversized image. Prime frame 0
                 // and adopt its real size; fall back to naturalSize for an empty stream.
                 if (!primeFirstFrame()) {
                     boolean swap = (rotationTurns & 1) == 1;
@@ -1359,9 +1359,8 @@ public final class AVFoundation {
         /**
          * Copies the locked CVPixelBuffer into {@link #bgra} while applying the
          * container's {@link #rotationTurns} 90&deg; clockwise rotation, via the
-         * shared {@link BgraRotation#rotate} permutation (pinned to match
-         * {@code RasterFrames.rotateCw} / {@code VideoPresenter.rotateInto}, so
-         * playback, the poster and the user rotation layer all agree). The source
+         * shared {@link BgraRotation#rotate} permutation, so live frames match
+         * the transform-baked poster from {@link AVFoundation#extractFrame}. The source
          * is bulk-read honoring the buffer's row stride, then bulk-written.
          */
         private void rotateCopy(MemorySegment base, long srcStride, int srcH) {

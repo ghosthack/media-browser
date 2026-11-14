@@ -3,8 +3,7 @@ package io.github.ghosthack.panama.media.mediafoundation;
 /**
  * Audio metadata returned by {@link MediaFoundation#getAudioInfo}.
  *
- * <p>Mirrors the AVFoundation {@code AudioInfo} record, except the sample rate
- * is an {@code int} here: Media Foundation exposes
+ * <p>The sample rate is an {@code int}: Media Foundation exposes
  * {@code MF_MT_AUDIO_SAMPLES_PER_SECOND} as a {@code UINT32}, so there is no
  * sub-Hz precision to preserve.</p>
  *

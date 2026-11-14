@@ -62,6 +62,16 @@ final class MultiWindowShell extends AppShell {
     private final StageStyle stageStyle;
 
     MultiWindowShell(Stage primaryStage, AppSettings settings) {
+        this(primaryStage, settings, Platform::exit);
+    }
+
+    /**
+     * Package-local seam: {@code exit} stands in for {@link Platform#exit} as
+     * the last step of closing the browser, so a test can observe the quit
+     * (and that the auxiliary windows were already hidden) without ending
+     * the toolkit.
+     */
+    MultiWindowShell(Stage primaryStage, AppSettings settings, Runnable exit) {
         super(settings);
         this.settings = settings;
         this.stageStyle = WindowChrome.stageStyle(settings.windowDecorations());
@@ -80,6 +90,23 @@ final class MultiWindowShell extends AppShell {
         // "leave full screen" or "back to the opener".
         viewer.setFullScreenExitKeyCombination(KeyCombination.NO_MATCH);
         viewer.setFullScreenExitHint("");
+        // The browser is the main window: closing it (✕, Close Window, the OS)
+        // quits the app even while the mosaic or viewer is still up, which
+        // the platform's implicit exit alone would not. The aux windows are
+        // hidden first so their views deactivate (playback releases its
+        // native resources); hiding one of them on its own never quits.
+        quitWhenClosed(primaryStage.showingProperty(), () -> {
+            stages.get(AppView.MOSAIC).hide();
+            stages.get(AppView.VIEWER).hide();
+            exit.run();
+        });
+    }
+
+    /** Runs {@code quit} each time {@code mainShowing} goes from shown to hidden. */
+    static void quitWhenClosed(ObservableValue<Boolean> mainShowing, Runnable quit) {
+        mainShowing.addListener((o, was, showing) -> {
+            if (was && !showing) quit.run();
+        });
     }
 
     private void initStage(AppView v, int width, int height, String title) {

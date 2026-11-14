@@ -2,6 +2,7 @@ package io.github.ghosthack.mediabrowser.gl;
 
 import org.lwjgl.glfw.GLFWErrorCallback;
 import org.lwjgl.opengl.GL;
+import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GLCapabilities;
 
 import java.lang.foreign.MemorySegment;
@@ -49,8 +50,8 @@ import static org.lwjgl.opengl.GL30.glGenFramebuffers;
  * {@code glfwTerminate} and window creation) is a process-global, main-thread-
  * affine library with no internal locking. Each renderer, though, is built and
  * closed on a fresh per-video playback thread, and two playback sessions can
- * briefly overlap (a video switch whose {@code player.close()} hits its join
- * timeout, repeat/autoplay churn, or fast held-arrow browsing). Initialising or
+ * overlap (a video switch: {@code player.close()} does not wait for the old
+ * thread, repeat/autoplay churn, or fast held-arrow browsing). Initialising or
  * terminating GLFW per-instance from those threads then races — two threads
  * register the same Win32 helper window class, and one session's
  * {@code glfwTerminate()} frees the other's live window/context — corrupting the
@@ -135,7 +136,10 @@ public final class GlfwVideoRenderer implements AutoCloseable {
      * Renders one tightly packed BGRA frame ({@code width × height}) and reads
      * the (post-rotation) result back into {@code dst} (capacity at least
      * outWidth*outHeight*4 — the same total bytes — position 0, top-down BGRA
-     * rows). Mirrors {@code gl.GlVideoRenderer#render(MemorySegment, ByteBuffer)}.
+     * rows). Mirrors {@code gl.GlVideoRenderer#render(MemorySegment, ByteBuffer)},
+     * including its per-frame {@code glGetError} check: after a Windows driver
+     * reset (TDR) the readback fails and this throws a MediaException rather
+     * than presenting stale pixels. GLFW itself exposes no context-loss signal.
      */
     public void render(MemorySegment bgraFrame, ByteBuffer dst) {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
@@ -153,6 +157,7 @@ public final class GlfwVideoRenderer implements AutoCloseable {
         glEnd();
 
         glReadPixels(0, 0, outWidth, outHeight, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, dst);
+        GlFrameCheck.afterReadback(GL11::glGetError, "GlfwVideoRenderer");
     }
 
     /**

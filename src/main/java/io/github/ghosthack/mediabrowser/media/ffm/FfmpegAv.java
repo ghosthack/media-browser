@@ -300,11 +300,15 @@ final class FfmpegAv {
                 }
                 continue;
             }
-            int r = ff.readFrame(ctx, pkt);
-            if (r < 0) {
+            int r = FfmpegReads.readFrame(ff, ctx, pkt);
+            if (r == ff.averrorEof()) {
                 ff.sendPacket(cctx, MemorySegment.NULL);
                 draining = true;
                 continue;
+            }
+            if (r < 0) {
+                // A read failure is an error, never a quietly empty poster.
+                throw new MediaException("ffmpeg: read failed: " + ff.errStr(r));
             }
             if (ff.packetStreamIndex(pkt) == vIdx && ff.packetHasPayload(pkt)) {
                 int sr = ff.sendPacket(cctx, pkt);
@@ -485,11 +489,14 @@ final class FfmpegAv {
                     }
                     continue;
                 }
-                int r = ff.readFrame(ctx, pkt);
-                if (r < 0) {
+                int r = FfmpegReads.readFrame(ff, ctx, pkt);
+                if (r == ff.averrorEof()) {
                     ff.sendPacket(cctx, MemorySegment.NULL);
                     draining = true;
                     continue;
+                }
+                if (r < 0) {
+                    throw new MediaException("ffmpeg: tile read failed: " + ff.errStr(r));
                 }
                 int streamIndex = ff.packetStreamIndex(pkt);
                 if (!placements.containsKey(streamIndex) || !ff.packetHasPayload(pkt)) {
@@ -805,6 +812,7 @@ final class FfmpegAv {
                     + ff.pixFmtName(fmt) + " " + w + "x" + h);
         }
         try {
+            ff.swsSetSourceColor(sws, ff.frameColorspace(frame), ff.frameColorRange(frame));
             // Padded so swscale's SIMD tail over-write stays inside the
             // allocation (see Ffm.allocateSwscaleBgraDst); only the exact
             // dstW*dstH*4 prefix is read back into the frame.

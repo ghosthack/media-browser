@@ -189,8 +189,9 @@ public final class AaeSidecar {
      * Creates or updates {@code aaeFile} with an axis-aligned crop in the
      * upright master's pixel space. Only the sidecar is written: the image file
      * is never opened for writing. An existing modern AAE keeps its other JSON
-     * adjustments and plist fields; an unreadable or legacy AAE is rejected so
-     * unknown edit data is never destroyed.
+     * adjustments and plist fields; an unreadable or legacy AAE, or one whose
+     * recorded master dimensions differ from {@code masterWidth}×{@code masterHeight},
+     * is rejected so unknown or Apple-authored edit data is never destroyed.
      *
      * <p>The replacement is written to a sibling temporary file and renamed
      * over the sidecar atomically where the filesystem supports it.</p>
@@ -244,6 +245,18 @@ public final class AaeSidecar {
         } else {
             metadata = new LinkedHashMap<>();
             root.put("metadata", metadata);
+        }
+        // The recorded master is the coordinate space of every other kept
+        // adjustment (straighten, effects). Re-labelling it would silently
+        // re-scale an Apple-authored edit, so a different master is refused.
+        int recordedWidth = intOf(metadata, "masterWidth", 0);
+        int recordedHeight = intOf(metadata, "masterHeight", 0);
+        if (existingDocument != null && (recordedWidth > 0 || recordedHeight > 0)
+                && (recordedWidth != masterWidth || recordedHeight != masterHeight)) {
+            throw new IOException("Refusing to rewrite " + aaeFile.getFileName()
+                    + ": it records a " + recordedWidth + "x" + recordedHeight
+                    + " master, but the decoded image is " + masterWidth + "x"
+                    + masterHeight);
         }
         metadata.put("masterWidth", masterWidth);
         metadata.put("masterHeight", masterHeight);

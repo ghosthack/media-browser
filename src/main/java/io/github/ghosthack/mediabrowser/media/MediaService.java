@@ -5,10 +5,12 @@ import io.github.ghosthack.mediabrowser.media.archive.ArchiveFormat;
 import io.github.ghosthack.mediabrowser.media.archive.ArchiveInfo;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.archive.stream.StreamFileSystemProvider.PdfMrcView;
+import io.github.ghosthack.mediabrowser.media.color.ColorPolicy;
 import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionEngine;
 import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionModel;
 
 import java.io.IOException;
+import java.nio.file.ClosedFileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -32,6 +34,8 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
@@ -84,7 +88,14 @@ public final class MediaService implements AutoCloseable {
     private volatile long latestVisualRequestedNanos;
     /** Last generated thumbnail and playback route have independent lifetimes. */
     private volatile MediaEngineTrace latestThumbnailTrace;
-    private volatile MediaEngineTrace latestPlaybackTrace;
+    /**
+     * Each player writes its traces from its own thread, and a closed one can
+     * finish long after the next session started (a decoder stuck in native
+     * code): the session number keeps its late trace from replacing a newer
+     * session's.
+     */
+    private final AtomicReference<SessionTrace> latestPlaybackTrace = new AtomicReference<>();
+    private final AtomicLong playbackSessions = new AtomicLong();
     private final LongAdder staleVisualRequests = new LongAdder();
     private volatile DetectionMode detectionMode = DetectionMode.FILE_EXTENSION;
     private volatile boolean folderPreviewSniff;
@@ -155,7 +166,12 @@ public final class MediaService implements AutoCloseable {
                 t.setDaemon(true);
                 return t;
             });
-    private final SuperResolutionEngine superResolution = new SuperResolutionEngine();
+    /**
+     * Unconfigured (never ready, refuses to enhance) until the app hands it a
+     * directory through {@link #setSuperResolutionDir}: the decode layer has
+     * no application directory of its own and must not default to the home.
+     */
+    private volatile SuperResolutionEngine superResolution = new SuperResolutionEngine(null);
 
     /**
      * Thumbnails run on their own bounded pool, separate from the single
@@ -348,12 +364,13 @@ public final class MediaService implements AutoCloseable {
 
     public CompletableFuture<MediaProbe> probe(Path file) {
         return CompletableFuture.supplyAsync(() -> {
-            Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
-            if (mrc.isPresent()) return PdfMrcMedia.probe(file, mrc.get());
-            rejectIfEmpty(file);
-            MediaProbe decoded = facade.probe(decodable(file));
-            return EpubEntryDetails.preserveProbe(
-                    file, PdfEntryDetails.preserveProbe(file, decoded));
+            Path read = live(file);
+            Optional<PdfMrcView> mrc = PdfMrcMedia.view(read);
+            if (mrc.isPresent()) return relabel(file, PdfMrcMedia.probe(read, mrc.get()));
+            rejectIfEmpty(read);
+            MediaProbe decoded = facade.probe(decodable(read));
+            return relabel(file, EpubEntryDetails.preserveProbe(
+                    read, PdfEntryDetails.preserveProbe(read, decoded)));
         }, executor);
     }
 
@@ -373,6 +390,15 @@ public final class MediaService implements AutoCloseable {
         return CompletableFuture.supplyAsync(
                 () -> superResolution.enhance(frame, model, progress),
                 superResolutionExecutor);
+    }
+
+    /**
+     * Where super resolution installs its verified runtime and models, inside
+     * the application directory. Called once at startup, before any use.
+     */
+    public void setSuperResolutionDir(Path dir) {
+        superResolution.cancelCurrent();
+        superResolution = new SuperResolutionEngine(dir);
     }
 
     /** Stops the currently running native enhancement, if any. */
@@ -414,6 +440,57 @@ public final class MediaService implements AutoCloseable {
      * archive path throughout: cache keys, probes and the UI all continue to
      * identify the entry by where it really lives, not by its temporary copy.</p>
      */
+    /** Revives attempted when an archive keeps closing under a thumbnail's key read. */
+    private static final int MAX_REVIVE_ATTEMPTS = 3;
+
+    /** Runs after a thumbnail's revive, before its key is read; a no-op outside tests. */
+    volatile Consumer<Path> afterThumbnailRevive = read -> {};
+
+    /** Runs as a queued thumbnail generation starts; a no-op outside tests. */
+    volatile Runnable beforeThumbnailGeneration = () -> {};
+
+    /** Runs once a new generation is in flight, before its cleanup is attached; tests only. */
+    volatile Consumer<CompletableFuture<Thumbnail>> afterThumbnailGenerationQueued = f -> {};
+
+    /**
+     * {@code file} on a live mount, for reading: an archive entry's mount may
+     * have closed since the path was handed out (eviction past the cap, a
+     * move's release, shutdown), and every pre-dispatch check — the empty-file
+     * stat, the PDF/EPUB descriptors — reads through it. Results stay keyed on
+     * the caller's {@code file} (see {@link #relabel}).
+     *
+     * @throws MediaException when the container cannot be re-mounted
+     */
+    private static Path live(Path file) {
+        try {
+            return ArchivePaths.revive(file);
+        } catch (IOException e) {
+            throw new MediaException("cannot read " + file.getFileName() + ": "
+                    + e.getMessage(), e);
+        }
+    }
+
+    /** {@code probe} keyed on {@code file}, the caller's path, not a re-mounted twin. */
+    private static MediaProbe relabel(Path file, MediaProbe probe) {
+        if (probe.path() == file) return probe;
+        return new MediaProbe(file, probe.kind(), probe.container(), probe.fileSize(),
+                probe.durationMicros(), probe.bitRate(), probe.width(), probe.height(),
+                probe.videoCodec(), probe.frameRate(), probe.audioCodec(),
+                probe.sampleRate(), probe.channels(), probe.pixelDescription(),
+                probe.colorProfile());
+    }
+
+    private static VisualResult relabel(Path file, VisualResult visual) {
+        MediaProbe probe = relabel(file, visual.probe());
+        return probe == visual.probe() ? visual : new VisualResult(probe, visual.frame());
+    }
+
+    private static Metadata relabel(Path file, Metadata metadata) {
+        if (metadata.path() == file) return metadata;
+        return new Metadata(file, metadata.provider(), metadata.status(),
+                metadata.message(), metadata.groups());
+    }
+
     private static Path decodable(Path file) {
         try {
             return ArchiveEntryCache.shared().materialize(file);
@@ -457,12 +534,13 @@ public final class MediaService implements AutoCloseable {
         Throwable failure = null;
         long dispatchStarted = trace.beginAttempt();
         try {
-            Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
+            Path read = live(file);
+            Optional<PdfMrcView> mrc = PdfMrcMedia.view(read);
             if (mrc.isPresent()) {
                 long engineStarted = System.nanoTime();
                 try {
-                    VisualResult result = PdfMrcMedia.load(
-                            file, mrc.get(), facade, MediaService::decodable);
+                    VisualResult result = relabel(file, PdfMrcMedia.load(
+                            read, mrc.get(), facade, MediaService::decodable));
                     trace.engineWork(System.nanoTime() - engineStarted);
                     trace.succeeded("PDF MRC composite", dispatchStarted, "Foreground visual");
                     return result;
@@ -472,9 +550,9 @@ public final class MediaService implements AutoCloseable {
                     throw e;
                 }
             }
-            rejectIfEmpty(file);
+            rejectIfEmpty(read);
             long inputStarted = trace.beginAttempt();
-            Path input = decodable(file);
+            Path input = decodable(read);
             trace.succeeded(ArchivePaths.inArchive(file)
                             ? "Archive materialization" : "Direct filesystem input",
                     inputStarted, ArchivePaths.inArchive(file)
@@ -488,7 +566,7 @@ public final class MediaService implements AutoCloseable {
                 trace.engineWork(System.nanoTime() - engineStarted);
             }
             long postStarted = System.nanoTime();
-            VisualResult result = preserveVisual(file, decoded);
+            VisualResult result = relabel(file, preserveVisual(read, decoded));
             trace.postProcess(System.nanoTime() - postStarted);
             return result;
         } catch (RuntimeException | Error e) {
@@ -531,7 +609,16 @@ public final class MediaService implements AutoCloseable {
     }
 
     public Optional<MediaEngineTrace> latestPlaybackTrace() {
-        return Optional.ofNullable(latestPlaybackTrace);
+        return Optional.ofNullable(latestPlaybackTrace.get()).map(SessionTrace::trace);
+    }
+
+    private record SessionTrace(long session, MediaEngineTrace trace) {}
+
+    /** Records {@code trace} unless a newer playback session already recorded one. */
+    private void recordPlaybackTrace(long session, MediaEngineTrace trace) {
+        latestPlaybackTrace.accumulateAndGet(new SessionTrace(session, trace),
+                (current, next) -> current == null || next.session() >= current.session()
+                        ? next : current);
     }
 
     /**
@@ -548,12 +635,13 @@ public final class MediaService implements AutoCloseable {
             // produce a decode failure, when what it actually has to say is its
             // volume identity.
             if (ArchivePaths.isArchiveFile(file)) return archiveMetadata(file);
-            Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
-            if (mrc.isPresent()) return PdfMrcMedia.metadata(file, mrc.get());
-            rejectIfEmpty(file);
-            Metadata decoded = facade.readMetadata(decodable(file));
-            return EpubEntryDetails.preserveMetadata(
-                    file, PdfEntryDetails.preserveMetadata(file, decoded));
+            Path read = live(file);
+            Optional<PdfMrcView> mrc = PdfMrcMedia.view(read);
+            if (mrc.isPresent()) return relabel(file, PdfMrcMedia.metadata(read, mrc.get()));
+            rejectIfEmpty(read);
+            Metadata decoded = facade.readMetadata(decodable(read));
+            return relabel(file, EpubEntryDetails.preserveMetadata(
+                    read, PdfEntryDetails.preserveMetadata(read, decoded)));
         }, metadataExecutor);
     }
 
@@ -592,14 +680,35 @@ public final class MediaService implements AutoCloseable {
             MediaTelemetry.recordThumbnailKeyQueue(MediaTelemetry.elapsedSince(queuedAt));
 
             long keyStart = MediaTelemetry.now();
+            // Read once: the rendition is keyed by this policy and generated
+            // pinned to it, so a viewer override changing it meanwhile can
+            // neither leak into nor be masked by another policy's tiles.
+            ColorPolicy.Snapshot color = ColorPolicy.snapshot();
             AaeStore edits = aaeStore;
-            AaeSidecar aae = edits == null ? null : edits.forImage(file).orElse(null);
-            ThumbnailKey key = keyFor(file, maxEdge, mode, aae);
+            AaeSidecar aae = null;
+            ThumbnailKey key = null;
+            for (int attempt = 1; key == null; attempt++) {
+                Path read = live(file);
+                afterThumbnailRevive.accept(read);
+                aae = edits == null ? null : edits.forImage(read).orElse(null);
+                try {
+                    key = keyFor(file, read, maxEdge, mode, aae, color);
+                } catch (ClosedFileSystemException e) {
+                    // Closed again between the revive and the stat: re-mount,
+                    // bounded like ArchiveEntryCache's own re-mounting.
+                    if (attempt >= MAX_REVIVE_ATTEMPTS) {
+                        throw new MediaException("cannot read " + file.getFileName()
+                                + ": its archive closed " + attempt
+                                + " times while reading it", e);
+                    }
+                }
+            }
             MediaTelemetry.recordThumbnailKeyStat(MediaTelemetry.elapsedSince(keyStart));
+            AaeSidecar edit = aae;
 
-            boolean bakeAae = aae != null && aae.hasGeometry();
+            boolean bakeAae = edit != null && edit.hasGeometry();
             ThumbnailMode decodeMode = bakeAae ? ThumbnailMode.FIT : mode;
-            int decodeEdge = bakeAae ? aaeSourceEdge(maxEdge, mode, aae) : maxEdge;
+            int decodeEdge = bakeAae ? aaeSourceEdge(maxEdge, mode, edit) : maxEdge;
 
             Thumbnail hit = thumbnailCache.peek(key);
             if (hit != null) {
@@ -609,22 +718,28 @@ public final class MediaService implements AutoCloseable {
             }
 
             AtomicBoolean created = new AtomicBoolean(false);
+            ThumbnailKey stored = key;
             CompletableFuture<Thumbnail> future = inFlight.computeIfAbsent(key, k -> {
                 created.set(true);
-                CompletableFuture<Thumbnail> generated = CompletableFuture.supplyAsync(() -> {
+                return CompletableFuture.supplyAsync(() -> {
                     MediaEngineTrace.Recorder trace = MediaEngineTrace.Recorder.recording(
                             mediaEngine, file, "Thumbnail " + mode, requestedNanos);
                     Throwable failure = null;
                     long loadStart = MediaTelemetry.now();
                     try {
-                        Optional<PdfMrcView> mrc = PdfMrcMedia.view(file);
+                        // Queued behind other tiles since the key was read: the
+                        // mount may have closed meanwhile, so revive again.
+                        beforeThumbnailGeneration.run();
+                        Path read = live(file);
+                        Optional<PdfMrcView> mrc = PdfMrcMedia.view(read);
                         if (mrc.isPresent()) {
                             long engineStarted = trace.beginAttempt();
                             try {
                                 Thumbnail result = thumbnailCache.get(k,
-                                        () -> applyAaeThumbnail(PdfMrcMedia.thumbnail(
-                                                mrc.get(), facade, MediaService::decodable,
-                                                decodeEdge, decodeMode), aae, maxEdge, mode));
+                                        () -> ColorPolicy.pinned(color,
+                                                () -> applyAaeThumbnail(PdfMrcMedia.thumbnail(
+                                                        mrc.get(), facade, MediaService::decodable,
+                                                        decodeEdge, decodeMode), edit, maxEdge, mode)));
                                 trace.succeeded("PDF MRC composite", engineStarted,
                                         thumbnailDetail(result, maxEdge, mode));
                                 trace.engineWork(MediaTelemetry.elapsedSince(loadStart));
@@ -634,9 +749,9 @@ public final class MediaService implements AutoCloseable {
                                 throw e;
                             }
                         }
-                        rejectIfEmpty(file);
+                        rejectIfEmpty(read);
                         long inputStarted = trace.beginAttempt();
-                        Path input = decodable(file);
+                        Path input = decodable(read);
                         trace.succeeded(ArchivePaths.inArchive(file)
                                         ? "Archive materialization" : "Direct filesystem input",
                                 inputStarted, ArchivePaths.inArchive(file)
@@ -644,9 +759,10 @@ public final class MediaService implements AutoCloseable {
                         long engineStarted = System.nanoTime();
                         try {
                             return thumbnailCache.get(k,
-                                    () -> applyAaeThumbnail(facade.loadThumbnail(
-                                            input, decodeEdge, decodeMode, trace),
-                                            aae, maxEdge, mode));
+                                    () -> ColorPolicy.pinned(color,
+                                            () -> applyAaeThumbnail(facade.loadThumbnail(
+                                                    input, decodeEdge, decodeMode, trace),
+                                                    edit, maxEdge, mode)));
                         } finally {
                             trace.engineWork(System.nanoTime() - engineStarted);
                         }
@@ -662,13 +778,18 @@ public final class MediaService implements AutoCloseable {
                         latestThumbnailTrace = trace.finish(failure);
                     }
                 }, thumbnailExecutor);
-                generated.whenComplete((r, e) -> {
-                    inFlight.remove(k, generated);
+            });
+            if (created.get()) {
+                // Attached only once the entry is stored: a generation that
+                // already finished (fast failure, cache hit) would otherwise
+                // run the cleanup inside computeIfAbsent, miss the entry, and
+                // pin the finished future — a failure never regenerating.
+                afterThumbnailGenerationQueued.accept(future);
+                future.whenComplete((r, e) -> {
+                    inFlight.remove(stored, future);
                     thumbnailsProcessed.increment();
                 });
-                return generated;
-            });
-            if (!created.get()) {
+            } else {
                 MediaTelemetry.recordThumbnailInFlightJoin();
                 thumbnailInFlightJoins.increment();
             }
@@ -1076,18 +1197,32 @@ public final class MediaService implements AutoCloseable {
         return kind == MediaKind.IMAGE || kind == MediaKind.VIDEO;
     }
 
-    /** Builds the cache key, stamping the file and recoverable sidecar geometry. */
-    private static ThumbnailKey keyFor(Path file, int maxEdge, ThumbnailMode mode,
-                                       AaeSidecar aae) {
+    /**
+     * The cache key for {@code file}, statting {@code read}, its live twin, and
+     * stamping recoverable sidecar geometry and the color policy it renders under.
+     *
+     * @throws ClosedFileSystemException when {@code read}'s archive closed
+     *         before the stat, for the caller to revive and retry
+     */
+    private static ThumbnailKey keyFor(Path file, Path read, int maxEdge, ThumbnailMode mode,
+                                       AaeSidecar aae, ColorPolicy.Snapshot color) {
         long mtime = 0, size = -1;
         try {
-            BasicFileAttributes attrs = Files.readAttributes(file, BasicFileAttributes.class);
+            BasicFileAttributes attrs = Files.readAttributes(read, BasicFileAttributes.class);
             mtime = attrs.lastModifiedTime().toMillis();
             size = attrs.size();
-        } catch (IOException ignored) {
+        } catch (IOException e) {
+            // The ISO reader reports a closed image as a plain IOException;
+            // judged by the mount, as in ArchiveEntryCache.
+            if (!read.getFileSystem().isOpen()) {
+                var closed = new ClosedFileSystemException();
+                closed.initCause(e);
+                throw closed;
+            }
             // unreadable stat: key on path + maxEdge + mode alone (mtime 0, size -1)
         }
-        return new ThumbnailKey(file, mtime, size, maxEdge, mode, aaeSignature(aae));
+        return new ThumbnailKey(file, mtime, size, maxEdge, mode, aaeSignature(aae),
+                color.signature());
     }
 
     /** Stable cache identity for precisely the AAE geometry this service bakes. */
@@ -1171,13 +1306,14 @@ public final class MediaService implements AutoCloseable {
                                                          Runnable onEnded,
                                                          Consumer<Throwable> onError) {
         long requestedNanos = System.nanoTime();
+        long session = playbackSessions.incrementAndGet();
         return CompletableFuture.supplyAsync(() -> {
             long inputStarted = System.nanoTime();
             Path input = decodable(file);
             long inputElapsedNanos = System.nanoTime() - inputStarted;
             return new VideoPlayer(facade, mediaEngine, file, input, requestedNanos,
                     inputElapsedNanos, sink, onEnded, onError,
-                    trace -> latestPlaybackTrace = trace);
+                    trace -> recordPlaybackTrace(session, trace));
         }, fileOpExecutor);
     }
 

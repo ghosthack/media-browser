@@ -171,6 +171,12 @@ public final class MediaFoundation {
             FunctionDescriptor.of(ValueLayout.JAVA_INT,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
 
+    /** IMFAttributes::SetBlob -- vtable[26]. */
+    public static final MethodHandle IMFAttributes_SetBlob = LINKER.downcallHandle(
+            FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+
     /** IMFAttributes::GetUINT32 -- vtable[7] */
     public static final MethodHandle IMFAttributes_GetUINT32 = LINKER.downcallHandle(
             FunctionDescriptor.of(ValueLayout.JAVA_INT,
@@ -209,6 +215,23 @@ public final class MediaFoundation {
 
     /** IMFSample::ConvertToContiguousBuffer -- vtable[41] */
     public static final MethodHandle IMFSample_ConvertToContiguousBuffer = LINKER.downcallHandle(
+            FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+
+    /** IMFSample::GetBufferByIndex -- vtable[40]. */
+    public static final MethodHandle IMFSample_GetBufferByIndex = LINKER.downcallHandle(
+            FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS));
+
+    /** IMFDXGIBuffer::GetResource -- vtable[3]. */
+    public static final MethodHandle IMFDXGIBuffer_GetResource = LINKER.downcallHandle(
+            FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS));
+
+    /** IMFDXGIBuffer::GetSubresourceIndex -- vtable[4]. */
+    public static final MethodHandle IMFDXGIBuffer_GetSubresourceIndex = LINKER.downcallHandle(
             FunctionDescriptor.of(ValueLayout.JAVA_INT,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
@@ -308,10 +331,28 @@ public final class MediaFoundation {
     public static final MemorySegment MFVideoFormat_P010;
     /** MFVideoFormat_AV1 ('AV01' — compressed AV1 low-overhead OBU bitstream). */
     public static final MemorySegment MFVideoFormat_AV01;
+    /** MFVideoFormat_VP80 ('VP80' — compressed VP8 bitstream). */
+    public static final MemorySegment MFVideoFormat_VP80;
+    /** MFVideoFormat_VP90 ('VP90' — compressed VP9 bitstream). */
+    public static final MemorySegment MFVideoFormat_VP90;
     /** MFVideoFormat_H264 ('H264' — compressed H.264 Annex-B byte stream). */
     public static final MemorySegment MFVideoFormat_H264;
     /** MFVideoFormat_HEVC ('HEVC' — compressed H.265 Annex-B byte stream). */
     public static final MemorySegment MFVideoFormat_HEVC;
+    /** MFVideoFormat_MPEG2 — compressed MPEG-2 Video elementary-stream pictures. */
+    public static final MemorySegment MFVideoFormat_MPEG2;
+    /** MFVideoFormat_MP4V — ISO MPEG-4 Part 2 Visual. */
+    public static final MemorySegment MFVideoFormat_MP4V;
+    /** MFVideoFormat_M4S2 — MPEG-4 Part 2 Advanced Simple Profile. */
+    public static final MemorySegment MFVideoFormat_M4S2;
+    /** MFVideoFormat_MJPG — Motion JPEG. */
+    public static final MemorySegment MFVideoFormat_MJPG;
+    /** MFVideoFormat_H263 — H.263 video. */
+    public static final MemorySegment MFVideoFormat_H263;
+    /** MFVideoFormat_WMV3 — Windows Media Video 9 / VC-1 family. */
+    public static final MemorySegment MFVideoFormat_WMV3;
+    /** MFVideoFormat_WVC1 — VC-1 Advanced Profile. */
+    public static final MemorySegment MFVideoFormat_WVC1;
     /** MF_MT_DEFAULT_STRIDE {644B4E48-1E02-4516-B0EB-C01CA9D49AC6} (UINT32, signed stride). */
     public static final MemorySegment MF_MT_DEFAULT_STRIDE;
     /** MF_MT_INTERLACE_MODE {E2724BB8-E676-4806-B4B2-A8D6EFB44CCD} (UINT32, MFVideoInterlace_*). */
@@ -324,6 +365,10 @@ public final class MediaFoundation {
     /** MF_MT_VIDEO_ROTATION {C380465D-2271-428C-9B83-ECEA3B4A85C1} (UINT32, MFVideoRotationFormat). */
     public static final MemorySegment MF_MT_VIDEO_ROTATION;
     public static final MemorySegment MF_MT_FRAME_RATE;
+    /** MF_MT_MPEG_SEQUENCE_HEADER (BLOB), used by VC-1 Advanced Profile. */
+    public static final MemorySegment MF_MT_MPEG_SEQUENCE_HEADER;
+    /** MF_MT_USER_DATA (BLOB), used by WMV3/VC-1 Simple and Main profiles. */
+    public static final MemorySegment MF_MT_USER_DATA;
     /** MF_MT_AUDIO_NUM_CHANNELS {37E48BF5-645E-4C5B-89DE-ADA9E29B696A} (UINT32). */
     public static final MemorySegment MF_MT_AUDIO_NUM_CHANNELS;
     /** MF_MT_AUDIO_SAMPLES_PER_SECOND {5FAEEAE7-0290-4C31-9E8A-C534F68D9DBA} (UINT32). */
@@ -344,6 +389,8 @@ public final class MediaFoundation {
     public static final MemorySegment CLSID_CMSH264DecoderMFT;
     public static final MemorySegment IID_IMFTransform;
     public static final MemorySegment IID_ID3D10Multithread;
+    public static final MemorySegment IID_IMFDXGIBuffer;
+    public static final MemorySegment IID_ID3D11Texture2D;
     public static final MemorySegment GUID_NULL;
 
     // -- Availability --------------------------------------------------------
@@ -375,8 +422,17 @@ public final class MediaFoundation {
         MemorySegment gMfVideoFormatNv12 = null;
         MemorySegment gMfVideoFormatP010 = null;
         MemorySegment gMfVideoFormatAv01 = null;
+        MemorySegment gMfVideoFormatVp80 = null;
+        MemorySegment gMfVideoFormatVp90 = null;
         MemorySegment gMfVideoFormatH264 = null;
         MemorySegment gMfVideoFormatHevc = null;
+        MemorySegment gMfVideoFormatMpeg2 = null;
+        MemorySegment gMfVideoFormatMp4v = null;
+        MemorySegment gMfVideoFormatM4s2 = null;
+        MemorySegment gMfVideoFormatMjpg = null;
+        MemorySegment gMfVideoFormatH263 = null;
+        MemorySegment gMfVideoFormatWmv3 = null;
+        MemorySegment gMfVideoFormatWvc1 = null;
         MemorySegment gMfMtDefaultStride = null;
         MemorySegment gMfMtInterlaceMode = null;
         MemorySegment gMfMtPixelAspectRatio = null;
@@ -384,6 +440,8 @@ public final class MediaFoundation {
         MemorySegment gMfMtFrameSize = null;
         MemorySegment gMfMtVideoRotation = null;
         MemorySegment gMfMtFrameRate = null;
+        MemorySegment gMfMtMpegSequenceHeader = null;
+        MemorySegment gMfMtUserData = null;
         MemorySegment gMfMtAudioNumChannels = null;
         MemorySegment gMfMtAudioSamplesPerSecond = null;
         MemorySegment gMfPdDuration = null;
@@ -395,6 +453,8 @@ public final class MediaFoundation {
         MemorySegment gClsidCmsh264 = null;
         MemorySegment gIidImfTransform = null;
         MemorySegment gIidId3d10Mt = null;
+        MemorySegment gIidImfDxgiBuffer = null;
+        MemorySegment gIidId3d11Texture2d = null;
         MemorySegment gGuidNull = null;
 
         if (IS_WINDOWS) {
@@ -496,8 +556,27 @@ public final class MediaFoundation {
                 gMfVideoFormatNv12 = Ole32.guid(g, 0x3231564E, (short) 0x0000, (short) 0x0010, mf);
                 gMfVideoFormatP010 = Ole32.guid(g, 0x30313050, (short) 0x0000, (short) 0x0010, mf);
                 gMfVideoFormatAv01 = Ole32.guid(g, 0x31305641, (short) 0x0000, (short) 0x0010, mf);
+                gMfVideoFormatVp80 = Ole32.guid(g, 0x30385056, (short) 0x0000, (short) 0x0010, mf);
+                gMfVideoFormatVp90 = Ole32.guid(g, 0x30395056, (short) 0x0000, (short) 0x0010, mf);
                 gMfVideoFormatH264 = Ole32.guid(g, 0x34363248, (short) 0x0000, (short) 0x0010, mf);
                 gMfVideoFormatHevc = Ole32.guid(g, 0x43564548, (short) 0x0000, (short) 0x0010, mf);
+                // MFVideoFormat_MPEG2 == MEDIASUBTYPE_MPEG2_VIDEO.
+                gMfVideoFormatMpeg2 = Ole32.guid(g,
+                        0xE06D8026, (short) 0xDB46, (short) 0x11CF,
+                        new byte[]{(byte) 0xB4, (byte) 0xD1, 0x00, (byte) 0x80,
+                                   0x5F, 0x6C, (byte) 0xBB, (byte) 0xEA});
+                gMfVideoFormatMp4v = Ole32.guid(g, 0x5634504D, (short) 0x0000,
+                        (short) 0x0010, mf);
+                gMfVideoFormatM4s2 = Ole32.guid(g, 0x3253344D, (short) 0x0000,
+                        (short) 0x0010, mf);
+                gMfVideoFormatMjpg = Ole32.guid(g, 0x47504A4D, (short) 0x0000,
+                        (short) 0x0010, mf);
+                gMfVideoFormatH263 = Ole32.guid(g, 0x33363248, (short) 0x0000,
+                        (short) 0x0010, mf);
+                gMfVideoFormatWmv3 = Ole32.guid(g, 0x33564D57, (short) 0x0000,
+                        (short) 0x0010, mf);
+                gMfVideoFormatWvc1 = Ole32.guid(g, 0x31435657, (short) 0x0000,
+                        (short) 0x0010, mf);
                 gMfMtDefaultStride = Ole32.guid(g, 0x644B4E48, (short) 0x1E02, (short) 0x4516,
                         new byte[]{(byte) 0xB0, (byte) 0xEB, (byte) 0xC0, 0x1C,
                                    (byte) 0xA9, (byte) 0xD4, (byte) 0x9A, (byte) 0xC6});
@@ -516,6 +595,14 @@ public final class MediaFoundation {
                         new byte[]{(byte) 0x9B, (byte) 0x83, (byte) 0xEC, (byte) 0xEA, 0x3B, 0x4A, (byte) 0x85, (byte) 0xC1});
                 gMfMtFrameRate = Ole32.guid(g, 0xc459a2e8, (short) 0x3d2c, (short) 0x4e44,
                         new byte[]{(byte) 0xb1, 0x32, (byte) 0xfe, (byte) 0xe5, 0x15, 0x6c, 0x7b, (byte) 0xb0});
+                gMfMtMpegSequenceHeader = Ole32.guid(g,
+                        0x3C036DE7, (short) 0x3AD0, (short) 0x4C9E,
+                        new byte[]{(byte) 0x92, 0x16, (byte) 0xEE, 0x6D,
+                                   0x6A, (byte) 0xC2, 0x1C, (byte) 0xB3});
+                gMfMtUserData = Ole32.guid(g,
+                        0xB6BC765F, (short) 0x4C3B, (short) 0x40A4,
+                        new byte[]{(byte) 0xBD, 0x51, 0x25, 0x35,
+                                   (byte) 0xB6, 0x6F, (byte) 0xE0, (byte) 0x9D});
                 gMfMtAudioNumChannels = Ole32.guid(g, 0x37e48bf5, (short) 0x645e, (short) 0x4c5b,
                         new byte[]{(byte) 0x89, (byte) 0xde, (byte) 0xad, (byte) 0xa9, (byte) 0xe2, (byte) 0x9b, 0x69, 0x6a});
                 gMfMtAudioSamplesPerSecond = Ole32.guid(g, 0x5faeeae7, (short) 0x0290, (short) 0x4c31,
@@ -543,6 +630,14 @@ public final class MediaFoundation {
                         new byte[]{(byte) 0x80, 0x00, (byte) 0xba, 0x59, (byte) 0x89, 0x61, 0x41, 0x4d});
                 gIidId3d10Mt = Ole32.guid(g, 0x9B7E4E00, (short) 0x342C, (short) 0x4106,
                         new byte[]{(byte) 0xA1, (byte) 0x9F, 0x4F, 0x27, 0x04, (byte) 0xF6, (byte) 0x89, (byte) 0xF0});
+                gIidImfDxgiBuffer = Ole32.guid(g,
+                        0xe7174cfa, (short) 0x1c9e, (short) 0x48b1,
+                        new byte[]{(byte) 0x88, 0x66, 0x62, 0x62,
+                                   0x26, (byte) 0xbf, (byte) 0xc2, 0x58});
+                gIidId3d11Texture2d = Ole32.guid(g,
+                        0x6f15aaf2, (short) 0xd208, (short) 0x4e89,
+                        new byte[]{(byte) 0x9a, (byte) 0xb4, 0x48, (byte) 0x95,
+                                   0x35, (byte) 0xd3, 0x4f, (byte) 0x9c});
                 gGuidNull = g.allocate(16); // zero-initialized
 
                 available = true;
@@ -572,8 +667,17 @@ public final class MediaFoundation {
         MFVideoFormat_NV12 = gMfVideoFormatNv12;
         MFVideoFormat_P010 = gMfVideoFormatP010;
         MFVideoFormat_AV01 = gMfVideoFormatAv01;
+        MFVideoFormat_VP80 = gMfVideoFormatVp80;
+        MFVideoFormat_VP90 = gMfVideoFormatVp90;
         MFVideoFormat_H264 = gMfVideoFormatH264;
         MFVideoFormat_HEVC = gMfVideoFormatHevc;
+        MFVideoFormat_MPEG2 = gMfVideoFormatMpeg2;
+        MFVideoFormat_MP4V = gMfVideoFormatMp4v;
+        MFVideoFormat_M4S2 = gMfVideoFormatM4s2;
+        MFVideoFormat_MJPG = gMfVideoFormatMjpg;
+        MFVideoFormat_H263 = gMfVideoFormatH263;
+        MFVideoFormat_WMV3 = gMfVideoFormatWmv3;
+        MFVideoFormat_WVC1 = gMfVideoFormatWvc1;
         MF_MT_DEFAULT_STRIDE = gMfMtDefaultStride;
         MF_MT_INTERLACE_MODE = gMfMtInterlaceMode;
         MF_MT_PIXEL_ASPECT_RATIO = gMfMtPixelAspectRatio;
@@ -581,6 +685,8 @@ public final class MediaFoundation {
         MF_MT_FRAME_SIZE = gMfMtFrameSize;
         MF_MT_VIDEO_ROTATION = gMfMtVideoRotation;
         MF_MT_FRAME_RATE = gMfMtFrameRate;
+        MF_MT_MPEG_SEQUENCE_HEADER = gMfMtMpegSequenceHeader;
+        MF_MT_USER_DATA = gMfMtUserData;
         MF_MT_AUDIO_NUM_CHANNELS = gMfMtAudioNumChannels;
         MF_MT_AUDIO_SAMPLES_PER_SECOND = gMfMtAudioSamplesPerSecond;
         MF_PD_DURATION = gMfPdDuration;
@@ -592,6 +698,8 @@ public final class MediaFoundation {
         CLSID_CMSH264DecoderMFT = gClsidCmsh264;
         IID_IMFTransform = gIidImfTransform;
         IID_ID3D10Multithread = gIidId3d10Mt;
+        IID_IMFDXGIBuffer = gIidImfDxgiBuffer;
+        IID_ID3D11Texture2D = gIidId3d11Texture2d;
         GUID_NULL = gGuidNull;
 
         AVAILABLE = available;
@@ -780,10 +888,9 @@ public final class MediaFoundation {
      * (the duration is still reported when available). This is the path a
      * caller uses to tell an audio-only file from a silent video container.</p>
      *
-     * <p><b>Cover art is intentionally not surfaced here.</b> v1 returns no
-     * embedded artwork — matching the AVFoundation facade, which also returns no
-     * cover art for audio. {@code extractCoverArt} via {@code MF_PD_THUMBNAIL}
-     * is a documented stretch goal, not part of this binding.</p>
+     * <p><b>Cover art is intentionally not surfaced here.</b>
+     * {@code extractCoverArt} via {@code MF_PD_THUMBNAIL} is outside this
+     * binding's current API.</p>
      *
      * @param arena the arena for temporary native allocations
      * @param path  file system path to the media file
@@ -817,7 +924,7 @@ public final class MediaFoundation {
      * allocated in the caller's {@code arena}. The pixel data is valid for the
      * arena's lifetime.
      *
-     * <h2>Pipeline Fallback Chain</h2>
+     * <h4>Pipeline Fallback Chain</h4>
      * <p>
      * This method implements a fallback chain for maximum compatibility:
      * <ol>
@@ -1140,8 +1247,6 @@ public final class MediaFoundation {
 
     /**
      * Opens a sequential BGRA frame reader over the file's first video track.
-     * Mirrors the Apple {@code AVFoundation.FrameStream} that the video player
-     * wraps.
      *
      * <p>Internally this drives the same manual MFT pipeline that
      * {@link #extractFrame} falls back to (and which actually works across the
@@ -2955,7 +3060,24 @@ public final class MediaFoundation {
                             hr = (int) IMFTransform_ProcessMessage.invokeExact(
                                     vtable(decoder, 23), decoder,
                                     MFT_MESSAGE_SET_D3D_MANAGER, dxgiManager.address());
-                            check(hr, "MFT_MESSAGE_SET_D3D_MANAGER");
+                            if (failed(hr)) {
+                                // A decoder may reject the DXGI manager (notably
+                                // on headless/virtual Windows hosts) while still
+                                // supporting software output. Hardware
+                                // acceleration is optional for this fallback
+                                // path, so continue without the D3D objects.
+                                if (DEBUG) {
+                                    System.err.println("[MF] decoder rejected D3D manager (0x"
+                                            + Integer.toHexString(hr)
+                                            + "); continuing with software decode");
+                                }
+                                release(dxgiManager);
+                                release(d3dContext);
+                                release(d3dDevice);
+                                dxgiManager = MemorySegment.NULL;
+                                d3dContext = MemorySegment.NULL;
+                                d3dDevice = MemorySegment.NULL;
+                            }
 
                             hr = (int) IMFTransform_SetInputType.invokeExact(
                                     vtable(decoder, 15), decoder, 0, nativeType, 0);

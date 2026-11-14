@@ -529,6 +529,47 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
     }
 
     @Override
+    public void swsSetSourceColor(MemorySegment sws, int colorspace, int colorRange) {
+        boolean matrixTagged = colorspace != FFmpeg.AVCOL_SPC_UNSPECIFIED()
+                && colorspace != FFmpeg.AVCOL_SPC_RGB();
+        boolean rangeTagged = colorRange == FFmpeg.AVCOL_RANGE_JPEG()
+                || colorRange == FFmpeg.AVCOL_RANGE_MPEG();
+        if (!matrixTagged && !rangeTagged) return;
+        try (Arena scratch = Arena.ofConfined()) {
+            // Read the context's current settings and hand them back unchanged,
+            // replacing only the source fields the frame actually states.
+            MemorySegment invTable = scratch.allocate(ValueLayout.ADDRESS);
+            MemorySegment table = scratch.allocate(ValueLayout.ADDRESS);
+            MemorySegment srcRange = scratch.allocate(ValueLayout.JAVA_INT);
+            MemorySegment dstRange = scratch.allocate(ValueLayout.JAVA_INT);
+            MemorySegment brightness = scratch.allocate(ValueLayout.JAVA_INT);
+            MemorySegment contrast = scratch.allocate(ValueLayout.JAVA_INT);
+            MemorySegment saturation = scratch.allocate(ValueLayout.JAVA_INT);
+            int rc = FFmpeg.sws_getColorspaceDetails(sws, invTable, srcRange, table, dstRange,
+                    brightness, contrast, saturation);
+            if (rc < 0) {
+                throw new MediaException("ffmpeg: sws_getColorspaceDetails failed (" + rc + ")");
+            }
+            // sws_getCoefficients takes the AVColorSpace value itself; the
+            // SWS_CS_* numbering differs (SMPTE170M is 6 there, 5 here).
+            MemorySegment srcMatrix = matrixTagged
+                    ? FFmpeg.sws_getCoefficients(colorspace)
+                    : invTable.get(ValueLayout.ADDRESS, 0);
+            int range = rangeTagged
+                    ? (colorRange == FFmpeg.AVCOL_RANGE_JPEG() ? 1 : 0)
+                    : srcRange.get(ValueLayout.JAVA_INT, 0);
+            rc = FFmpeg.sws_setColorspaceDetails(sws, srcMatrix, range,
+                    table.get(ValueLayout.ADDRESS, 0), dstRange.get(ValueLayout.JAVA_INT, 0),
+                    brightness.get(ValueLayout.JAVA_INT, 0), contrast.get(ValueLayout.JAVA_INT, 0),
+                    saturation.get(ValueLayout.JAVA_INT, 0));
+            if (rc < 0) {
+                throw new MediaException("ffmpeg: sws_setColorspaceDetails refused colorspace "
+                        + colorspace + ", range " + colorRange + " (" + rc + ")");
+            }
+        }
+    }
+
+    @Override
     public void swsScale(MemorySegment sws, MemorySegment srcData, MemorySegment srcLinesize,
                          int srcSliceY, int srcSliceH, MemorySegment dstData, MemorySegment dstStride) {
         FFmpeg.sws_scale(sws, srcData, srcLinesize, srcSliceY, srcSliceH, dstData, dstStride);

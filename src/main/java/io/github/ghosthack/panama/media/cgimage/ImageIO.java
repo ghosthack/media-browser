@@ -246,7 +246,7 @@ public final class ImageIO {
     /**
      * Metadata extracted from a {@code CGImageSource} properties dictionary
      * in a single open. Equivalent to calling {@link #getSize},
-     * {@link #getOrientation}, and one libexif pass per file — but
+     * {@link #getOrientation}, and a separate EXIF read per file — but
      * amortised into one {@code CGImageSourceCopyPropertiesAtIndex}.
      * <p>
      * {@code width} / {@code height} are <em>display-oriented</em> (swapped

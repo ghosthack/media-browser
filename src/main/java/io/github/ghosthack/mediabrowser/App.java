@@ -23,6 +23,7 @@ import javafx.stage.Stage;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 
 /**
@@ -49,7 +50,7 @@ public final class App extends Application {
         // Hook the session action log up to its optional on-disk JSONL mirror
         // (and, when enabled, seed the last few persisted entries back in) —
         // before any window exists, so no recorded move can miss the file.
-        ActionLog.get().attachFile(settings, new ActionLogFile());
+        ActionLog.get().attachFile(settings, new ActionLogFile(AppSettings.actionLogFile()));
         // Seed the current theme before any window builds its scene, so each
         // registers and is themed from the first frame.
         ThemeManager.get().setCurrent(settings.theme());
@@ -61,6 +62,9 @@ public final class App extends Application {
         // backends — applied before the backend binds so the first playback
         // session already honours it.
         HwDecode.configure(settings.decodeDevice());
+        io.github.ghosthack.mediabrowser.media.ffm.UntaggedMatrix.configure(settings.untaggedMatrix());
+        // Video presenter / GL library / CPU rotation, likewise per session.
+        VideoPresentation.configure(settings.videoPresentation());
         // Bridge the media layer's telemetry seam to the app-wide mosaic
         // counters before the service exists, so -Dmosaic.telemetry reports
         // include the thumbnail pipeline's off-FX stages from the start.
@@ -129,6 +133,7 @@ public final class App extends Application {
         // Photos .AAE edit (crop/straighten), composed above the decoders.
         var aaeStore = new AaeStore();
         service.setAaeStore(aaeStore);
+        service.setSuperResolutionDir(AppSettings.appDir().resolve("super-resolution"));
         // The window shell hosting the browser, mosaic and viewer views: one
         // window whose root swaps between them, or the classic separate
         // windows, per the persisted window-mode setting (see AppShell).
@@ -224,15 +229,38 @@ public final class App extends Application {
 
     @Override
     public void stop() {
-        if (service != null) service.close();
+        // The guard first: a file forwarded while the service closes would
+        // be acknowledged and then lost behind the toolkit's exit.
         if (instanceGuard != null) instanceGuard.close();
+        if (service != null) service.close();
     }
 
-    /** The launch argument, normalized — a directory, a file, or {@code null} if none was given. */
+    /**
+     * The launch argument, normalized — a directory, a file, or {@code null} if
+     * none was given or it is not a path at all (reported on stderr; the app
+     * then opens at the user home rather than failing to start).
+     */
     private Path launchArgPath() {
         var args = getParameters().getRaw();
         if (args.isEmpty()) return null;
-        return Path.of(args.getFirst()).toAbsolutePath().normalize();
+        Path path = parseLaunchArg(args.getFirst());
+        if (path == null) {
+            System.err.println("[App] ignoring launch argument, not a valid path: " + args.getFirst());
+        }
+        return path;
+    }
+
+    /**
+     * {@code raw} as a normalized absolute path, or {@code null} when it is
+     * absent or cannot be a path on this file system (e.g. it holds a NUL).
+     */
+    static Path parseLaunchArg(String raw) {
+        if (raw == null) return null;
+        try {
+            return Path.of(raw).toAbsolutePath().normalize();
+        } catch (InvalidPathException e) {
+            return null;
+        }
     }
 
     /** {@code argPath} itself if it's a directory, else the user home. */
@@ -247,10 +275,10 @@ public final class App extends Application {
         // usage, including opening several directories in separate windows)
         // must keep opening its own window, not get forwarded and dropped.
         String rawArg = args.length > 0 ? args[0] : null;
-        boolean isFileArg = rawArg != null
-                && Files.isRegularFile(Path.of(rawArg).toAbsolutePath().normalize());
+        Path argPath = parseLaunchArg(rawArg);
+        boolean isFileArg = argPath != null && Files.isRegularFile(argPath);
         if (isFileArg) {
-            var guard = SingleInstanceGuard.acquireOrForward(rawArg);
+            var guard = SingleInstanceGuard.acquireOrForward(AppSettings.appDir(), rawArg);
             if (guard.isEmpty()) return; // forwarded to the already-running instance
             instanceGuard = guard.get();
         }

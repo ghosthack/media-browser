@@ -13,7 +13,8 @@ import io.github.ghosthack.panama.media.core.Platform;
  * HRESULT checking, and wide-string helpers that Windows-specific modules
  * (WIC, Media Foundation, etc.) need.
  * <p>
- * COM vtable dispatch strategy: {@link Linker#downcallHandle(FunctionDescriptor)}
+ * COM vtable dispatch strategy:
+ * {@link Linker#downcallHandle(FunctionDescriptor, Linker.Option...)}
  * (no fixed address) returns a {@link MethodHandle} that takes an extra leading
  * {@link MemorySegment} parameter for the function pointer. At call time we read
  * the function pointer from the COM object's vtable and pass it as the first arg.

@@ -29,12 +29,14 @@ public final class FileOps {
      * Move {@code source} into {@code targetDir}, keeping its name. On a name
      * collision the name gains a {@code " (N)"} suffix before the extension
      * ({@code "photo.jpg" → "photo (1).jpg"}), trying {@code N = 1..9999}.
+     * The file's sidecars follow it ({@link #carrySidecars}).
      *
      * @return the final destination path the file now lives at
      * @throws IOException if the source is missing, no free name can be found,
-     *                     or the move itself fails
+     *                     or the move itself (sidecars included) fails
      */
-    public static Path moveWithAutoRename(Path source, Path targetDir) throws IOException {
+    public static Path moveWithAutoRename(Path source, Path targetDir, SidecarCarrier sidecars)
+            throws IOException {
         if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Source does not exist: " + source);
         }
@@ -46,6 +48,7 @@ public final class FileOps {
         }
         Path destination = availableDestination(targetDir, fileName);
         Files.move(source, destination);
+        carrySidecars(source, destination, sidecars);
         return destination;
     }
 
@@ -53,11 +56,13 @@ public final class FileOps {
      * Move-and-rename {@code source} to the exact path {@code target} (used for
      * single-file rename). Never overwrites: if {@code target} already exists
      * this throws {@link FileAlreadyExistsException}. Uses {@code ATOMIC_MOVE},
-     * falling back to a plain move (still no overwrite) across devices.
+     * falling back to a plain move (still no overwrite) across devices. The
+     * file's sidecars follow it ({@link #carrySidecars}).
      *
      * @return {@code target}
      */
-    public static Path renameMove(Path source, Path target) throws IOException {
+    public static Path renameMove(Path source, Path target, SidecarCarrier sidecars)
+            throws IOException {
         // Guarantee no-overwrite regardless of platform: ATOMIC_MOVE maps to
         // rename(2) on POSIX, which would clobber an existing regular file.
         if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
@@ -70,6 +75,7 @@ public final class FileOps {
             // fails rather than overwrites if the target appeared in between.
             Files.move(source, target);
         }
+        carrySidecars(source, target, sidecars);
         return target;
     }
 
@@ -78,13 +84,14 @@ public final class FileOps {
      * with the same {@code " (N)"} collision suffix policy as
      * {@link #moveWithAutoRename} — used by the automatic extension fix, where
      * {@code mystery → mystery.jpg} must not fail just because a
-     * {@code mystery.jpg} already exists.
+     * {@code mystery.jpg} already exists. The file's sidecars follow it
+     * ({@link #carrySidecars}).
      *
      * @return the final path the file now lives at (suffix included if one
      *         was needed)
      */
-    public static Path renameInPlaceWithAutoRename(Path source, String desiredName)
-            throws IOException {
+    public static Path renameInPlaceWithAutoRename(Path source, String desiredName,
+                                                   SidecarCarrier sidecars) throws IOException {
         if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Source does not exist: " + source);
         }
@@ -94,7 +101,33 @@ public final class FileOps {
         }
         Path destination = availableDestination(parent, desiredName);
         Files.move(source, destination);
+        carrySidecars(source, destination, sidecars);
         return destination;
+    }
+
+    /**
+     * Has {@code sidecars} follow a file that just moved from {@code source} to
+     * {@code destination}. A carrier changes nothing when it fails, so the file
+     * is moved back and the whole move fails as one — never a file that moved
+     * while its edits stayed behind. Should even the move back fail, the
+     * exception says where the file now is.
+     */
+    private static void carrySidecars(Path source, Path destination, SidecarCarrier sidecars)
+            throws IOException {
+        try {
+            sidecars.carry(source, destination);
+        } catch (IOException carry) {
+            try {
+                Files.move(destination, source);
+            } catch (IOException back) {
+                carry.addSuppressed(back);
+                throw new IOException("moved to " + destination.getFileName()
+                        + " but its sidecars could not follow (" + carry.getMessage()
+                        + ") and it could not be moved back", carry);
+            }
+            throw new IOException("its sidecars could not follow (" + carry.getMessage()
+                    + "); nothing was moved", carry);
+        }
     }
 
     /** Create {@code dir} and any missing parents (like {@code mkdir -p}). */

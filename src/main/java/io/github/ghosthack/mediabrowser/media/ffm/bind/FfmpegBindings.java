@@ -244,10 +244,11 @@ public interface FfmpegBindings {
      * Requests hardware decode on {@code cctx} before {@link #open2}: stores a
      * new reference to {@code deviceRef} in {@code hw_device_ctx} and installs
      * a {@code get_format} callback preferring {@code hwPixFmt} (first
-     * software format otherwise — the caller detects that on the first frame
-     * and applies its policy). The callback stub must outlive the codec
-     * context and may be invoked from a decoder worker thread, so
-     * {@code stubArena} must be a shared arena closed after the context.
+     * software format otherwise, also on a mid-stream decoder reinit — the
+     * caller checks every decoded frame against its policy). The callback
+     * stub must outlive the codec context and may be invoked from a decoder
+     * worker thread, so {@code stubArena} must be a shared arena closed after
+     * the context.
      */
     void requestHwDecode(Arena stubArena, MemorySegment cctx, MemorySegment deviceRef, int hwPixFmt);
 
@@ -302,6 +303,17 @@ public interface FfmpegBindings {
      */
     MemorySegment swsGetContextToBgra(int srcW, int srcH, int srcFmt,
                                       int dstW, int dstH, int flags);
+
+    /**
+     * Tells swscale the source's YCbCr matrix and range from the frame's own
+     * tags ({@code AVFrame.colorspace}, {@code AVFrame.color_range}). A bare
+     * {@code sws_getContext} converts every frame as BT.601 and takes the range
+     * from the pixel format alone, so tagged BT.709 video comes out with a
+     * colour shift (measured: up to 26/255 on green). A tag left unspecified
+     * keeps swscale's own default for that field; an RGB-matrix tag is not a
+     * YCbCr matrix and is left alone too. Throws when swscale refuses the tags.
+     */
+    void swsSetSourceColor(MemorySegment sws, int colorspace, int colorRange);
 
     void swsScale(MemorySegment sws, MemorySegment srcData, MemorySegment srcLinesize,
                   int srcSliceY, int srcSliceH, MemorySegment dstData, MemorySegment dstStride);

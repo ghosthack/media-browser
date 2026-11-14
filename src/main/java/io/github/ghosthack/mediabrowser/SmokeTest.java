@@ -36,6 +36,9 @@ public final class SmokeTest {
         // playback smoke (FFM backends only; see media.ffm.HwDecode).
         io.github.ghosthack.mediabrowser.media.ffm.HwDecode.configure(
                 System.getProperty("decode.device", "auto"));
+        // Matrix for untagged video frames, e.g. -Dvideo.untaggedMatrix=bt601.
+        io.github.ghosthack.mediabrowser.media.ffm.UntaggedMatrix.configure(
+                System.getProperty("video.untaggedMatrix", "auto"));
         try (MediaFacade facade = backend.create()) {
             System.out.println("backend: " + backend + " | native: " + facade.nativeVersions());
             for (String arg : args) {
@@ -116,7 +119,8 @@ public final class SmokeTest {
      * first-use super-resolution download.
      */
     private static void verifySuperResolutionDownloader() {
-        SuperResolutionEngine engine = new SuperResolutionEngine();
+        SuperResolutionEngine engine =
+                new SuperResolutionEngine(AppSettings.appDir().resolve("super-resolution"));
         System.out.println("Super-resolution downloader: java.net.http OK; platform supported: "
                 + engine.isSupported());
     }

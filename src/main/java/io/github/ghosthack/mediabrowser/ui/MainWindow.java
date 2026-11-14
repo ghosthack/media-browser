@@ -11,6 +11,7 @@ import io.github.ghosthack.mediabrowser.album.AlbumStore;
 import io.github.ghosthack.mediabrowser.StartupLayout;
 import io.github.ghosthack.mediabrowser.Theme;
 import io.github.ghosthack.mediabrowser.UiStyle;
+import io.github.ghosthack.mediabrowser.VideoPresentation;
 import io.github.ghosthack.mediabrowser.WindowDecorations;
 import io.github.ghosthack.mediabrowser.WindowMode;
 import io.github.ghosthack.mediabrowser.media.AaeStore;
@@ -24,6 +25,8 @@ import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
+import io.github.ghosthack.mediabrowser.media.ffm.UntaggedMatrix;
+import io.github.ghosthack.mediabrowser.media.move.SidecarCarrier;
 import io.github.ghosthack.mediabrowser.ui.icon.AppIcon;
 import io.github.ghosthack.mediabrowser.ui.icon.IconBinding;
 import io.github.ghosthack.mediabrowser.ui.icon.IconPackManager;
@@ -118,6 +121,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -145,7 +149,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private final MetadataStripController metadataStripController;
     private final BakedPngExportController bakedPngExportController;
     /** Shared album store (numbered {@code album-NNN.csv} files in the app dir). */
-    private final AlbumStore albumStore = new AlbumStore();
+    private final AlbumStore albumStore = new AlbumStore(AppSettings.appDir());
 
     private final TextField addressField = new TextField();
     private final HBox addressBar;
@@ -221,6 +225,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * for cross-thread visibility.
      */
     private volatile int scanSequence;
+    /** Drops a folder/archive target resolved off the FX thread once the user has moved on. */
+    private final NavigationRequests navigationRequests =
+            new NavigationRequests(this::currentLocation);
     private int probeSequence;
     /**
      * Content-sniff corrections streamed back from {@link MediaService#reclassify}
@@ -295,6 +302,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // Navigating a folder / .. tile in the mosaic drives the shared location
         // here; the new listing then flows back into the mosaic's grid.
         mosaic.setNavigator(this::navigateAndSync);
+        mosaic.setNavigationRequests(navigationRequests);
+        mosaic.setAlbumRefresher(focus -> {
+            if (currentAlbum != null) navigateToAlbum(currentAlbum, focus);
+        });
         if (supportsComputerLocation(System.getProperty("os.name"))) {
             mosaic.setVirtualParentHandler(this::navigateToParent);
         }
@@ -306,14 +317,15 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // The Move dialog (Cmd+M): a window-agnostic controller driven by a host
         // that exposes this window's selection, current dir, post-move focus and
         // refresh. The mosaic reuses the same controller class in Phase 6.
-        this.moveController = new MoveController(service, settings, new MoveController.Host() {
+        this.moveController = new MoveController(service, settings,
+                SidecarCarrier.of(rotationStore, aaeStore), new MoveController.Host() {
             @Override public Stage owner() { return stage(); }
             @Override public Path currentDirectory() { return currentDir; }
             @Override public MoveController.Selection currentSelection() { return currentMoveSelection(); }
             @Override public Path nextFocusAfterMove(List<Path> moving) { return MainWindow.this.nextFocusAfterMove(moving); }
             @Override public void refreshAfterMove(Path focusPath) { MainWindow.this.refreshAfterMove(focusPath); }
             @Override public void showStatus(String message) { statusLabel.setText(message); }
-            @Override public void releaseBeforeMove(List<Path> moving) { viewer.releaseBeforeMove(moving); }
+            @Override public CompletableFuture<Void> releaseBeforeMove(List<Path> moving) { return viewer.releaseBeforeMove(moving); }
         });
         this.metadataStripController = new MetadataStripController(service,
                 new MetadataStripController.Host() {
@@ -353,8 +365,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             }
         });
         tree.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
-            // skip when mirroring list-driven navigation back into the tree
-            if (sel == null) return;
+            // Skip when mirroring list-driven navigation back into the tree: the
+            // mirror deliberately selects a different node for an archive (its
+            // containing folder) or a path the tree cannot show (the deepest
+            // visible ancestor), and navigating to that would undo the move.
+            if (sel == null || mirroringIntoTree) return;
             Path selected = sel.getValue();
             if (selected == null) {
                 if (!atComputerLocation) navigateToComputer();
@@ -1113,7 +1128,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     private boolean navigate(Path dir) {
         // An archive browsed earlier may have been evicted under the mount cap;
         // reviving re-opens it so history and pending selections keep working.
-        Path target = ArchivePaths.revive(dir).toAbsolutePath().normalize();
+        Path target;
+        try {
+            target = ArchivePaths.revive(dir).toAbsolutePath().normalize();
+        } catch (IOException e) {
+            statusLabel.setText("Cannot open " + ArchivePaths.format(dir) + ": " + e.getMessage());
+            return false;
+        }
         if (!ArchivePaths.isDirectory(target)) {
             statusLabel.setText("Not a folder: " + ArchivePaths.format(target));
             return false;
@@ -1133,6 +1154,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         currentAlbumUnavailable = 0;
         currentAlbumLoading = false;
         atComputerLocation = false;
+        navigationRequests.locationChanged();
         listingFailureMessage = null;
         addressField.setText(ArchivePaths.format(target));
         statusLabel.setText("Scanning " + ArchivePaths.format(target) + "…");
@@ -1163,7 +1185,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                             return;
                         }
                         showListing(withComputerParent(target, fast), select);
-                        statusLabel.setText("Scanning " + target + "…"); // sniff still streaming
+                        statusLabel.setText("Scanning " + ArchivePaths.format(target) + "…"); // sniff still streaming
                         streamReclassification(target, fast, seq);
                     }));
         } else {
@@ -1175,7 +1197,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                             return;
                         }
                         showListing(withComputerParent(target, listing), select);
-                        statusLabel.setText(target.toString());
+                        statusLabel.setText(ArchivePaths.format(target));
                     }));
         }
         return true;
@@ -1205,6 +1227,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         currentAlbumUnavailable = 0;
         currentAlbumLoading = false;
         atComputerLocation = true;
+        navigationRequests.locationChanged();
         listingFailureMessage = null;
         addressField.setText(COMPUTER_LOCATION_NAME);
         statusLabel.setText(COMPUTER_LOCATION_NAME);
@@ -1225,6 +1248,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     /** Opens an album as one flat listing and records it as a history location. */
     private void navigateToAlbum(Album album) {
+        navigateToAlbum(album, null);
+    }
+
+    /** As {@link #navigateToAlbum(Album)}, landing the selection on {@code select} once listed. */
+    private void navigateToAlbum(Album album, Path select) {
         if (album == null) return;
         BrowserLocation previous = currentLocation();
         BrowserLocation destination = BrowserLocation.album(album);
@@ -1242,12 +1270,17 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         currentAlbumUnavailable = 0;
         currentAlbumLoading = true;
         atComputerLocation = false;
+        navigationRequests.locationChanged();
         listingFailureMessage = null;
         String location = albumLocationLabel();
         addressField.setText(location);
         statusLabel.setText("Opening " + album.name() + "…");
         countLabel.setText("");
-        showListing(List.of(), null);
+        // Re-reading the album already shown (a move or trash re-list) keeps the
+        // old listing up until the new one lands, as a folder re-list does: an
+        // interim empty listing would make the mosaic's rebuild consume its
+        // post-move focus target and viewer auto-open on nothing.
+        if (!destination.equals(previous)) showListing(List.of(), null);
         tree.getSelectionModel().clearSelection();
 
         settings.recordAlbumUse(album.fileName());
@@ -1256,8 +1289,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // Reading a scanner-sized CSV and statting/classifying its members are
         // both background work. The sequence guard makes a superseded open a
         // harmless no-op when the user navigates elsewhere before it finishes.
-        service.fileOp(() -> albumStore.entries(album))
-                .thenCompose(service::listPaths)
+        service.fileOp(() -> albumStore.members(album))
+                .thenCompose(members -> service.listPaths(members.paths())
+                        .thenApply(listing -> new MediaService.PathListing(listing.entries(),
+                                listing.unavailable() + members.unresolved())))
                 .whenComplete((listing, error) -> Platform.runLater(() -> {
                     if (seq != scanSequence || !album.equals(currentAlbum)) return;
                     currentAlbumLoading = false;
@@ -1268,7 +1303,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                         return;
                     }
                     currentAlbumUnavailable = listing.unavailable();
-                    showListing(listing.entries(), null);
+                    showListing(listing.entries(), select);
                     String message = album.name() + " · " + listing.entries().size()
                             + (listing.entries().size() == 1 ? " item" : " items");
                     if (listing.unavailable() > 0) {
@@ -1394,7 +1429,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         pendingViewerTarget = null;
         statusLabel.setText(found != null
                 ? "Not viewable: " + found.displayName()
-                : "Not found: " + target);
+                : "Not found: " + ArchivePaths.format(target));
     }
 
     /**
@@ -1418,7 +1453,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         }).whenComplete((v, error) -> Platform.runLater(() -> {
             flushReclassifications();              // apply the tail batch
             if (seq == scanSequence) {
-                statusLabel.setText(target.toString());
+                statusLabel.setText(ArchivePaths.format(target));
                 // The sniff is done for this navigation: a pending viewer
                 // target still stuck at OTHER is never getting promoted now,
                 // so stop waiting and report it instead of leaving it stuck.
@@ -1507,15 +1542,16 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * inside an archive are skipped for the tree, which shows the real
      * filesystem only — the archive itself stays selected there instead.
      */
-    private void navigateAndSync(Path dir) {
-        navigate(dir);
+    private boolean navigateAndSync(Path dir) {
+        if (!navigate(dir)) return false;   // rejected: leave the tree where it is
         if (ArchivePaths.inArchive(dir)) {
             ArchivePaths.hostArchive(dir)
                     .map(archive -> archive.toAbsolutePath().normalize().getParent())
                     .ifPresent(this::expandAndSelect);
-            return;
+            return true;
         }
         expandAndSelect(dir.toAbsolutePath().normalize());
+        return true;
     }
 
     /** Backspace / Enclosing Folder, and the viewer relaying parent navigation:
@@ -1545,28 +1581,31 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         if (backStack.isEmpty()) return;
         BrowserLocation target = backStack.pop();
         BrowserLocation current = currentLocation();
-        if (current != null) forwardStack.push(current);
-        traverseHistory(target);
+        // A target that no longer opens (deleted folder, unmountable archive) is
+        // dropped; only a move that happened earns the forward entry.
+        if (traverseHistory(target) && current != null) forwardStack.push(current);
+        updateHistoryItems();
     }
 
     private void goForward() {
         if (forwardStack.isEmpty()) return;
         BrowserLocation target = forwardStack.pop();
         BrowserLocation current = currentLocation();
-        if (current != null) backStack.push(current);
-        traverseHistory(target);
+        if (traverseHistory(target) && current != null) backStack.push(current);
+        updateHistoryItems();
     }
 
-    private void traverseHistory(BrowserLocation target) {
+    /** @return whether the browser moved to {@code target} */
+    private boolean traverseHistory(BrowserLocation target) {
         traversingHistory = true;
         try {
             if (target.isComputer()) navigateToComputer();
             else if (target.isAlbum()) navigateToAlbum(target.album());
-            else navigateAndSync(target.directory());
+            else return navigateAndSync(target.directory());
+            return true;
         } finally {
             traversingHistory = false;
         }
-        updateHistoryItems();
     }
 
     private void updateHistoryItems() {
@@ -2127,14 +2166,15 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * mirroring Escape in the viewer. Each window installs its own menu-bar
      * instance, so macOS scopes the accelerator to whichever window is focused
      * and the three copies never double-bind. Hiding the main (primary) window
-     * with nothing else showing lets the platform exit, matching its window
-     * close button.
+     * quits the app, matching its window close button: in single-window mode
+     * it is the only window, and in multi-window mode the shell exits on it
+     * even while the mosaic or viewer is still up (see {@link MultiWindowShell}).
      */
     private MenuItem buildCloseWindowItem(MenuOwner owner) {
         return action("_Close Window", keys.mod1(KeyCode.W), () -> {
             switch (owner) {
-                // Hiding the single (primary) stage lets the platform exit,
-                // matching the window's close button.
+                // Hiding the primary stage quits the app in either window
+                // mode, matching the window's close button.
                 case MAIN -> stage().hide();
                 case MOSAIC -> mosaic.closeWindow();
                 case VIEWER -> viewer.closeViewer();
@@ -2374,13 +2414,20 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     /** Puts the entry's absolute path on the system clipboard. */
     private void copyPathToClipboard(DirEntry entry) {
         if (entry == null) return;
-        // The locator form, so a path copied from inside an archive can be
-        // pasted back into the address bar and reach the same entry.
-        String path = ArchivePaths.format(entry.path().toAbsolutePath().normalize());
+        String path = copyablePath(entry.path());
         var content = new ClipboardContent();
         content.putString(path);
         Clipboard.getSystemClipboard().setContent(content);
         statusLabel.setText("Copied path: " + path);
+    }
+
+    /**
+     * The absolute path Copy Path puts on the clipboard, in every view: the
+     * locator form, so a path copied from inside an archive can be pasted back
+     * into a location bar and reach the same entry.
+     */
+    static String copyablePath(Path path) {
+        return ArchivePaths.format(path.toAbsolutePath().normalize());
     }
 
     private static AppIcon iconFor(DirEntry entry) {
@@ -2396,6 +2443,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             case OTHER -> null;
         };
     }
+
+    /** Set while {@link #expandAndSelect} moves the tree selection, so its listener does not navigate. */
+    private boolean mirroringIntoTree;
 
     private void expandAndSelect(Path target) {
         TreeItem<Path> node = tree.getRoot();
@@ -2436,7 +2486,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             }
             break; // component not visible in the tree (hidden/missing): stop here
         }
-        tree.getSelectionModel().select(node);
+        mirroringIntoTree = true;
+        try {
+            tree.getSelectionModel().select(node);
+        } finally {
+            mirroringIntoTree = false;
+        }
         tree.scrollTo(tree.getRow(node));
     }
 
@@ -2458,10 +2513,24 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 .toList());
     }
 
+    /**
+     * Where the Open Location chooser starts for {@code location}: the folder
+     * itself, or for a location inside an archive — which has no
+     * {@code java.io.File} — the folder holding the outermost archive.
+     */
+    static Path chooserStart(Path location) {
+        if (location == null) return null;
+        if (!ArchivePaths.inArchive(location)) return location;
+        return ArchivePaths.hostArchive(location)
+                .map(archive -> archive.toAbsolutePath().normalize().getParent())
+                .orElse(null);
+    }
+
     private void chooseDirectory() {
         var chooser = new DirectoryChooser();
         chooser.setTitle("Open Location");
-        if (currentDir != null) chooser.setInitialDirectory(currentDir.toFile());
+        Path start = chooserStart(currentDir);
+        if (start != null && Files.isDirectory(start)) chooser.setInitialDirectory(start.toFile());
         var dir = chooser.showDialog(stage());
         if (dir != null) navigate(dir.toPath());
     }
@@ -2731,9 +2800,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             navigateAndSync(dir);
             return;
         }
-        service.fileOp(() -> MediaService.collapseChain(dir, MAX_CHAIN_DESCENT))
-                .whenComplete((target, error) -> Platform.runLater(() ->
-                        navigateAndSync(error != null || target == null ? dir : target)));
+        navigationRequests.resolve(
+                service.fileOp(() -> MediaService.collapseChain(dir, MAX_CHAIN_DESCENT)),
+                Platform::runLater,
+                (target, error) -> navigateAndSync(error != null || target == null ? dir : target));
     }
 
     /**
@@ -2745,7 +2815,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      */
     private void openArchive(Path archive) {
         statusLabel.setText("Opening " + archive.getFileName() + "…");
-        service.fileOp(() -> {
+        navigationRequests.resolve(service.fileOp(() -> {
             try {
                 // Lands inside a solitary top-level folder, the shape almost
                 // every "compress this folder" archive has.
@@ -2753,14 +2823,14 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             } catch (IOException e) {
                 throw new MediaException(e.getMessage(), e);
             }
-        }).whenComplete((root, error) -> Platform.runLater(() -> {
+        }), Platform::runLater, (root, error) -> {
             if (error != null) {
                 statusLabel.setText("Cannot open " + archive.getFileName() + ": "
                         + rootMessage(error));
                 return;
             }
             navigateAndSync(root);
-        }));
+        });
     }
 
     /** The currently visible viewable media as a viewer/mosaic navigation list. */
@@ -2873,6 +2943,12 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * focus" sequencing); a null path clears the selection.
      */
     private void refreshAfterMove(Path focusPath) {
+        if (currentAlbum != null) {
+            // Album members live in many folders and can be trashed or moved
+            // from here: re-read the album rather than leave them listed.
+            navigateToAlbum(currentAlbum, focusPath);
+            return;
+        }
         if (currentDir == null) return;
         pendingSelection = focusPath;
         navigate(currentDir);
@@ -3095,6 +3171,76 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var decodeRow = new HBox(8, new Label("Video playback decode:"), decodeCombo);
         decodeRow.setAlignment(Pos.CENTER_LEFT);
 
+        // Matrix for video frames with no matrix tag (UntaggedMatrix): like the
+        // decode policy, bundled-FFmpeg only and applied to the next session.
+        var untaggedMatrixCombo = new ComboBox<UntaggedMatrix.Policy>();
+        untaggedMatrixCombo.getItems().setAll(UntaggedMatrix.Policy.values());
+        untaggedMatrixCombo.setConverter(new StringConverter<>() {
+            @Override public String toString(UntaggedMatrix.Policy p) {
+                return p == null ? "" : switch (p) {
+                    case BT601 -> "BT.601 (FFmpeg default)";
+                    case BT709 -> "BT.709";
+                    case AUTO -> "Auto (BT.709 for HD, BT.601 below)";
+                };
+            }
+            @Override public UntaggedMatrix.Policy fromString(String s) {
+                return null; // non-editable combo; never parses back
+            }
+        });
+        untaggedMatrixCombo.setValue(switch (settings.untaggedMatrix().toLowerCase(java.util.Locale.ROOT)) {
+            case "bt601" -> UntaggedMatrix.Policy.BT601;
+            case "bt709" -> UntaggedMatrix.Policy.BT709;
+            default -> UntaggedMatrix.Policy.AUTO;
+        });
+        untaggedMatrixCombo.disableProperty().bind(decodeCombo.disableProperty());
+        var untaggedMatrixRow = new HBox(8, new Label("Untagged video colour:"), untaggedMatrixCombo);
+        untaggedMatrixRow.setAlignment(Pos.CENTER_LEFT);
+
+        // Video presentation (VideoPresentation): applies to the next playback
+        // session, like the decode policy. GL library only matters when a GL
+        // presenter can run, CPU rotation only when the CPU presenter can.
+        VideoPresentation.Config video = settings.videoPresentation();
+        var presenterCombo = new ComboBox<VideoPresentation.Presenter>();
+        presenterCombo.getItems().setAll(VideoPresentation.Presenter.values());
+        if (!io.github.ghosthack.panama.media.core.Platform.IS_MAC
+                && video.presenter() != VideoPresentation.Presenter.VIMAGE) {
+            // vImage is Accelerate (macOS) only; a persisted VIMAGE stays visible to be changed.
+            presenterCombo.getItems().remove(VideoPresentation.Presenter.VIMAGE);
+        }
+        presenterCombo.setValue(video.presenter());
+        var noGlPresenter = presenterCombo.valueProperty().isEqualTo(VideoPresentation.Presenter.CPU)
+                .or(presenterCombo.valueProperty().isEqualTo(VideoPresentation.Presenter.VIMAGE));
+        var glLibraryCombo = new ComboBox<VideoPresentation.GlLibrary>();
+        glLibraryCombo.getItems().setAll(VideoPresentation.GlLibrary.values());
+        glLibraryCombo.setValue(video.glLibrary());
+        glLibraryCombo.disableProperty().bind(noGlPresenter);
+        var cpuRotationCombo = new ComboBox<VideoPresentation.CpuRotation>();
+        cpuRotationCombo.getItems().setAll(VideoPresentation.CpuRotation.values());
+        cpuRotationCombo.setValue(video.cpuRotation());
+        cpuRotationCombo.disableProperty().bind(
+                presenterCombo.valueProperty().isEqualTo(VideoPresentation.Presenter.GPU)
+                        .or(presenterCombo.valueProperty().isEqualTo(VideoPresentation.Presenter.VIMAGE)));
+        var glReadbackCombo = new ComboBox<VideoPresentation.GlReadback>();
+        glReadbackCombo.getItems().setAll(VideoPresentation.GlReadback.values());
+        glReadbackCombo.setValue(video.glReadback());
+        // Only the mujgl renderer has a PBO path, and only a GL presenter reads back.
+        glReadbackCombo.disableProperty().bind(noGlPresenter
+                .or(glLibraryCombo.valueProperty().isNotEqualTo(VideoPresentation.GlLibrary.MUJGL)));
+        var presenterRow = new HBox(8, new Label("Video presenter:"), presenterCombo);
+        presenterRow.setAlignment(Pos.CENTER_LEFT);
+        var glLibraryRow = new HBox(8, new Label("Video GL library:"), glLibraryCombo);
+        glLibraryRow.setAlignment(Pos.CENTER_LEFT);
+        var cpuRotationRow = new HBox(8, new Label("Video CPU rotation:"), cpuRotationCombo);
+        cpuRotationRow.setAlignment(Pos.CENTER_LEFT);
+        var glReadbackRow = new HBox(8, new Label("Video GL readback:"), glReadbackCombo);
+        glReadbackRow.setAlignment(Pos.CENTER_LEFT);
+        var presenterHint = new Label("Auto uses the GPU on macOS and for rotated video, falling "
+                + "back to the CPU if OpenGL is unavailable. GPU, CPU and vImage (macOS, no "
+                + "OpenGL) are honoured or fail loudly. Applies to the next video opened.");
+        presenterHint.getStyleClass().add("settings-hint");
+        presenterHint.setWrapText(true);
+        presenterHint.setMaxWidth(420);
+
         // UI style preset (above Theme: it applies over Theme, Icon pack and
         // Mosaic tile set, see the listener wired below once tileSetCombo
         // exists). Its own value is read once at startup for the mosaic
@@ -3219,7 +3365,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var hint = new Label("Applies after restarting the application.");
         hint.getStyleClass().add("settings-hint");
         var generalContent = new VBox(8, uiStyleRow, uiStyleHint,
-                themeRow, iconPackRow, buttonBordersBox, backendRow, decodeRow,
+                themeRow, iconPackRow, buttonBordersBox, backendRow, decodeRow, untaggedMatrixRow,
+                presenterRow, glLibraryRow, glReadbackRow, cpuRotationRow, presenterHint,
                 actionLogBox, actionLogFileBox, extensionFixBox,
                 new Separator(), loadingIndicatorRow, loadingDelayRow,
                 new Separator(),
@@ -3467,6 +3614,21 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                                     + "ghost-button look."),
                             composeRow("Media engine", backendCombo),
                             composeRow("Video playback decode", decodeCombo),
+                            composeRow("Untagged video colour", "The colour matrix for video "
+                                    + "that does not state one. Tagged video always uses its "
+                                    + "own.", untaggedMatrixCombo),
+                            composeRow("Video presenter", "Auto uses the GPU on macOS and for "
+                                    + "rotated video, falling back to the CPU if OpenGL is "
+                                    + "unavailable. GPU, CPU and vImage (macOS, no OpenGL) are "
+                                    + "honoured or fail loudly. Applies to the next video "
+                                    + "opened.", presenterCombo),
+                            composeRow("Video GL library", glLibraryCombo),
+                            composeRow("Video GL readback", "mujgl only. PBO, same frame takes "
+                                    + "the driver's buffer-object path (faster on Intel GPUs); "
+                                    + "PBO, previous frame copies out the last frame instead of "
+                                    + "waiting (faster on AMD GPUs; each frame shows one frame "
+                                    + "late).", glReadbackCombo),
+                            composeRow("Video CPU rotation", cpuRotationCombo),
                             composeCheckRow(actionLogBox),
                             composeCheckRow(actionLogFileBox, "Appends every completed move/rename "
                                     + "to ~/.media-browser/action-log.jsonl, one JSON object per line."),
@@ -3649,6 +3811,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         String decodeDevice = decodeCombo.getValue().name().toLowerCase(java.util.Locale.ROOT);
         settings.setDecodeDevice(decodeDevice);
         HwDecode.configure(decodeDevice);
+        String untaggedMatrix = untaggedMatrixCombo.getValue().name().toLowerCase(java.util.Locale.ROOT);
+        settings.setUntaggedMatrix(untaggedMatrix);
+        UntaggedMatrix.configure(untaggedMatrix);
+        var videoPresentation = new VideoPresentation.Config(presenterCombo.getValue(),
+                glLibraryCombo.getValue(), cpuRotationCombo.getValue(), glReadbackCombo.getValue());
+        settings.setVideoPresentation(videoPresentation);
+        VideoPresentation.configure(videoPresentation);
         settings.setWindowDecorations(decorationsCombo.getValue());
         settings.setUndecoratedResizable(resizeBox.isSelected());
         settings.setMaximizeOverscan(overscanBox.isSelected());
