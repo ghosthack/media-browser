@@ -120,7 +120,10 @@ final class ComposeMosaicTileSet implements MosaicTileSet {
                 // Inspectable archives stay directory-like for navigation, but
                 // use the same Archive icon as the Compose browser list. Sealed
                 // archive-like files continue through the plain-file fallback.
-                case ARCHIVE_BROWSABLE -> drawGlyph(c, staticGlyphPath(c.identity()), MUTED);
+                case ARCHIVE_BROWSABLE -> {
+                    drawGlyph(c, staticGlyphPath(c.identity()), MUTED);
+                    if (c.has(MosaicTileModifier.CORRUPT)) MosaicCorruptMark.paintBadge(c);
+                }
                 case MEDIA_IMAGE, MEDIA_VIDEO, MEDIA_AUDIO -> drawMedia(c);
                 // Keep the classifier's extension-only contract: recognized
                 // text and textual data get a lined sheet; every other
@@ -183,11 +186,24 @@ final class ComposeMosaicTileSet implements MosaicTileSet {
      * close mark for visual media, or the normal audio glyph because audio has
      * no poster to decode), Blank/pending (a muted kind glyph plus badge), and
      * the quiet default when nothing has been requested (a dimmer kind glyph,
-     * no badge).
+     * no badge). Corrupt — a failure the decoder blamed on the data, audio
+     * included — replaces the failure mark with the amber warning sign; a
+     * thumbnail decoded from corrupt data keeps its picture and gets the sign
+     * as a corner badge.
      */
     private static void drawMedia(MosaicTilePaintContext c) {
         if (c.drawMediaThumbnail()) {
-            if (c.identity() != MosaicTileIdentity.MEDIA_IMAGE) drawKindBadge(c);
+            // Decoded but corrupt: the amber corner badge takes the kind
+            // badge's corner — damage outranks the kind.
+            if (c.has(MosaicTileModifier.CORRUPT)) {
+                MosaicCorruptMark.paintBadge(c);
+            } else if (c.identity() != MosaicTileIdentity.MEDIA_IMAGE) {
+                drawKindBadge(c);
+            }
+            return;
+        }
+        if (c.has(MosaicTileModifier.CORRUPT)) {
+            drawGlyph(c, corruptMediaPath(), MosaicCorruptMark.COLOR);
             return;
         }
         if (c.has(MosaicTileModifier.THUMBNAIL_FAILED)) {
@@ -201,6 +217,11 @@ final class ComposeMosaicTileSet implements MosaicTileSet {
             return;
         }
         drawGlyph(c, kindPath(c.identity()), MUTED_DISABLED);
+    }
+
+    /** The corrupt-data mark: the shared warning sign, not {@link #CLOSE_PATH}. */
+    static String corruptMediaPath() {
+        return MosaicCorruptMark.PATH;
     }
 
     /** Audio's absent poster is not an opening/decode failure worth marking red. */

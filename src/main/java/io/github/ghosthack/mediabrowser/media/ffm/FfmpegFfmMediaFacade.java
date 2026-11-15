@@ -2,7 +2,9 @@ package io.github.ghosthack.mediabrowser.media.ffm;
 
 import io.github.ghosthack.mediabrowser.media.ColorProfile;
 import io.github.ghosthack.mediabrowser.media.ContentSniffer;
+import io.github.ghosthack.mediabrowser.media.CorruptMediaException;
 import io.github.ghosthack.mediabrowser.media.MediaException;
+import io.github.ghosthack.mediabrowser.media.MediaFailures;
 import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
 import io.github.ghosthack.mediabrowser.media.MediaFacade;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
@@ -101,7 +103,11 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
     private FfmpegFfmMediaFacade(FfmpegBindings ffmpeg, boolean turboJpeg,
                                  boolean captureColorProfiles) {
         this.ffmpeg = ffmpeg;
-        this.av = new FfmpegAv(ffmpeg, captureColorProfiles);   // also quiets libav logging
+        // A poster of what plays as video converts an untagged frame like
+        // playback does (UntaggedMatrix); a still keeps BT.601. "Plays as
+        // video" is the same refined kind the viewer routes playback by.
+        this.av = new FfmpegAv(ffmpeg, captureColorProfiles,   // also quiets libav logging
+                probe -> refineKind(probe, probe.path()).kind() == MediaKind.VIDEO);
         this.metadata = new FfmpegMetadata(ffmpeg);
         this.turboJpeg = turboJpeg;
         this.captureColorProfiles = captureColorProfiles;
@@ -148,13 +154,12 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             return LibRawStills.available() ? Optional.of(MediaKind.IMAGE) : Optional.empty();
         }
         if (!STILL_EXTENSIONS.contains(ext) && !AV_EXTENSIONS.contains(ext)) {
-            return Optional.empty();
+            return Optional.empty();   // not a format this backend claims
         }
-        try {
-            return Optional.of(refineKind(av.probe(file, -1), file).kind());
-        } catch (RuntimeException e) {
-            return Optional.empty();
-        }
+        // A name this backend claims whose probe fails is a broken or
+        // unreadable file, not "not media": the failure propagates (the
+        // listing keeps the name's verdict and the open shows the error).
+        return Optional.of(refineKind(av.probe(file, -1), file).kind());
     }
 
     @Override
@@ -175,10 +180,13 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             // decode. The Compression-52546 SubIFD is the same gate that
             // verdict fires on. On a render failure the embedded full-res
             // preview below stays the safety net — visibly logged, not silent.
+            // Corrupt tile data is not a render failure: it stays this file's
+            // error, never replaced by the camera's preview.
             Optional<RasterFrame> jxlDng = Optional.empty();
             try {
                 jxlDng = DngJxlStills.fullDecode(ffmpeg, file);
             } catch (MediaException e) {
+                if (MediaFailures.isCorrupt(e)) throw e;
                 System.err.println("media-browser: JXL DNG render failed for "
                         + file.getFileName() + " (" + e.getMessage()
                         + "); falling back to the embedded preview");
@@ -186,10 +194,16 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             if (jxlDng.isPresent()) {
                 return new VisualResult(rawProbe(file), jxlDng);
             }
-            RasterFrame frame = requireDecoded(file, LibRawStills.fullDecode(file)).frame();
-            return new VisualResult(rawProbe(file), Optional.of(frame));
+            LibRawStills.Decoded decoded = requireDecoded(file, LibRawStills.fullDecode(file));
+            return new VisualResult(rawProbe(file), Optional.of(decoded.frame()),
+                    decoded.corruption());
         }
-        VisualResult result = firstFrameSteppingDownPcd(file);
+        return ffmpegVisual(file, MediaEngineTrace.Recorder.disabled());
+    }
+
+    /** The FFmpeg full decode, past the RAW route. */
+    private VisualResult ffmpegVisual(Path file, MediaEngineTrace.Recorder trace) {
+        VisualResult result = firstFrameSteppingDownPcd(file, trace);
         MediaProbe refined = refineKind(result.probe(), file);
         if (captureColorProfiles) {
             ColorProfile captured = av.takeCapturedIccProfile();
@@ -197,9 +211,48 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                 refined = refined.withColorProfile(captured);
             }
         }
-        VisualResult out = refined == result.probe() ? result
-                : new VisualResult(refined, result.frame());
-        return bakePcdRotation(file, bakeJpegExif(file, out));
+        VisualResult out = refined == result.probe() ? result : result.withProbe(refined);
+        return jpegDataVerdict(file, bakePcdRotation(file, bakeJpegExif(file, out)), trace);
+    }
+
+    /**
+     * The libjpeg-turbo verdict on a JPEG the viewer decoded through FFmpeg
+     * (the {@code -turbojpeg} variants only): FFmpeg's mjpeg decoder conceals
+     * damaged entropy data without saying so, so the same corrupt-data warning
+     * that labels the thumbnail ({@link TurboJpegStills#corruptionOf}) is
+     * read here from a 1/8-scale decode — entropy decoding in full, almost no
+     * IDCT. FFmpeg's pixels stay the viewer image; only the label is added.
+     * A JPEG the fast path declines (progressive, CMYK, …) gets no verdict,
+     * exactly as its thumbnail gets none.
+     */
+    private VisualResult jpegDataVerdict(Path file, VisualResult result,
+                                         MediaEngineTrace.Recorder trace) {
+        if (!turboJpeg || !isJpeg(file) || result.frame().isEmpty()) return result;
+        long started = trace.beginAttempt();
+        String label = "TurboJPEG data check";
+        try {
+            switch (TurboJpegStills.attempt(file, 1, ThumbnailMode.FIT, false)) {
+                case TurboJpegStills.Decoded decoded -> {
+                    String corruption = decoded.corruption();
+                    trace.succeeded(label, started, decoded.warning() == null ? "clean"
+                            : (corruption == null ? "harmless" : "corrupt")
+                                    + "; libjpeg-turbo warning: " + decoded.warning());
+                    return corruption == null ? result : result.withCorruption(corruption);
+                }
+                case TurboJpegStills.Declined declined -> {
+                    trace.declined(label, started, declined.reason());
+                    return result;
+                }
+            }
+        } catch (CorruptMediaException e) {
+            // libjpeg gives up on data FFmpeg concealed: FFmpeg's image is
+            // shown, labelled with libjpeg's verdict.
+            trace.failed(label, started, e);
+            return result.withCorruption(e.getMessage());
+        } catch (MediaException e) {
+            trace.failed(label, started, e);
+            return result;
+        }
     }
 
     @Override
@@ -217,6 +270,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                         "Input is not a JXL-compressed DNG");
             } catch (MediaException e) {
                 trace.failed("JXL-compressed DNG render", jxlStarted, e);
+                if (MediaFailures.isCorrupt(e)) throw e;
             }
             long rawStarted = trace.beginAttempt();
             try {
@@ -224,7 +278,8 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                         requireDecoded(file, LibRawStills.fullDecode(file));
                 trace.succeeded("LibRaw / embedded preview", rawStarted,
                         rasterDetail(decoded.frame(), "camera RAW, " + decoded.route()));
-                return new VisualResult(rawProbe(file), Optional.of(decoded.frame()));
+                return new VisualResult(rawProbe(file), Optional.of(decoded.frame()),
+                        decoded.corruption());
             } catch (RuntimeException | Error e) {
                 trace.failed("LibRaw / embedded preview", rawStarted, e);
                 throw e;
@@ -232,7 +287,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         }
         long started = trace.beginAttempt();
         try {
-            VisualResult result = loadVisual(file);
+            VisualResult result = ffmpegVisual(file, trace);
             trace.succeeded("Bundled FFmpeg", started, result.frame()
                     .map(f -> rasterDetail(f, "decoded first visual frame"))
                     .orElse("No visual frame"));
@@ -248,9 +303,8 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         if (LibRawStills.isRaw(extension(file)) && LibRawStills.available()) {
             // A RAW that cannot be decoded throws, like an FFmpeg thumbnail
             // failure: an empty frame here would be cached as a blank tile.
-            return new Thumbnail(Optional.of(requireDecoded(file,
-                    LibRawStills.thumbnail(file, maxEdge, mode, turboJpeg)).frame()),
-                    MediaKind.IMAGE);
+            return rawThumbnail(requireDecoded(file,
+                    LibRawStills.thumbnail(file, maxEdge, mode, turboJpeg)));
         }
         boolean jpeg = isJpeg(file);
         if (jpeg && turboJpeg) {
@@ -264,7 +318,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                 return turboThumbnail(decoded);
             }
         }
-        return ffmpegThumbnail(file, maxEdge, mode, jpeg);
+        return ffmpegThumbnail(file, maxEdge, mode, jpeg, MediaEngineTrace.Recorder.disabled());
     }
 
     /**
@@ -279,28 +333,33 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         };
     }
 
+    /** Shown even when libjpeg-turbo warned the data is damaged — then labelled corrupt. */
     private static Thumbnail turboThumbnail(TurboJpegStills.Decoded decoded) {
         return new Thumbnail(Optional.of(decoded.frame()), MediaKind.IMAGE,
-                decoded.colorProfile());
+                decoded.colorProfile(), decoded.corruption());
+    }
+
+    private static Thumbnail rawThumbnail(LibRawStills.Decoded decoded) {
+        return new Thumbnail(Optional.of(decoded.frame()), MediaKind.IMAGE, null,
+                decoded.corruption());
     }
 
     /** The FFmpeg thumbnail decode, past every fast path. */
-    private Thumbnail ffmpegThumbnail(Path file, int maxEdge, ThumbnailMode mode, boolean jpeg) {
-        Thumbnail thumb = thumbnailSteppingDownPcd(file, maxEdge, mode);
+    private Thumbnail ffmpegThumbnail(Path file, int maxEdge, ThumbnailMode mode, boolean jpeg,
+                                      MediaEngineTrace.Recorder trace) {
+        Thumbnail thumb = thumbnailSteppingDownPcd(file, maxEdge, mode, trace);
         if (jpeg && thumb.frame().isPresent()) {
             int orientation = TurboJpegStills.exifOrientation(file);
             if (orientation != 1) {
-                thumb = new Thumbnail(thumb.frame()
-                        .map(f -> RasterFrames.applyExifOrientation(f, orientation)),
-                        thumb.kind(), thumb.colorProfile());
+                thumb = thumb.withFrame(thumb.frame()
+                        .map(f -> RasterFrames.applyExifOrientation(f, orientation)));
             }
         }
         if (thumb.frame().isPresent() && PcdOrientation.isPcd(extension(file))) {
             int turns = PcdOrientation.quarterTurnsCw(file);
             if (turns != 0) {
-                thumb = new Thumbnail(
-                        thumb.frame().map(f -> RasterFrames.rotateCw(f, turns)),
-                        thumb.kind(), thumb.colorProfile());
+                thumb = thumb.withFrame(
+                        thumb.frame().map(f -> RasterFrames.rotateCw(f, turns)));
             }
         }
         if (thumb.kind() == MediaKind.VIDEO && isStillCandidate(file)) {
@@ -322,8 +381,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
             try {
                 LibRawStills.Decoded decoded = requireDecoded(file,
                         LibRawStills.thumbnail(file, maxEdge, mode, turboJpeg));
-                Thumbnail result = new Thumbnail(
-                        Optional.of(decoded.frame()), MediaKind.IMAGE);
+                Thumbnail result = rawThumbnail(decoded);
                 trace.succeeded("LibRaw thumbnail", started,
                         thumbnailDetail(result, maxEdge, mode) + "; " + decoded.route());
                 return result;
@@ -348,7 +406,10 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
                     trace.succeeded("TurboJPEG scaled decode", turboStarted,
                             thumbnailDetail(result, maxEdge, mode)
                                     + (decoded.warning() == null ? ""
-                                            : "; libjpeg-turbo warning: " + decoded.warning()));
+                                            : (decoded.corruption() == null ? "; harmless"
+                                                    : "; corrupt")
+                                                    + " libjpeg-turbo warning: "
+                                                    + decoded.warning()));
                     return result;
                 }
                 case TurboJpegStills.Declined declined -> trace.declined(
@@ -357,7 +418,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         }
         long started = trace.beginAttempt();
         try {
-            Thumbnail result = ffmpegThumbnail(file, maxEdge, mode, jpeg);
+            Thumbnail result = ffmpegThumbnail(file, maxEdge, mode, jpeg, trace);
             trace.succeeded("Bundled FFmpeg thumbnail", started,
                     thumbnailDetail(result, maxEdge, mode));
             return result;
@@ -459,7 +520,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         if (orientation == 1) {
             return result;
         }
-        return new VisualResult(result.probe(),
+        return result.withFrame(
                 result.frame().map(f -> RasterFrames.applyExifOrientation(f, orientation)));
     }
 
@@ -469,44 +530,55 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
      * outright. Only {@code .pcd} is retried, and only after a decode error, so
      * nothing else changes its failure behaviour.
      */
-    private VisualResult firstFrameSteppingDownPcd(Path file) {
+    private VisualResult firstFrameSteppingDownPcd(Path file, MediaEngineTrace.Recorder trace) {
         requirePcdImagePack(file);
         long size = fileSize(file);
-        try {
-            return av.firstFrameWithProbe(file, size);
-        } catch (MediaException first) {
-            if (!PcdOrientation.isPcd(extension(file))
-                    || !PhotoCdImagePack.isImagePack(file)) {
-                throw first;
-            }
-            for (int lowres : PcdOrientation.FALLBACK_LOWRES) {
-                try {
-                    VisualResult stepped = av.firstFrameWithProbe(file, size, lowres);
-                    PcdOrientation.announceStepDown(file, lowres);
-                    return stepped;
-                } catch (MediaException ignored) {
-                    // next level down; if none decode the caller sees `first`.
-                }
-            }
-            throw first;
-        }
+        return steppingDownPcd(file, trace,
+                () -> av.firstFrameWithProbe(file, size),
+                lowres -> av.firstFrameWithProbe(file, size, lowres));
     }
 
     /** {@link #firstFrameSteppingDownPcd} for the thumbnail path. */
-    private Thumbnail thumbnailSteppingDownPcd(Path file, int maxEdge, ThumbnailMode mode) {
+    private Thumbnail thumbnailSteppingDownPcd(Path file, int maxEdge, ThumbnailMode mode,
+                                               MediaEngineTrace.Recorder trace) {
         requirePcdImagePack(file);
+        return steppingDownPcd(file, trace,
+                () -> av.thumbnail(file, maxEdge, mode),
+                lowres -> av.thumbnail(file, maxEdge, mode, lowres));
+    }
+
+    /**
+     * Runs {@code full}; for a Photo CD image pack whose full layer FFmpeg
+     * rejects, steps down the pyramid. The recovery is visible, never
+     * silent: the rejected layer and each level tried are recorded in
+     * {@code trace}, a successful step-down is announced on stderr, and when
+     * no level decodes the caller sees the full-layer error with every
+     * lower level's failure attached as suppressed.
+     */
+    static <T> T steppingDownPcd(Path file, MediaEngineTrace.Recorder trace,
+                                         java.util.function.Supplier<T> full,
+                                         java.util.function.IntFunction<T> atLowres) {
+        long fullStarted = trace.beginAttempt();
         try {
-            return av.thumbnail(file, maxEdge, mode);
+            return full.get();
         } catch (MediaException first) {
             if (!PcdOrientation.isPcd(extension(file))
                     || !PhotoCdImagePack.isImagePack(file)) {
                 throw first;
             }
+            trace.failed("FFmpeg Photo CD full-resolution layer", fullStarted, first);
             for (int lowres : PcdOrientation.FALLBACK_LOWRES) {
+                String level = "FFmpeg Photo CD 1/" + (1 << lowres) + " layer";
+                long started = trace.beginAttempt();
                 try {
-                    return av.thumbnail(file, maxEdge, mode, lowres);
-                } catch (MediaException ignored) {
-                    // next level down
+                    T stepped = atLowres.apply(lowres);
+                    trace.succeeded(level, started,
+                            "Stepped down: the full-resolution layer was rejected");
+                    PcdOrientation.announceStepDown(file, lowres);
+                    return stepped;
+                } catch (MediaException e) {
+                    trace.failed(level, started, e);
+                    first.addSuppressed(e);
                 }
             }
             throw first;
@@ -535,8 +607,7 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
         if (turns == 0) {
             return result;
         }
-        return new VisualResult(result.probe(),
-                result.frame().map(f -> RasterFrames.rotateCw(f, turns)));
+        return result.withFrame(result.frame().map(f -> RasterFrames.rotateCw(f, turns)));
     }
 
     /** Probe a RAW file via LibRaw metadata (no pixel decode). */

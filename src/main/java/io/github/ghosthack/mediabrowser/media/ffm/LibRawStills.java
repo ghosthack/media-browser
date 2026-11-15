@@ -8,6 +8,7 @@ import io.github.ghosthack.librawffm.libraw.libraw_iparams_t;
 import io.github.ghosthack.librawffm.libraw.libraw_output_params_t;
 import io.github.ghosthack.librawffm.libraw.libraw_processed_image_t;
 import io.github.ghosthack.librawffm.libraw.libraw_thumbnail_t;
+import io.github.ghosthack.mediabrowser.media.CorruptMediaException;
 import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
@@ -116,8 +117,23 @@ final class LibRawStills {
      */
     sealed interface Attempt permits Decoded, Declined {}
 
-    /** Upright pixels and the route that produced them, for the engine trace. */
-    record Decoded(RasterFrame frame, String route) implements Attempt {}
+    /**
+     * Upright pixels and the route that produced them, for the engine trace;
+     * {@code corruption} is the decoder's message when the pixels came from
+     * damaged data (an embedded preview libjpeg-turbo decoded with a
+     * corrupt-data warning), else null.
+     */
+    record Decoded(RasterFrame frame, String route, String corruption) implements Attempt {
+
+        Decoded(RasterFrame frame, String route) {
+            this(frame, route, null);
+        }
+
+        /** The same pixels and verdict under a longer route description. */
+        Decoded withRoute(String route) {
+            return new Decoded(frame, route, corruption);
+        }
+    }
 
     record Declined(String reason) implements Attempt {}
 
@@ -157,9 +173,18 @@ final class LibRawStills {
         }
     }
 
+    /**
+     * A LibRaw call's failure. Only {@code LIBRAW_DATA_ERROR} ("Corrupted data
+     * or unexpected EOF", raised by LibRaw's raw/JPEG decoders) is corrupt;
+     * {@code LIBRAW_IO_ERROR} is not, though LibRaw also reports a file cut
+     * short that way — it shares the code with genuine read failures.
+     */
     private static MediaException failure(Path file, String call, int rc) {
-        return new MediaException("LibRaw cannot decode " + file.getFileName()
-                + ": " + call + " failed: " + describe(rc));
+        String message = "LibRaw cannot decode " + file.getFileName()
+                + ": " + call + " failed: " + describe(rc);
+        return rc == LibRaw.LIBRAW_DATA_ERROR()
+                ? new CorruptMediaException(message)
+                : new MediaException(message);
     }
 
     /** LibRaw's own text for a return code; positive codes are errno values. */
@@ -251,7 +276,7 @@ final class LibRawStills {
             // (unpack_thumb would fail as an out-of-order call).
             return switch (withOpenFile(file,
                     (fresh, a) -> previewThumbnail(file, fresh, maxEdge, mode))) {
-                case Decoded d -> new Decoded(d.frame(),
+                case Decoded d -> d.withRoute(
                         d.route() + " (raw decode unsupported: " + unsupported + ")");
                 case Declined d -> new Declined(unsupported
                         + "; embedded preview declined: " + d.reason());
@@ -286,7 +311,7 @@ final class LibRawStills {
             // on this one as an out-of-order call.
             String unsupported = "libraw_unpack: " + describe(rc);
             return switch (withOpenFile(file, (fresh, a) -> fullResPreview(file, fresh))) {
-                case Decoded d -> new Decoded(d.frame(),
+                case Decoded d -> d.withRoute(
                         d.route() + " (raw decode unsupported: " + unsupported + ")");
                 case Declined d -> new Declined(unsupported
                         + "; embedded preview declined: " + d.reason());
@@ -312,7 +337,7 @@ final class LibRawStills {
             return new Declined("it is " + tw + "×" + th + ", smaller than the "
                     + iw + "×" + ih + " raw");
         }
-        return decodePreview(lr, Math.max(tw, th), ThumbnailMode.FIT,
+        return decodePreview(file, lr, Math.max(tw, th), ThumbnailMode.FIT,
                 "embedded full-resolution preview");
     }
 
@@ -334,7 +359,7 @@ final class LibRawStills {
             return new Declined("it is " + tw + "×" + th + ", smaller than the "
                     + maxEdge + " px box");
         }
-        return decodePreview(lr, maxEdge, mode, "embedded preview");
+        return decodePreview(file, lr, maxEdge, mode, "embedded preview");
     }
 
     /**
@@ -367,11 +392,15 @@ final class LibRawStills {
      * The unpacked JPEG preview through {@link TurboJpegStills#decodeScaled}.
      * LibRaw's flip is the single orientation authority (the preview's own
      * EXIF, when present, describes the same rotation — applying both would
-     * double it). A preview TurboJPEG declines, or decodes only with a data
-     * warning, is declined with that reason; a native failure throws.
+     * double it). A preview TurboJPEG declines (a capability gap) is declined
+     * with that reason. A preview whose JPEG data is damaged is never declined
+     * into the raw demosaic, which would hide the damage behind a substitute
+     * rendering: one libjpeg-turbo fails on is this file's corrupt-data error,
+     * one it decoded with a corrupt-data warning is shown and labelled
+     * ({@link Decoded#corruption}).
      */
-    private static Attempt decodePreview(MemorySegment lr, int maxEdge, ThumbnailMode mode,
-                                         String route) {
+    private static Attempt decodePreview(Path file, MemorySegment lr, int maxEdge,
+                                         ThumbnailMode mode, String route) {
         MemorySegment data = lr.reinterpret(libraw_data_t.sizeof());
         MemorySegment thumb = libraw_data_t.thumbnail(data);
         int tlength = libraw_thumbnail_t.tlength(thumb);
@@ -380,14 +409,36 @@ final class LibRawStills {
                 ValueLayout.JAVA_BYTE, 0, jpeg, 0, tlength);
         int orientation = flipToExifOrientation(
                 libraw_image_sizes_t.flip(libraw_data_t.sizes(data)));
-        return switch (TurboJpegStills.decodeScaled(jpeg, maxEdge, mode)) {
+        TurboJpegStills.Attempt attempt;
+        try {
+            attempt = TurboJpegStills.decodeScaled(jpeg, maxEdge, mode);
+        } catch (CorruptMediaException e) {
+            throw new CorruptMediaException(file.getFileName()
+                    + ": embedded JPEG preview: " + e.getMessage(), e);
+        }
+        return switch (attempt) {
             case TurboJpegStills.Declined declined ->
                     new Declined("TurboJPEG declined it: " + declined.reason());
-            case TurboJpegStills.Decoded decoded -> decoded.warning() != null
-                    ? new Declined("its JPEG data is damaged: " + decoded.warning())
-                    : new Decoded(RasterFrames.applyExifOrientation(
-                            decoded.frame(), orientation), route);
+            case TurboJpegStills.Decoded decoded -> previewDecoded(decoded, orientation, route);
         };
+    }
+
+    /**
+     * A preview libjpeg-turbo decoded, as this file's pixels: upright per
+     * LibRaw's flip, labelled corrupt when the decode warned about damaged
+     * data ({@link TurboJpegStills#corruptionOf}) — the image is still shown,
+     * never swapped for the demosaic. A harmless warning is a trace note in
+     * the route only.
+     */
+    static Decoded previewDecoded(TurboJpegStills.Decoded decoded, int orientation, String route) {
+        RasterFrame upright = RasterFrames.applyExifOrientation(decoded.frame(), orientation);
+        String corruption = decoded.corruption();
+        if (corruption != null) {
+            return new Decoded(upright, route + "; damaged: libjpeg-turbo warning: " + corruption,
+                    "embedded JPEG preview: " + corruption);
+        }
+        return new Decoded(upright, decoded.warning() == null ? route
+                : route + "; libjpeg-turbo warning: " + decoded.warning());
     }
 
     /**

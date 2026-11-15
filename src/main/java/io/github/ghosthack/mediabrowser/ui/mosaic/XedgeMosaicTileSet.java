@@ -217,6 +217,8 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
                 graphics.restore();
             }
         }
+        // As Current: a thumbnail decoded from corrupt data gets the corner badge.
+        if (MosaicCorruptMark.decodedButCorrupt(context)) MosaicCorruptMark.paintBadge(context);
     }
 
     private void paintParent(MosaicTilePaintContext context) {
@@ -351,6 +353,7 @@ final class XedgeMosaicTileSet implements MosaicTileSet {
                     format,
                     x + size * (LEFT + RIGHT) / 2.0,
                     y + size * (BODY_TOP + BOTTOM) / 2.0);
+            if (context.has(MosaicTileModifier.CORRUPT)) MosaicCorruptMark.paintBadge(context);
             context.drawCaption();
         } finally {
             graphics.restore();

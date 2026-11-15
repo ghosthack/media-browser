@@ -1,6 +1,7 @@
 package io.github.ghosthack.mediabrowser.media.ffm;
 
 import io.github.ghosthack.mediabrowser.media.ColorProfile;
+import io.github.ghosthack.mediabrowser.media.CorruptMediaException;
 import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
@@ -16,6 +17,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 /**
  * JPEG thumbnail fast path over libjpeg-turbo (the
@@ -79,7 +81,17 @@ final class TurboJpegStills {
      * (e.g. extraneous bytes), or null.
      */
     record Decoded(RasterFrame frame, ColorProfile colorProfile, String warning)
-            implements Attempt {}
+            implements Attempt {
+
+        /**
+         * The warning when it marks the file corrupt ({@link #corruptionOf}):
+         * the pixels are shown, and the file is labelled corrupt. Null for a
+         * clean decode or a harmless warning.
+         */
+        String corruption() {
+            return corruptionOf(warning);
+        }
+    }
 
     record Declined(String reason) implements Attempt {}
 
@@ -152,7 +164,14 @@ final class TurboJpegStills {
                 int h = TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_JPEGHEIGHT());
                 int cs = TurboJpeg.tj3Get(handle, TurboJpeg.TJPARAM_COLORSPACE());
                 if (w <= 0 || h <= 0) {
-                    throw new MediaException("TurboJPEG header reports " + w + "×" + h);
+                    // A header read that warned about the data and yielded no
+                    // geometry (e.g. "Premature end of JPEG file") is the
+                    // data's fault, in libjpeg-turbo's own words.
+                    String reported = "TurboJPEG header reports " + w + "×" + h;
+                    if (warning != null && isCorruptDataMessage(warning)) {
+                        throw new CorruptMediaException(reported + ": " + warning);
+                    }
+                    throw new MediaException(reported);
                 }
                 if (cs == TurboJpeg.TJCS_CMYK()) return new Declined("CMYK JPEG");
                 if (cs == TurboJpeg.TJCS_YCCK()) return new Declined("YCCK JPEG");
@@ -177,7 +196,12 @@ final class TurboJpegStills {
                 MemorySegment dst = arena.allocate((long) sw * sh * 4);
                 String decodeWarning = check(handle, TurboJpeg.tj3Decompress8(
                         handle, buf, jpeg.length, dst, sw * 4, TurboJpeg.TJPF_BGRA()), "decode");
-                if (decodeWarning != null) warning = decodeWarning;
+                // TurboJPEG keeps one message per call; the decode's wins unless
+                // only the header's marks the data corrupt.
+                if (decodeWarning != null
+                        && (corruptionOf(warning) == null || corruptionOf(decodeWarning) != null)) {
+                    warning = decodeWarning;
+                }
                 byte[] bgra = new byte[sw * sh * 4];
                 MemorySegment.copy(dst, ValueLayout.JAVA_BYTE, 0, bgra, 0, bgra.length);
 
@@ -191,7 +215,9 @@ final class TurboJpegStills {
 
     /**
      * Null on success; libjpeg-turbo's message for a non-fatal warning (the
-     * output is still produced); throws on a fatal error.
+     * output is still produced); throws on a fatal error — a
+     * {@link CorruptMediaException} when the message is one of libjpeg's
+     * corrupt-data messages ({@link #isCorruptDataMessage}).
      */
     private static String check(MemorySegment handle, int status, String stage) {
         if (status == 0) return null;
@@ -199,7 +225,53 @@ final class TurboJpegStills {
         boolean warning = TurboJpeg.tj3GetErrorCode(handle) == TurboJpeg.TJERR_WARNING();
         String message = errorString(handle);
         if (warning) return message;
-        throw new MediaException("TurboJPEG " + stage + " failed: " + message);
+        String failure = "TurboJPEG " + stage + " failed: " + message;
+        throw isCorruptDataMessage(message)
+                ? new CorruptMediaException(failure)
+                : new MediaException(failure);
+    }
+
+    /**
+     * libjpeg's message table (jerror.h) is the only precision TurboJPEG 3
+     * offers — {@code tj3GetErrorCode} says just warning/fatal. These are the
+     * entries that describe malformed data; the "Unsupported …", "… not
+     * supported", out-of-memory and size-limit entries are capability or
+     * resource failures and stay plain.
+     */
+    private static final List<String> CORRUPT_DATA_MESSAGES = List.of(
+            "Bogus ",                              // JERR_BAD_LENGTH, _HUFF_TABLE, DQT/DHT/DAC index…
+            "Invalid JPEG file structure",         // JERR_SOI_DUPLICATE, SOF_DUPLICATE, SOS_NO_SOF…
+            "Corrupt JPEG data",                   // JWRN_HIT_MARKER, JWRN_MUST_RESYNC, …
+            "Premature end of",                    // JWRN_JPEG_EOF, JERR_INPUT_EOF
+            "Huffman table 0x",                    // JERR_NO_HUFF_TABLE: "… was not defined"
+            "Quantization table 0x",               // JERR_NO_QUANT_TABLE
+            "Huffman code size table overflow",    // JERR_HUFF_CLEN_OVERFLOW
+            "Invalid component ID",                // JERR_BAD_COMPONENT_ID
+            "Empty input file");                   // JERR_INPUT_EMPTY
+
+    static boolean isCorruptDataMessage(String message) {
+        if (message == null) return false;
+        for (String prefix : CORRUPT_DATA_MESSAGES) {
+            if (message.startsWith(prefix)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Whether a non-fatal decode warning marks the file corrupt: the image is
+     * still shown, and the file is labelled corrupt. Returns the warning when
+     * it is a corrupt-data message ({@link #isCorruptDataMessage}), null
+     * otherwise. One exception: JWRN_EXTRANEOUS_DATA ("Corrupt JPEG data: N
+     * extraneous bytes before marker 0x..") is common in camera files and
+     * usually harmless, so it stays a trace note only.
+     */
+    static String corruptionOf(String warning) {
+        if (!isCorruptDataMessage(warning)) return null;
+        if (warning.startsWith("Corrupt JPEG data: ")
+                && warning.contains(" extraneous bytes before marker ")) {
+            return null;
+        }
+        return warning;
     }
 
     private static String errorString(MemorySegment handle) {
@@ -264,13 +336,18 @@ final class TurboJpegStills {
     /**
      * The EXIF orientation of a JPEG file, read from its head (128 KB is
      * ample: the APP1 segment precedes the image data). Needs no native —
-     * usable even where the turbojpeg fast path is unavailable.
+     * usable even where the turbojpeg fast path is unavailable. Absent or
+     * malformed EXIF is orientation 1; a file that cannot be read is not —
+     * an upright-assumed frame would be a silently wrong rotation.
+     *
+     * @throws MediaException when the file cannot be read
      */
     static int exifOrientation(Path file) {
         try (var in = Files.newInputStream(file)) {
             return exifOrientation(in.readNBytes(128 * 1024));
         } catch (IOException e) {
-            return 1;
+            throw new MediaException("cannot read " + file.getFileName()
+                    + " for its EXIF orientation: " + e.getMessage(), e);
         }
     }
 

@@ -35,8 +35,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
-import java.util.function.Function;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
@@ -182,7 +183,7 @@ public final class MoveController implements MoveDialogIntents {
      */
     BooleanSupplier trashSupported = TrashOps::isSupported;
     Predicate<List<Path>> trashConfirmation = this::confirmTrash;
-    Function<List<Path>, TrashOps.Result> trash = TrashOps::moveToTrash;
+    BiFunction<List<Path>, Consumer<Path>, TrashOps.Result> trash = TrashOps::moveToTrash;
 
     /**
      * How long a move waits, on the fileOp thread, for {@link Host#releaseBeforeMove}
@@ -341,7 +342,7 @@ public final class MoveController implements MoveDialogIntents {
             fileOps.run(() -> {
                         awaitReleased(released);
                         try (var held = ArchivePaths.releaseForMutation(moving)) {
-                            return persistTrashed(trash.apply(moving));
+                            return trashPersistingEach(moving);
                         }
                     })
                     .whenComplete((trashed, error) -> fxThread.execute(() ->
@@ -403,25 +404,56 @@ public final class MoveController implements MoveDialogIntents {
     }
 
     /**
-     * Off the FX thread, straight after the bulk trash: write one entry per
-     * accepted item to the on-disk log, so the FX thread only has to show them.
+     * Off the FX thread: trash {@code moving}, writing each item's entry to the
+     * on-disk log the moment the OS accepts it and before the next item is
+     * tried — a crash or forced quit mid-batch then leaves a line for every
+     * item already in the Trash, as {@link #moveOne} does for moves. The FX
+     * thread only has to show the entries.
+     *
+     * <p>An unexpected failure of the bulk call itself still hands back the
+     * entries already written, so the panel and listing reflect them next to
+     * the error.</p>
      */
-    private static Trashed persistTrashed(TrashOps.Result result) {
+    private Trashed trashPersistingEach(List<Path> moving) {
         List<ActionLogEntry> entries = new ArrayList<>();
-        for (Path moved : result.moved()) {
-            ActionLogEntry entry = ActionLogEntry.trashed(moved);
-            ActionLog.get().persist(entry);
-            entries.add(entry);
+        try {
+            TrashOps.Result result = trash.apply(moving, accepted -> {
+                ActionLogEntry entry = ActionLogEntry.trashed(accepted);
+                // The item is in the Trash whatever the log does: like landed(),
+                // a logging failure is reported, not turned into a trash failure.
+                try {
+                    ActionLog.get().persist(entry);
+                } catch (RuntimeException e) {
+                    System.err.println("Cannot write the action log entry for "
+                            + ArchivePaths.format(accepted) + ": " + e);
+                    e.printStackTrace();
+                }
+                entries.add(entry);
+            });
+            return new Trashed(result, entries, null);
+        } catch (RuntimeException e) {
+            if (entries.isEmpty()) throw e;
+            return new Trashed(null, entries, e);
         }
-        return new Trashed(result, entries);
     }
 
-    /** A bulk trash result with the entries already written for it. */
-    private record Trashed(TrashOps.Result result, List<ActionLogEntry> entries) {}
+    /**
+     * A trash outcome with the entries already written for it: the bulk
+     * result, or — when the bulk call failed part-way — the error together
+     * with the entries for the items that reached the Trash before it.
+     */
+    private record Trashed(TrashOps.Result result, List<ActionLogEntry> entries,
+                           RuntimeException error) {}
 
     /** Apply a native trash result back on the FX thread. */
     private void finishTrash(Trashed trashed, Throwable error, Path nextFocus) {
         try {
+            if (error == null && trashed.error() != null) {
+                // Failed part-way: show what did reach the Trash, then the error.
+                trashed.entries().forEach(ActionLog.get()::recordPersisted);
+                host.refreshAfterMove(nextFocus);
+                error = trashed.error();
+            }
             if (error != null) {
                 host.showStatus("Move to " + trashDestinationName() + " failed: "
                         + message(error));

@@ -6,6 +6,7 @@ import io.github.ghosthack.mediabrowser.media.archive.ArchiveInfo;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.archive.stream.StreamFileSystemProvider.PdfMrcView;
 import io.github.ghosthack.mediabrowser.media.color.ColorPolicy;
+import io.github.ghosthack.mediabrowser.media.ffm.UntaggedMatrix;
 import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionEngine;
 import io.github.ghosthack.mediabrowser.media.superres.SuperResolutionModel;
 
@@ -111,6 +112,14 @@ public final class MediaService implements AutoCloseable {
     private final ConcurrentMap<Path, Integer> knownFolderItemCounts =
             new ConcurrentHashMap<>();
     /**
+     * Files (and containers) a decoder has reported corrupt, with the
+     * decoder's message — learned as a by-product of decodes the views already
+     * asked for, never by a scan of its own. See {@link #corruption}.
+     */
+    private final ConcurrentMap<Path, String> corruptFiles = new ConcurrentHashMap<>();
+    private final List<Consumer<Path>> corruptionListeners =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+    /**
      * What the most recent {@link #scan} dropped, so a view can put a count on
      * screen rather than omitting silently. Scans are serialized on one
      * executor and a view reads this immediately after its own listing lands,
@@ -149,6 +158,19 @@ public final class MediaService implements AutoCloseable {
      */
     private final ExecutorService folderTreeExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "media-folder-tree");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /**
+     * Small per-file sidecar reads a view needs before it can paint a tile
+     * (the mosaic's {@code .picasa.ini} adjustments) run here, so the paint
+     * itself never touches disk. Its own thread: behind a move on
+     * {@code media-file-op} or a decode on {@code media-facade}, tiles would
+     * stall waiting for a few bytes of sidecar.
+     */
+    private final ExecutorService sidecarExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "media-sidecar");
         t.setDaemon(true);
         return t;
     });
@@ -377,13 +399,20 @@ public final class MediaService implements AutoCloseable {
 
     public CompletableFuture<MediaProbe> probe(Path file) {
         return CompletableFuture.supplyAsync(() -> {
-            Path read = live(file);
-            Optional<PdfMrcView> mrc = PdfMrcMedia.view(read);
-            if (mrc.isPresent()) return relabel(file, PdfMrcMedia.probe(read, mrc.get()));
-            rejectIfEmpty(read);
-            MediaProbe decoded = facade.probe(decodable(read));
-            return relabel(file, EpubEntryDetails.preserveProbe(
-                    read, PdfEntryDetails.preserveProbe(read, decoded)));
+            try {
+                Path read = live(file);
+                Optional<PdfMrcView> mrc = PdfMrcMedia.view(read);
+                if (mrc.isPresent()) return relabel(file, PdfMrcMedia.probe(read, mrc.get()));
+                rejectIfEmpty(read);
+                MediaProbe decoded = facade.probe(decodable(read));
+                return relabel(file, EpubEntryDetails.preserveProbe(
+                        read, PdfEntryDetails.preserveProbe(read, decoded)));
+            } catch (RuntimeException e) {
+                // A clean probe proves nothing about the pixel data, so only
+                // a failure updates the corrupt record here.
+                noteFailure(file, e);
+                throw e;
+            }
         }, executor);
     }
 
@@ -436,8 +465,7 @@ public final class MediaService implements AutoCloseable {
 
     private static VisualResult preserveVisual(Path source, VisualResult decoded) {
         MediaProbe probe = PdfEntryDetails.preserveProbe(source, decoded.probe());
-        return new VisualResult(
-                EpubEntryDetails.preserveProbe(source, probe), decoded.frame());
+        return decoded.withProbe(EpubEntryDetails.preserveProbe(source, probe));
     }
 
     /**
@@ -495,7 +523,7 @@ public final class MediaService implements AutoCloseable {
 
     private static VisualResult relabel(Path file, VisualResult visual) {
         MediaProbe probe = relabel(file, visual.probe());
-        return probe == visual.probe() ? visual : new VisualResult(probe, visual.frame());
+        return probe == visual.probe() ? visual : visual.withProbe(probe);
     }
 
     private static Metadata relabel(Path file, Metadata metadata) {
@@ -581,9 +609,11 @@ public final class MediaService implements AutoCloseable {
             long postStarted = System.nanoTime();
             VisualResult result = relabel(file, preserveVisual(read, decoded));
             trace.postProcess(System.nanoTime() - postStarted);
+            noteVerdict(file, result.corruption());
             return result;
         } catch (RuntimeException | Error e) {
             failure = e;
+            noteFailure(file, e);
             if (!trace.hasAttempts()) {
                 trace.failed("Prepare media input", dispatchStarted, e);
             }
@@ -714,6 +744,8 @@ public final class MediaService implements AutoCloseable {
             // pinned to it, so a viewer override changing it meanwhile can
             // neither leak into nor be masked by another policy's tiles.
             ColorPolicy.Snapshot color = ColorPolicy.snapshot();
+            // Likewise the untagged-video matrix a video poster converts with.
+            UntaggedMatrix.Policy untagged = UntaggedMatrix.policy();
             AaeStore edits = aaeStore;
             AaeSidecar aae = null;
             ThumbnailKey key = null;
@@ -722,7 +754,7 @@ public final class MediaService implements AutoCloseable {
                 afterThumbnailRevive.accept(read);
                 aae = edits == null ? null : edits.forImage(read).orElse(null);
                 try {
-                    key = keyFor(file, read, maxEdge, mode, aae, color);
+                    key = keyFor(file, read, maxEdge, mode, aae, color, untagged);
                 } catch (ClosedFileSystemException e) {
                     // Closed again between the revive and the stat: re-mount,
                     // bounded like ArchiveEntryCache's own re-mounting.
@@ -744,6 +776,9 @@ public final class MediaService implements AutoCloseable {
             if (hit != null) {
                 MediaTelemetry.recordThumbnailCacheHit();
                 thumbnailCacheHits.increment();
+                // The cached rendition still carries its decode's verdict:
+                // re-assert it, since a viewer load may have changed it meanwhile.
+                if (hit.corruption() != null) noteCorrupt(file, hit.corruption());
                 return CompletableFuture.completedFuture(hit);
             }
 
@@ -767,7 +802,7 @@ public final class MediaService implements AutoCloseable {
                             long engineStarted = trace.beginAttempt();
                             try {
                                 Thumbnail result = thumbnailCache.get(k,
-                                        () -> ColorPolicy.pinned(color,
+                                        () -> pinned(color, untagged,
                                                 () -> applyAaeThumbnail(PdfMrcMedia.thumbnail(
                                                         mrc.get(), facade, MediaService::decodable,
                                                         decodeEdge, decodeMode), edit, maxEdge, mode)));
@@ -789,16 +824,19 @@ public final class MediaService implements AutoCloseable {
                                         ? "Materialized archive entry" : "No materialization required");
                         long engineStarted = System.nanoTime();
                         try {
-                            return thumbnailCache.get(k,
-                                    () -> ColorPolicy.pinned(color,
+                            Thumbnail generated = thumbnailCache.get(k,
+                                    () -> pinned(color, untagged,
                                             () -> applyAaeThumbnail(facade.loadThumbnail(
                                                     input, decodeEdge, decodeMode, trace),
                                                     edit, maxEdge, mode)));
+                            noteVerdict(file, generated.corruption());
+                            return generated;
                         } finally {
                             trace.engineWork(System.nanoTime() - engineStarted);
                         }
                     } catch (RuntimeException | Error e) {
                         failure = e;
+                        noteFailure(file, e);
                         if (!trace.hasAttempts()) {
                             trace.failed("Prepare media input", trace.beginAttempt(), e);
                         }
@@ -877,6 +915,90 @@ public final class MediaService implements AutoCloseable {
                 thumbnailCache.entryCount(),
                 thumbnailCache.usedBytes(),
                 thumbnailBudgetBytes);
+    }
+
+    /**
+     * The decoder's message when a decode of {@code file} (a thumbnail, a
+     * viewer load, a probe, or entering it as an archive) last failed as
+     * corrupt data ({@link CorruptData}), or last decoded only with the
+     * decoder warning the data is damaged (a thumbnail or visual carrying a
+     * {@code corruption} message — the image is shown and labelled); empty
+     * when it never did or a later clean thumbnail/viewer decode or archive
+     * open succeeded. A map read, safe on
+     * the FX thread: no file is read to answer it.
+     */
+    public Optional<String> corruption(Path file) {
+        return file == null ? Optional.empty() : Optional.ofNullable(corruptFiles.get(file));
+    }
+
+    /**
+     * Called with the path whenever {@link #corruption} changes for it, on the
+     * worker thread that learned it; callers marshal to their UI thread.
+     */
+    public void addCorruptionListener(Consumer<Path> listener) {
+        corruptionListeners.add(listener);
+    }
+
+    /** Records a failure's corrupt verdict for {@code file}; other failures change nothing. */
+    private void noteFailure(Path file, Throwable error) {
+        Optional<CorruptData> corrupt = MediaFailures.corruption(error);
+        if (corrupt.isEmpty() || file == null) return;
+        String message = MediaFailures.message(error)
+                .substring(MediaFailures.CORRUPT_PREFIX.length());
+        if (!message.equals(corruptFiles.put(file, message))) notifyCorruption(file);
+    }
+
+    /** A decode or open of {@code file} succeeded: the data read clean this time. */
+    private void noteDecoded(Path file) {
+        if (file != null && corruptFiles.remove(file) != null) notifyCorruption(file);
+    }
+
+    /**
+     * A decode of {@code file} produced pixels but its decoder reported the
+     * data damaged ({@link Thumbnail#corruption}, {@link VisualResult#corruption}):
+     * the file is recorded corrupt with {@code message}, listeners notified.
+     */
+    void noteCorrupt(Path file, String message) {
+        if (file == null || message == null) return;
+        if (!message.equals(corruptFiles.put(file, message))) notifyCorruption(file);
+    }
+
+    /** A completed decode's verdict: corrupt when it carries a message, else clean. */
+    private void noteVerdict(Path file, String corruption) {
+        if (corruption != null) {
+            noteCorrupt(file, corruption);
+        } else {
+            noteDecoded(file);
+        }
+    }
+
+    private void notifyCorruption(Path file) {
+        for (Consumer<Path> listener : corruptionListeners) {
+            try {
+                listener.accept(file);
+            } catch (RuntimeException e) {
+                System.err.println("[MediaService] corruption listener failed: " + e);
+            }
+        }
+    }
+
+    /**
+     * Enters an archive for browsing (see {@link ArchivePaths#browseRoot}) on
+     * the {@code media-file-op} thread, recording a corrupt container in
+     * {@link #corruption} so its tile and row can say so.
+     */
+    public CompletableFuture<Path> enterArchive(Path archive) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                Path root = ArchivePaths.browseRoot(archive);
+                noteDecoded(archive);
+                return root;
+            } catch (IOException e) {
+                MediaException failure = new MediaException(e.getMessage(), e);
+                noteFailure(archive, failure);
+                throw failure;
+            }
+        }, fileOpExecutor);
     }
 
     private static String thumbnailDetail(Thumbnail result, int maxEdge, ThumbnailMode mode) {
@@ -1242,13 +1364,15 @@ public final class MediaService implements AutoCloseable {
 
     /**
      * The cache key for {@code file}, statting {@code read}, its live twin, and
-     * stamping recoverable sidecar geometry and the color policy it renders under.
+     * stamping recoverable sidecar geometry and the color policy and
+     * untagged-video matrix it renders under.
      *
      * @throws ClosedFileSystemException when {@code read}'s archive closed
      *         before the stat, for the caller to revive and retry
      */
     private static ThumbnailKey keyFor(Path file, Path read, int maxEdge, ThumbnailMode mode,
-                                       AaeSidecar aae, ColorPolicy.Snapshot color) {
+                                       AaeSidecar aae, ColorPolicy.Snapshot color,
+                                       UntaggedMatrix.Policy untagged) {
         long mtime = 0, size = -1;
         try {
             BasicFileAttributes attrs = Files.readAttributes(read, BasicFileAttributes.class);
@@ -1265,7 +1389,22 @@ public final class MediaService implements AutoCloseable {
             // unreadable stat: key on path + maxEdge + mode alone (mtime 0, size -1)
         }
         return new ThumbnailKey(file, mtime, size, maxEdge, mode, aaeSignature(aae),
-                color.signature());
+                colorSignature(color, untagged));
+    }
+
+    /**
+     * The rendition's colour identity: the color policy plus the matrix an
+     * untagged video poster converts with, so a Settings change of
+     * {@code video.untaggedMatrix} misses the tiles rendered under the old one.
+     */
+    static String colorSignature(ColorPolicy.Snapshot color, UntaggedMatrix.Policy untagged) {
+        return color.signature() + "; untagged " + untagged.name().toLowerCase(Locale.ROOT);
+    }
+
+    /** Runs a thumbnail generation under exactly the policies its key names. */
+    private static <T> T pinned(ColorPolicy.Snapshot color, UntaggedMatrix.Policy untagged,
+                                Supplier<T> work) {
+        return UntaggedMatrix.pinned(untagged, () -> ColorPolicy.pinned(color, work));
     }
 
     /** Stable cache identity for precisely the AAE geometry this service bakes. */
@@ -1316,7 +1455,7 @@ public final class MediaService implements AutoCloseable {
                 : Long.MAX_VALUE;
         if (mw <= 0 || mh <= 0 || aspectError > Math.max(mw, mh)) {
             RasterFrame scaled = Thumbnails.scale(src, maxEdge, mode);
-            return new Thumbnail(Optional.of(scaled), thumbnail.kind(), thumbnail.colorProfile());
+            return thumbnail.withFrame(Optional.of(scaled));
         }
 
         RasterFrame edited = src;
@@ -1335,7 +1474,7 @@ public final class MediaService implements AutoCloseable {
                     Math.max(1, x1 - x0), Math.max(1, y1 - y0));
         }
         RasterFrame scaled = Thumbnails.scale(edited, maxEdge, mode);
-        return new Thumbnail(Optional.of(scaled), thumbnail.kind(), thumbnail.colorProfile());
+        return thumbnail.withFrame(Optional.of(scaled));
     }
 
     /**
@@ -1425,6 +1564,14 @@ public final class MediaService implements AutoCloseable {
      */
     public <T> CompletableFuture<T> folderTreeListing(Supplier<T> task) {
         return CompletableFuture.supplyAsync(task, folderTreeExecutor);
+    }
+
+    /**
+     * Runs a small sidecar read (a directory's {@code .picasa.ini} adjustments)
+     * off the FX thread on its own thread, so painting never reads a file.
+     */
+    public <T> CompletableFuture<T> sidecarRead(Supplier<T> task) {
+        return CompletableFuture.supplyAsync(task, sidecarExecutor);
     }
 
     public String nativeVersions() {
@@ -1674,7 +1821,18 @@ public final class MediaService implements AutoCloseable {
         Optional<MediaKind> byExtension = ExtensionClassifier.classify(file);
         if (byExtension.equals(Optional.of(MediaKind.IMAGE))
                 && isAnimatedSequence.test(file)) {
-            return facadeClassify.apply(file);
+            try {
+                return facadeClassify.apply(file);
+            } catch (RuntimeException e) {
+                // The backend failed on the file (it did not answer "not
+                // media"). One broken file must not fail the whole listing,
+                // so it keeps the name's verdict — logged here, and opening
+                // it runs the same backend and shows the error in the viewer.
+                System.err.println("media-browser: cannot classify "
+                        + ArchivePaths.format(file) + " (" + e.getMessage()
+                        + "); listed by its name as " + byExtension.get());
+                return byExtension;
+            }
         }
         return byExtension;
     }
@@ -1745,6 +1903,7 @@ public final class MediaService implements AutoCloseable {
         fileOpExecutor.shutdownNow();
         metadataExecutor.shutdownNow();
         folderTreeExecutor.shutdownNow();
+        sidecarExecutor.shutdownNow();
         superResolutionExecutor.shutdownNow();
         thumbnailExecutor.shutdownNow();
         thumbnailCache.clear();

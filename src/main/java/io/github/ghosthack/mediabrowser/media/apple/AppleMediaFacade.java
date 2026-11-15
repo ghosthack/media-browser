@@ -88,13 +88,13 @@ public final class AppleMediaFacade implements MediaFacade {
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
             VideoInfo vi = videoInfo(file);
-            if (vi != null && vi.width() > 0 && vi.height() > 0) {
+            if (vi.width() > 0 && vi.height() > 0) {
                 return Optional.of(MediaKind.VIDEO);
             }
         }
         if (VIDEO_EXTENSIONS.contains(ext) || AUDIO_EXTENSIONS.contains(ext)) {
             AudioInfo ai = audioInfo(file);
-            if (ai != null && ai.hasAudio()) {
+            if (ai.hasAudio()) {
                 return Optional.of(MediaKind.AUDIO);
             }
         }
@@ -113,13 +113,13 @@ public final class AppleMediaFacade implements MediaFacade {
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
             VideoInfo vi = videoInfo(file);
-            if (vi != null && vi.width() > 0 && vi.height() > 0) {
+            if (vi.width() > 0 && vi.height() > 0) {
                 return videoProbe(file, vi);
             }
         }
         if (VIDEO_EXTENSIONS.contains(ext) || AUDIO_EXTENSIONS.contains(ext)) {
             AudioInfo ai = audioInfo(file);
-            if (ai != null && ai.hasAudio()) {
+            if (ai.hasAudio()) {
                 return audioProbe(file, ai);
             }
         }
@@ -137,7 +137,7 @@ public final class AppleMediaFacade implements MediaFacade {
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
             VideoInfo vi = videoInfo(file);
-            if (vi != null && vi.width() > 0 && vi.height() > 0) {
+            if (vi.width() > 0 && vi.height() > 0) {
                 try (Arena arena = Arena.ofConfined()) {
                     DecodedImage<PixelFormat> frame =
                             AVFoundation.extractFrame(arena, file.toString(), 0);
@@ -147,7 +147,7 @@ public final class AppleMediaFacade implements MediaFacade {
         }
         if (VIDEO_EXTENSIONS.contains(ext) || AUDIO_EXTENSIONS.contains(ext)) {
             AudioInfo ai = audioInfo(file);
-            if (ai != null && ai.hasAudio()) {
+            if (ai.hasAudio()) {
                 return new VisualResult(audioProbe(file, ai), Optional.empty()); // no cover art
             }
         }
@@ -165,8 +165,14 @@ public final class AppleMediaFacade implements MediaFacade {
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
             long video = trace.beginAttempt();
-            VideoInfo vi = videoInfo(file);
-            if (vi != null && vi.width() > 0 && vi.height() > 0) {
+            VideoInfo vi;
+            try {
+                vi = videoInfo(file);
+            } catch (RuntimeException e) {
+                trace.failed("AVFoundation video probe", video, e);
+                throw e;
+            }
+            if (vi.width() > 0 && vi.height() > 0) {
                 try (Arena arena = Arena.ofConfined()) {
                     DecodedImage<PixelFormat> frame =
                             AVFoundation.extractFrame(arena, file.toString(), 0);
@@ -184,9 +190,15 @@ public final class AppleMediaFacade implements MediaFacade {
             }
         }
         if (VIDEO_EXTENSIONS.contains(ext) || AUDIO_EXTENSIONS.contains(ext)) {
-            AudioInfo ai = audioInfo(file);
-            if (ai != null && ai.hasAudio()) {
-                long audio = trace.beginAttempt();
+            long audio = trace.beginAttempt();
+            AudioInfo ai;
+            try {
+                ai = audioInfo(file);
+            } catch (RuntimeException e) {
+                trace.failed("AVFoundation audio probe", audio, e);
+                throw e;
+            }
+            if (ai.hasAudio()) {
                 trace.succeeded("AVFoundation audio probe", audio, "Audio-only; no cover art");
                 return new VisualResult(audioProbe(file, ai), Optional.empty());
             }
@@ -213,16 +225,15 @@ public final class AppleMediaFacade implements MediaFacade {
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
             VideoInfo vi = videoInfo(file);
-            if (vi != null && vi.width() > 0 && vi.height() > 0) {
-                try {
-                    return videoThumbnail(file, vi, maxEdge, mode);
-                } catch (RuntimeException e) {
-                    // best-effort: fall through to the interface default below
-                }
+            if (vi.width() > 0 && vi.height() > 0) {
+                // A poster failure is this file's error: no full-size retry
+                // stands in for it (AVFoundation already widens its own time
+                // tolerance before giving up).
+                return posterThumbnail(file, vi, maxEdge, mode);
             }
         }
-        // Audio cover art (and any video the native path declined) fall back to
-        // the interface default (full visual via AVFoundation + JVM scale/crop).
+        // Audio (and a video-extension file with no video track) take the
+        // interface default: the audio probe, no cover art.
         return MediaFacade.super.loadThumbnail(file, maxEdge, mode);
     }
 
@@ -234,17 +245,13 @@ public final class AppleMediaFacade implements MediaFacade {
         }
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
-            VideoInfo vi = videoInfo(file);
-            if (vi != null && vi.width() > 0 && vi.height() > 0) {
-                long video = trace.beginAttempt();
-                try {
-                    Thumbnail result = videoThumbnail(file, vi, maxEdge, mode);
-                    trace.succeeded("AVFoundation maximum-size poster", video,
-                            thumbnailDetail(result, maxEdge, mode));
-                    return result;
-                } catch (RuntimeException e) {
-                    trace.failed("AVFoundation maximum-size poster", video, e);
-                }
+            VideoInfo vi = traced(trace, "AVFoundation video probe",
+                    () -> videoInfo(file), v -> v.width() > 0 && v.height() > 0
+                            ? v.width() + "×" + v.height() : "No video track");
+            if (vi.width() > 0 && vi.height() > 0) {
+                return traced(trace, "AVFoundation maximum-size poster",
+                        () -> posterThumbnail(file, vi, maxEdge, mode),
+                        t -> thumbnailDetail(t, maxEdge, mode));
             }
         }
         long full = trace.beginAttempt();
@@ -362,12 +369,23 @@ public final class AppleMediaFacade implements MediaFacade {
         }
     }
 
+    private Thumbnail posterThumbnail(Path file, VideoInfo vi, int maxEdge,
+                                     ThumbnailMode mode) {
+        try {
+            return videoThumbnail(file, vi, maxEdge, mode);
+        } catch (RuntimeException e) {
+            throw new MediaException("apple: cannot extract video poster "
+                    + file.getFileName() + ": " + e.getMessage(), e);
+        }
+    }
+
     /**
      * The AVFoundation animation track of an animated AVIF/HEIC; empty when
      * AVFoundation exposes none, which is what routes the file to the still.
+     * A failed track read throws instead (see {@link #videoInfo}).
      */
     private static Optional<VideoInfo> animationTrack(Path file) {
-        return Optional.ofNullable(videoInfo(file))
+        return Optional.of(videoInfo(file))
                 .filter(vi -> vi.width() > 0 && vi.height() > 0);
     }
 
@@ -465,12 +483,20 @@ public final class AppleMediaFacade implements MediaFacade {
     }
 
     // -- track probes (each opens the asset once; value records, arena-free to return) --
+    //
+    // "Not applicable" lives in the value, never in a failure: an asset with
+    // no video track reports 0x0, one with no audio track hasAudio() == false
+    // (AVURLAsset opens any readable file; non-media simply has no tracks).
+    // An exception therefore means AVFoundation itself failed on the file,
+    // and it surfaces as this file's error instead of reading as "no track"
+    // and routing the file on to a route that then fails without the cause.
 
     private static VideoInfo videoInfo(Path file) {
         try (Arena arena = Arena.ofConfined()) {
             return AVFoundation.getVideoInfo(arena, file.toString());
         } catch (RuntimeException e) {
-            return null;
+            throw new MediaException("apple: cannot read the video track of "
+                    + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
 
@@ -478,20 +504,29 @@ public final class AppleMediaFacade implements MediaFacade {
         try (Arena arena = Arena.ofConfined()) {
             return AVFoundation.getAudioInfo(arena, file.toString());
         } catch (RuntimeException e) {
-            return null;
+            throw new MediaException("apple: cannot read the audio track of "
+                    + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
 
     // -- internals -----------------------------------------------------------
 
-    /** Content-sniff whether ImageIO recognizes the file as a still image. */
+    /**
+     * Content-sniff whether ImageIO recognizes the file as a still image.
+     * {@code false} is the answer "not a still ImageIO knows"; a file that
+     * cannot be read at all is an error, not that answer — otherwise an
+     * unreadable photo would route on to the AV probes and end in a
+     * cause-less "cannot probe".
+     */
     private static boolean sniffImage(Path file) {
+        byte[] header;
         try {
-            byte[] header = readHeader(file, 512);
-            return header.length > 0 && ImageIO.canDecode(header, header.length);
+            header = readHeader(file, 512);
         } catch (IOException e) {
-            return false;
+            throw new MediaException("apple: cannot read " + file.getFileName()
+                    + ": " + e.getMessage(), e);
         }
+        return header.length > 0 && ImageIO.canDecode(header, header.length);
     }
 
     private MediaProbe imageProbe(Path file) {

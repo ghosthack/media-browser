@@ -1,6 +1,7 @@
 package io.github.ghosthack.mediabrowser.media.ffm;
 
 import java.util.Locale;
+import java.util.function.Supplier;
 
 /**
  * Which YCbCr matrix a video frame with <em>no</em> matrix tag is converted
@@ -11,8 +12,9 @@ import java.util.Locale;
  * <p>Like {@link HwDecode} this is a per-session routing axis of the
  * bundled-FFmpeg backends: a Settings save applies to the next playback
  * session. It covers video playback (the CPU swscale path and the zero-copy
- * GPU path alike); stills and posters are not touched, because an untagged
- * still (WebP, AVIF, JPEG) is BT.601 by its format's own rule.</p>
+ * GPU path alike) and that video's poster and thumbnails, so a thumbnail
+ * matches the first frame played. Stills are not touched, because an
+ * untagged still (WebP, AVIF, JPEG) is BT.601 by its format's own rule.</p>
  */
 public final class UntaggedMatrix {
 
@@ -33,6 +35,8 @@ public final class UntaggedMatrix {
     static final int AVCOL_SPC_UNSPECIFIED = 2;
 
     private static volatile Policy policy = Policy.AUTO;
+    /** A policy pinned for the current thread's operation; wins over {@link #policy}. */
+    private static final ThreadLocal<Policy> PINNED = new ThreadLocal<>();
 
     private UntaggedMatrix() {}
 
@@ -55,8 +59,25 @@ public final class UntaggedMatrix {
         }
     }
 
+    /** The policy in effect on this thread: its pinned one, else the configured one. */
     public static Policy policy() {
-        return policy;
+        Policy pinned = PINNED.get();
+        return pinned != null ? pinned : policy;
+    }
+
+    /**
+     * Runs {@code work} on this thread under {@code pinned}, regardless of a
+     * concurrent {@link #configure}: a cached thumbnail keyed by a policy is
+     * then rendered under exactly that policy.
+     */
+    public static <T> T pinned(Policy pinned, Supplier<T> work) {
+        Policy previous = PINNED.get();
+        PINNED.set(pinned);
+        try {
+            return work.get();
+        } finally {
+            if (previous == null) PINNED.remove(); else PINNED.set(previous);
+        }
     }
 
     /**
@@ -68,7 +89,7 @@ public final class UntaggedMatrix {
         if (colorspace != AVCOL_SPC_UNSPECIFIED) {
             return colorspace;
         }
-        return switch (policy) {
+        return switch (policy()) {
             case BT601 -> AVCOL_SPC_UNSPECIFIED;
             case BT709 -> AVCOL_SPC_BT709;
             case AUTO -> width >= 1280 || height > 576 ? AVCOL_SPC_BT709 : AVCOL_SPC_UNSPECIFIED;

@@ -5,6 +5,7 @@ import io.github.ghosthack.mediabrowser.media.VideoRotation;
 import io.github.ghosthack.mediabrowser.media.VideoStream;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.Ffm;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegBindings;
+import io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegErrors;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.Rational;
 
 import java.lang.foreign.Arena;
@@ -291,7 +292,7 @@ final class FfmpegVideoStream implements VideoStream {
                 return false;
             }
             if (rr != ff.averrorEagain()) {
-                throw new MediaException("ffmpeg: decode failed: " + ff.errStr(rr));
+                throw FfmpegErrors.failure("ffmpeg: decode failed: " + ff.errStr(rr), rr);
             }
             if (draining) {
                 ended = true;
@@ -307,7 +308,7 @@ final class FfmpegVideoStream implements VideoStream {
                 } else if (sr != ff.averrorEagain()) {
                     packetPending = false;
                     ff.packetUnref(pkt);
-                    throw new MediaException("ffmpeg: send packet failed: " + ff.errStr(sr));
+                    throw FfmpegErrors.failure("ffmpeg: send packet failed: " + ff.errStr(sr), sr);
                 }
                 continue;
             }
@@ -320,7 +321,7 @@ final class FfmpegVideoStream implements VideoStream {
             if (r < 0) {
                 // An I/O or demux failure (unplugged drive, corrupt file) is
                 // an error, never "ended" — Repeat would replay it in a loop.
-                throw new MediaException("ffmpeg: read failed: " + ff.errStr(r));
+                throw FfmpegErrors.failure("ffmpeg: read failed: " + ff.errStr(r), r);
             }
             if (ff.packetStreamIndex(pkt) == videoIndex && ff.packetHasPayload(pkt)) {
                 int sr = ff.sendPacket(cctx, pkt);
@@ -333,7 +334,7 @@ final class FfmpegVideoStream implements VideoStream {
                 }
                 if (sr < 0 && sr != ff.averrorEof()) {
                     ff.packetUnref(pkt);
-                    throw new MediaException("ffmpeg: send packet failed: " + ff.errStr(sr));
+                    throw FfmpegErrors.failure("ffmpeg: send packet failed: " + ff.errStr(sr), sr);
                 }
             }
             ff.packetUnref(pkt);

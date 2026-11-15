@@ -9,6 +9,7 @@ import io.github.ghosthack.mediabrowser.media.Adjustments;
 import io.github.ghosthack.mediabrowser.media.ColorProfile;
 import io.github.ghosthack.mediabrowser.media.ContentSniffer;
 import io.github.ghosthack.mediabrowser.media.ExtensionClassifier;
+import io.github.ghosthack.mediabrowser.media.MediaFailures;
 import io.github.ghosthack.mediabrowser.media.MediaItem;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
@@ -105,6 +106,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
@@ -2109,7 +2111,8 @@ public final class ViewerWindow implements AppShell.ShellView {
                             imageView.setImage(null);
                             placeholder.setText("Cannot display " + item.fileName()
                                     + "\n" + rootMessage(error));
-                            statusLabel.setText(item.fileName() + " — error");
+                            statusLabel.setText(item.fileName() + (MediaFailures.isCorrupt(error)
+                                    ? " — corrupt" : " — error"));
                             service.markVisualPresented(item.path());
                         }
                         diagnosticsPanel.refresh();
@@ -2119,7 +2122,9 @@ public final class ViewerWindow implements AppShell.ShellView {
                     // while a video plays: autoplay (on by default) starts playback
                     // before this decode lands, so a player-guard at the top would
                     // leave the panel stuck on the previous item for every movie.
-                    infoPanel.show(result.probe());
+                    // Decoded from damaged data (a libjpeg-turbo warning): the
+                    // image is shown, and labelled corrupt here and in the status.
+                    infoPanel.show(result.probe(), Optional.ofNullable(result.corruption()));
                     updateColorStatus(result.probe().colorProfile());
                     onItemProbed.accept(result.probe());
                     // live playback owns the viewport; never paint a still over it
@@ -2167,7 +2172,8 @@ public final class ViewerWindow implements AppShell.ShellView {
                         placeholder.setText("");
                         statusLabel.setText(item.fileName() + " — "
                                 + shown.width() + " × " + shown.height()
-                                + " — " + item.kind());
+                                + " — " + item.kind()
+                                + (result.corruption() == null ? "" : " — corrupt"));
                         updateSuperResolutionState();
                         updateCropButtonState();
                     } else {
@@ -3727,8 +3733,7 @@ public final class ViewerWindow implements AppShell.ShellView {
     }
 
     private static String rootMessage(Throwable t) {
-        while (t.getCause() != null) t = t.getCause();
-        return t.getMessage() == null ? t.toString() : t.getMessage();
+        return MediaFailures.message(t);   // "Corrupt: …" for corrupt data
     }
 
     /**

@@ -416,7 +416,11 @@ final class DarkroomMosaicTileSet implements MosaicTileSet {
             g.strokeLine(x + s * 0.68, y + s * 0.18, x + s * 0.88, y + s * 0.18);
             g.strokeLine(x + s * 0.88, y + s * 0.18, x + s * 0.78, y + s * 0.09);
         }
-        if (c.has(MosaicTileModifier.BROKEN_LINK)
+        if (c.has(MosaicTileModifier.CORRUPT)) {
+            // Corrupt data, not a plain failure: the shared warning sign
+            // instead of the failure strike.
+            MosaicCorruptMark.paintBadge(c);
+        } else if (c.has(MosaicTileModifier.BROKEN_LINK)
                 || c.has(MosaicTileModifier.THUMBNAIL_FAILED)) {
             g.setStroke(Color.rgb(235, 210, 205, 0.72));
             g.setLineWidth(Math.max(2, s * 0.025));

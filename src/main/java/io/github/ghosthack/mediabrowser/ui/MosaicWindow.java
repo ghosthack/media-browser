@@ -12,6 +12,7 @@ import io.github.ghosthack.mediabrowser.media.AaeStore;
 import io.github.ghosthack.mediabrowser.media.Adjustments;
 import io.github.ghosthack.mediabrowser.media.DirEntry;
 import io.github.ghosthack.mediabrowser.media.MediaException;
+import io.github.ghosthack.mediabrowser.media.MediaFailures;
 import io.github.ghosthack.mediabrowser.media.MediaItem;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
@@ -25,6 +26,7 @@ import io.github.ghosthack.mediabrowser.media.move.SidecarCarrier;
 import io.github.ghosthack.mediabrowser.ui.icon.AppIcon;
 import io.github.ghosthack.mediabrowser.ui.icon.IconBinding;
 import io.github.ghosthack.mediabrowser.ui.icon.IconView;
+import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicCorruptMark;
 import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileClassifier;
 import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTileModifier;
 import io.github.ghosthack.mediabrowser.ui.mosaic.MosaicTilePaintContext;
@@ -113,6 +115,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
@@ -609,6 +612,11 @@ public final class MosaicWindow
     private final java.util.Set<Path> pending = new java.util.HashSet<>();
     /** Items known to have no visual (e.g. audio without cover art). */
     private final java.util.Set<Path> empties = new java.util.HashSet<>();
+    /**
+     * The {@link #empties} whose thumbnail failed because the decoder reported
+     * the data corrupt ({@link MediaFailures#isCorrupt}); cleared with them.
+     */
+    private final java.util.Set<Path> corruptThumbs = new java.util.HashSet<>();
     /** Per-folder preview child paths (up to N²), filled lazily on first sight. */
     private final Map<Path, FolderPreview> folderPreviews = new java.util.HashMap<>();
     /**
@@ -662,10 +670,21 @@ public final class MosaicWindow
      * Per-path draw-time user-adjustment cache (rotation + mirror + colour), so
      * the hot draw loop avoids the store's synchronized lock and
      * {@code File}/{@code String} allocations on every media/collage tile of every
-     * frame. Filled lazily, cleared on a directory change, and the single entry
-     * dropped when its file is adjusted (see {@link #invalidateAdjustment}).
+     * frame — and so it never reads a sidecar: a first look at a directory's
+     * {@code .picasa.ini} is disk I/O, so a miss is filled off the FX thread
+     * ({@link #requestAdjustments}) and the tile waits for it like for its
+     * thumbnail. Cleared on a directory change; one entry is re-read, keeping
+     * its old value meanwhile, when its file is adjusted (see
+     * {@link #invalidateAdjustment}).
      */
     private final Map<Path, Adjustments> adjustmentsCache = new java.util.HashMap<>();
+    /**
+     * Adjustment reads in flight, each path's latest request ticket: only that
+     * one may land, so a read overtaken by a newer one (the file was adjusted
+     * meanwhile) or by a directory change is dropped.
+     */
+    private final Map<Path, Long> adjustmentTickets = new java.util.HashMap<>();
+    private long adjustmentTicketSeq;
     /**
      * Per-path cache of the colour-adjusted (grayscale/invert) display image and
      * the source {@link Image} it was derived from, so a tile carrying a colour
@@ -815,6 +834,12 @@ public final class MosaicWindow
             saveSettingsQuietly();
             requestDraw();
         });
+        // An archive found corrupt while entering it (from either view) gets
+        // its tile mark; requestDraw coalesces bursts into one paint.
+        service.addCorruptionListener(path -> Platform.runLater(() -> {
+            requestDraw();
+            infoPanel.refreshCorruption(path, service.corruption(path));
+        }));
 
         // Filter toggles: changing any triggers a rebuild so the grid reflects
         // the new type visibility. Directories and .. are always shown.
@@ -1919,7 +1944,7 @@ public final class MosaicWindow
                     if (error != null) {
                         infoPanel.showMessage(rootMessage(error));
                     } else {
-                        infoPanel.show(probe);
+                        infoPanel.show(probe, service.corruption(lead.path()));
                     }
                 }));
     }
@@ -1934,8 +1959,11 @@ public final class MosaicWindow
         service.archiveInfo(lead.path()).whenComplete((info, error) ->
                 Platform.runLater(() -> {
                     if (gen != probeSequence) return;
+                    Optional<String> corrupt = service.corruption(lead.path());
                     if (error != null) {
-                        infoPanel.showMessage(rootMessage(error));
+                        infoPanel.showMessage(corrupt
+                                .map(m -> MediaFailures.CORRUPT_PREFIX + m)
+                                .orElseGet(() -> rootMessage(error)));
                         return;
                     }
                     var rows = new ArrayList<InfoPanel.Row>();
@@ -1943,6 +1971,10 @@ public final class MosaicWindow
                     for (var field : info.fields()) {
                         rows.add(new InfoPanel.Row(field.name(), field.value()));
                     }
+                    // Learned when the container was entered; the tail/descriptor
+                    // read here can succeed on an archive whose body is damaged.
+                    corrupt.ifPresent(m -> rows.add(
+                            new InfoPanel.Row("Status", MediaFailures.CORRUPT_PREFIX + m)));
                     infoPanel.showDetailRows(rows);
                 }));
     }
@@ -2009,8 +2041,7 @@ public final class MosaicWindow
     }
 
     private static String rootMessage(Throwable t) {
-        while (t.getCause() != null) t = t.getCause();
-        return t.getMessage() == null ? t.toString() : t.getMessage();
+        return MediaFailures.message(t);   // "Corrupt: …" for corrupt data
     }
 
     /**
@@ -2027,6 +2058,7 @@ public final class MosaicWindow
         scaled.clear();
         pending.clear();
         empties.clear();
+        corruptThumbs.clear();
         folderPreviews.clear();
         folderPending.clear();
         requestDraw();
@@ -2478,6 +2510,7 @@ public final class MosaicWindow
             scaled.clear();
             pending.clear();
             empties.clear();
+            corruptThumbs.clear();
             folderPreviews.clear();
             folderPending.clear();
             barrenGeneration++;
@@ -2486,6 +2519,7 @@ public final class MosaicWindow
             // Draw-loop per-path/per-text caches are directory-scoped; drop them
             // so they don't carry stale adjustments/captions across folders.
             adjustmentsCache.clear();
+            adjustmentTickets.clear();
             colorSource.clear();
             colorOutput.clear();
             thumbnailRevisions.clear();
@@ -3055,8 +3089,21 @@ public final class MosaicWindow
             if (pending.contains(item.path())) {
                 modifiers |= MosaicTileModifier.THUMBNAIL_PENDING.mask();
             } else if (empties.contains(item.path())) {
+                // CORRUPT refines FAILED rather than replacing it, so a tile
+                // set that predates CORRUPT still draws its failure mark.
                 modifiers |= MosaicTileModifier.THUMBNAIL_FAILED.mask();
+                if (corruptThumbs.contains(item.path())) {
+                    modifiers |= MosaicTileModifier.CORRUPT.mask();
+                }
+            } else if (images.containsKey(item.path())
+                    && service.corruption(item.path()).isPresent()) {
+                // Decoded but labelled corrupt (a libjpeg-turbo data warning):
+                // the thumbnail is drawn, CORRUPT alone adds the corner badge.
+                modifiers |= MosaicTileModifier.CORRUPT.mask();
             }
+        } else if (item.type() == DirEntry.Type.ARCHIVE
+                && service.corruption(item.path()).isPresent()) {
+            modifiers |= MosaicTileModifier.CORRUPT.mask();
         }
         return modifiers;
     }
@@ -3101,9 +3148,8 @@ public final class MosaicWindow
         if (!thumbnailsVisible.get()) return false;
         Image image = imageFor(context.entry().path());
         if (image == null) return false;
-        drawScaled(context.graphics(), context.entry().path(), image,
+        return drawScaled(context.graphics(), context.entry().path(), image,
                 context.x(), context.y(), context.size(), context.size());
-        return true;
     }
 
     @Override
@@ -3149,10 +3195,12 @@ public final class MosaicWindow
     /** A media tile: its fitted rendition, or a kind-aware placeholder glyph. */
     private void drawMediaContent(GraphicsContext g, DirEntry item, double cx, double cy) {
         Image img = thumbnailsVisible.get() ? imageFor(item.path()) : null;
-        if (img != null) {
-            drawScaled(g, item.path(), img, cx, cy, tileSize, tileSize);
+        if (img != null && drawScaled(g, item.path(), img, cx, cy, tileSize, tileSize)) {
+            // drawn (a decoded-but-corrupt badge is the tile set's, from CORRUPT)
         } else if (!thumbnailsVisible.get()) {
             drawMediaGlyph(g, item, cx, cy);
+        } else if (corruptThumbs.contains(item.path())) {
+            MosaicCorruptMark.paintCentred(g, cx, cy, tileSize, 0.42);
         } else {
             String glyph = empties.contains(item.path())
                     ? (item.mediaKind() == MediaKind.AUDIO ? "\u266a" : "\u2014")
@@ -3190,9 +3238,10 @@ public final class MosaicWindow
             for (int k = 0; k < count; k++) {
                 Image img = imageFor(children.get(k));
                 if (img == null) continue;
-                drawScaled(g, children.get(k), img,
-                        cx + (k % n) * sub, cy + (k / n) * sub, sub, sub);
-                drew = true;
+                if (drawScaled(g, children.get(k), img,
+                        cx + (k % n) * sub, cy + (k / n) * sub, sub, sub)) {
+                    drew = true;
+                }
             }
         }
         return drew;
@@ -3259,6 +3308,9 @@ public final class MosaicWindow
     private void drawArchiveContent(GraphicsContext g, DirEntry item, double cx, double cy) {
         drawFolderGlyph(g, cx, cy);
         drawArchiveLabel(g, item.extension().toUpperCase(Locale.ROOT), cx, cy);
+        if (service.corruption(item.path()).isPresent()) {
+            MosaicCorruptMark.paintBadge(g, cx, cy, tileSize);
+        }
         if (dirLabelsVisible.get()) drawCaption(g, item.displayName(), cx, cy);
     }
 
@@ -3345,17 +3397,22 @@ public final class MosaicWindow
      * pre-scaled to the on-screen box so repaints blit a small image instead of
      * downscaling the full (≤ {@code maxEdge}) rendition every frame. AAE crop
      * and straighten are already baked into {@code img}'s thumbnail cache entry.
+     *
+     * @return whether it drew; {@code false} while the file's adjustments are
+     *         still being read, so the caller shows the tile as loading rather
+     *         than briefly in the wrong orientation
      */
-    private void drawScaled(GraphicsContext g, Path path, Image img,
-                            double x, double y, double w, double h) {
-        Image src = displayImage(path, img, Math.max(w, h));
+    private boolean drawScaled(GraphicsContext g, Path path, Image img,
+                               double x, double y, double w, double h) {
         Adjustments adj = adjustmentsFor(path);
+        if (adj == null) return false;
+        Image src = displayImage(path, img, Math.max(w, h));
         // Colour adjustments (grayscale/invert) are a cached pixel pass; geometry
         // (rotation/mirror) stays a free draw-time canvas transform below.
         src = colorAdjusted(path, src, adj);
         if (!adj.hasGeometry()) {
             drawFitted(g, src, x, y, w, h);
-            return;
+            return true;
         }
         // Draw-time user geometry: mirror (a -1 scale per flipped axis) then spin
         // the GraphicsContext about the (square) box centre and fit normally. The
@@ -3372,22 +3429,56 @@ public final class MosaicWindow
         g.translate(-cx, -cy);
         drawFitted(g, src, x, y, w, h);
         g.restore();
+        return true;
     }
 
     /**
      * The draw-time user adjustments (rotation + mirror + colour) for {@code path},
-     * cached so a scroll frame doesn't re-acquire the store's lock (and
-     * re-allocate) for every tile. Invalidated per-path on an adjustment and
-     * wholesale on a directory change (see {@link #invalidateAdjustment}).
+     * from the cache only: a draw never consults the store, whose first look at
+     * a directory reads its sidecar from disk. A miss asks for the value off the
+     * FX thread and answers {@code null} until it lands. Re-read per-path on an
+     * adjustment and dropped wholesale on a directory change (see
+     * {@link #invalidateAdjustment}).
      */
     private Adjustments adjustmentsFor(Path path) {
         Adjustments cached = adjustmentsCache.get(path);
-        if (cached != null) {
-            return cached;
-        }
-        Adjustments adj = rotationStore.adjustments(path);
-        adjustmentsCache.put(path, adj);
-        return adj;
+        if (cached == null) requestAdjustments(path, false);
+        return cached;
+    }
+
+    /**
+     * Reads {@code path}'s adjustments on the sidecar thread and caches them on
+     * the FX thread, then repaints. {@code reread} issues a fresh read even
+     * while one is in flight (the file was just adjusted: the earlier read may
+     * predate the change); otherwise an in-flight read is joined.
+     *
+     * <p>A store that cannot answer is reported in the status bar and the tile
+     * then draws unadjusted, instead of waiting forever for a value that will
+     * not come.</p>
+     */
+    private void requestAdjustments(Path path, boolean reread) {
+        if (!reread && adjustmentTickets.containsKey(path)) return;
+        long ticket = ++adjustmentTicketSeq;
+        adjustmentTickets.put(path, ticket);
+        service.sidecarRead(() -> rotationStore.adjustments(path))
+                .whenComplete((adj, error) -> Platform.runLater(() -> {
+                    Long latest = adjustmentTickets.get(path);
+                    if (latest == null || latest != ticket) return;   // overtaken
+                    adjustmentTickets.remove(path);
+                    Adjustments value = adj;
+                    if (error != null || value == null) {
+                        statusLabel.setText("Cannot read the adjustments of "
+                                + ArchivePaths.format(path) + ": "
+                                + (error == null ? "no answer" : rootMessage(error)));
+                        value = Adjustments.NONE;
+                    }
+                    Adjustments previous = adjustmentsCache.put(path, value);
+                    if (!value.equals(previous)) {
+                        colorSource.remove(path);
+                        colorOutput.remove(path);
+                        requestDraw();
+                    }
+                }));
     }
 
     /**
@@ -3454,12 +3545,13 @@ public final class MosaicWindow
         return out;
     }
 
-    /** Drops the per-path draw-loop caches for {@code path} so the next draw
-     * re-reads its adjustments and rebuilds any colour-processed image. */
+    /**
+     * Re-reads {@code path}'s adjustments off the FX thread after a change: the
+     * tile keeps drawing its previous value until the new one lands, then
+     * repaints (with any colour-processed image rebuilt).
+     */
     private void invalidateAdjustment(Path path) {
-        adjustmentsCache.remove(path);
-        colorSource.remove(path);
-        colorOutput.remove(path);
+        requestAdjustments(path, true);
     }
 
     /**
@@ -3733,6 +3825,9 @@ public final class MosaicWindow
         if (img != null) return img;
         if (empties.contains(path) || pending.contains(path)) return null;
         pending.add(path);
+        // Read the sidecar alongside the decode, so the tile is ready to draw
+        // once its rendition lands instead of waiting for a second hop.
+        if (!adjustmentsCache.containsKey(path)) requestAdjustments(path, false);
         MosaicTelemetry.recordThumbnailRequested(pending.size());
         int gen = generation;
         int revision = thumbnailRevisions.getOrDefault(path, 0);
@@ -3865,6 +3960,7 @@ public final class MosaicWindow
         }
         if (error != null || thumb == null) {
             empties.add(path); // draw a placeholder rather than retry endlessly
+            if (error != null && MediaFailures.isCorrupt(error)) corruptThumbs.add(path);
         } else if (thumb.frame().isPresent()) {
             long startedAt = MosaicTelemetry.now();
             images.put(path, FxImages.toImage(thumb.frame().get()));
@@ -4169,26 +4265,21 @@ public final class MosaicWindow
     /**
      * Enters an archive tile: mounts off the FX thread (a large container's
      * directory is real I/O), then navigates to its root; a container that
-     * will not open reports why instead of doing nothing. Mirrors
-     * {@code MainWindow.openArchive}.
+     * will not open reports why instead of doing nothing, and a corrupt one
+     * is marked on its tile. Mirrors {@code MainWindow.openArchive}.
      */
     private void openArchive(Path archive) {
         statusLabel.setText("Opening " + archive.getFileName() + "…");
-        navigationRequests.resolve(service.fileOp(() -> {
-            try {
-                // Lands inside a solitary top-level folder; see browseRoot.
-                return ArchivePaths.browseRoot(archive);
-            } catch (IOException e) {
-                throw new MediaException(e.getMessage(), e);
-            }
-        }), Platform::runLater, (root, error) -> {
-            if (error != null) {
-                statusLabel.setText("Cannot open " + archive.getFileName() + ": "
-                        + rootMessage(error));
-                return;
-            }
-            navigator.accept(root);
-        });
+        // Lands inside a solitary top-level folder; see ArchivePaths.browseRoot.
+        navigationRequests.resolve(service.enterArchive(archive), Platform::runLater,
+                (root, error) -> {
+                    if (error != null) {
+                        statusLabel.setText("Cannot open " + archive.getFileName() + ": "
+                                + rootMessage(error));
+                        return;
+                    }
+                    navigator.accept(root);
+                });
     }
 
     /** Backspace (and the viewer relaying parent navigation): navigates the
@@ -4325,7 +4416,7 @@ public final class MosaicWindow
             // Only the first tile of an unwritable directory yields the notice;
             // the adjustment still applied, in memory for this session.
             if (notice == null) notice = rotationStore.pollSessionOnlyNotice(entry.path());
-            invalidateAdjustment(entry.path());   // re-read the new value on next draw
+            invalidateAdjustment(entry.path());   // re-read the new value off the FX thread
             repaintCell(g, i);
             viewer.refreshAdjustments(entry.path());
         }
@@ -4735,7 +4826,7 @@ public final class MosaicWindow
      */
     @Override
     public void mirrorViewerAdjustments(Path path) {
-        invalidateAdjustment(path);   // re-read the store's new value on next draw
+        invalidateAdjustment(path);   // re-read the store's new value off the FX thread
         int i = indexOfPath(path);
         if (i >= 0) repaintCell(canvas.getGraphicsContext2D(), i);
     }
@@ -4750,6 +4841,7 @@ public final class MosaicWindow
         scaled.remove(path);
         pending.remove(path);
         empties.remove(path);
+        corruptThumbs.remove(path);
         int i = indexOfPath(path);
         if (i >= 0) repaintCell(canvas.getGraphicsContext2D(), i);
     }

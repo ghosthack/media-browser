@@ -1,5 +1,6 @@
 package io.github.ghosthack.mediabrowser.ui;
 
+import io.github.ghosthack.mediabrowser.media.MediaFailures;
 import io.github.ghosthack.mediabrowser.media.MediaProbe;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 
@@ -14,10 +15,12 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
+import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 
 /**
@@ -64,6 +67,8 @@ public final class InfoPanel extends VBox {
     private List<Row> probeRows = List.of();
     /** Status of the probe half (Probing…, error) while it has no rows; null once it does. */
     private String message;
+    /** The file whose probe rows are shown ({@link #show}), else null. */
+    private Path probedPath;
 
     public InfoPanel() {
         header = SidePanelHeader.create("Info");
@@ -149,7 +154,34 @@ public final class InfoPanel extends VBox {
         probeRows = probe.describe().entrySet().stream()
                 .map(e -> new Row(e.getKey(), e.getValue()))
                 .toList();
+        probedPath = probe.path();
         message = null;
+        render();
+    }
+
+    /**
+     * {@link #show(MediaProbe)}, plus a trailing "Corrupt: …" row carrying the
+     * decoder's message when a decode of this file reported corrupt data
+     * ({@link MediaService#corruption}) — a header can probe cleanly while the
+     * pixel data behind it does not decode.
+     */
+    public void show(MediaProbe probe, Optional<String> corruption) {
+        show(probe);
+        if (corruption.isPresent()) {
+            message = MediaFailures.CORRUPT_PREFIX + corruption.get();
+            render();
+        }
+    }
+
+    /**
+     * Updates the trailing "Corrupt: …" row when {@code path} is the file whose
+     * probe is shown — a {@link MediaService#addCorruptionListener} hook, since
+     * a thumbnail or viewer decode can learn the verdict after the probe
+     * landed. Other paths, and a panel showing a message, are left alone.
+     */
+    public void refreshCorruption(Path path, Optional<String> corruption) {
+        if (probedPath == null || !probedPath.equals(path) || probeRows.isEmpty()) return;
+        message = corruption.map(m -> MediaFailures.CORRUPT_PREFIX + m).orElse(null);
         render();
     }
 
@@ -160,6 +192,7 @@ public final class InfoPanel extends VBox {
      */
     public void showMessage(String message) {
         probeRows = List.of();
+        probedPath = null;
         this.message = message;
         render();
     }
@@ -172,6 +205,7 @@ public final class InfoPanel extends VBox {
      */
     public void showDetailRows(List<Row> rows) {
         probeRows = List.copyOf(rows);
+        probedPath = null;
         message = null;
         render();
     }

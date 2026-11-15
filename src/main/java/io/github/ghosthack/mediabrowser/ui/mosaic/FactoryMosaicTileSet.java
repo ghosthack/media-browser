@@ -589,7 +589,11 @@ final class FactoryMosaicTileSet implements MosaicTileSet {
             g.strokeLine(x + s * 0.88, y + s * 0.19, x + s * 0.79, y + s * 0.10);
             g.strokeLine(x + s * 0.88, y + s * 0.19, x + s * 0.79, y + s * 0.28);
         }
-        if (c.has(MosaicTileModifier.BROKEN_LINK)
+        if (c.has(MosaicTileModifier.CORRUPT)) {
+            // Corrupt data, not a plain failure: the shared warning sign
+            // instead of the failure strike.
+            MosaicCorruptMark.paintBadge(c);
+        } else if (c.has(MosaicTileModifier.BROKEN_LINK)
                 || c.has(MosaicTileModifier.THUMBNAIL_FAILED)) {
             g.setStroke(Color.rgb(242, 234, 216, 0.84));
             g.setLineWidth(Math.max(3, s * 0.035));

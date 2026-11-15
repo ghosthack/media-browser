@@ -12,6 +12,7 @@ import io.github.ghosthack.mediabrowser.media.Thumbnails;
 import io.github.ghosthack.mediabrowser.media.VisualResult;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.Ffm;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegBindings;
+import io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegErrors;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.Rational;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.TileGrid;
 
@@ -27,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * AV container probing and first-frame extraction through a {@link FfmpegBindings}
@@ -37,6 +39,12 @@ final class FfmpegAv {
 
     private final FfmpegBindings ff;
     private final boolean captureIccProfiles;
+    /**
+     * Whether a probed file plays as video, so its poster converts an untagged
+     * frame by {@link UntaggedMatrix} exactly like playback does; otherwise
+     * (stills, cover art) an untagged frame keeps swscale's BT.601 default.
+     */
+    private final Predicate<MediaProbe> playsAsVideo;
     /** Latest still decode's embedded ICC on this thread; read via {@link #takeCapturedIccProfile}. */
     private final ThreadLocal<ColorProfile> capturedIcc = new ThreadLocal<>();
 
@@ -45,8 +53,14 @@ final class FfmpegAv {
     }
 
     FfmpegAv(FfmpegBindings ff, boolean captureIccProfiles) {
+        this(ff, captureIccProfiles, probe -> probe.kind() == MediaKind.VIDEO);
+    }
+
+    FfmpegAv(FfmpegBindings ff, boolean captureIccProfiles,
+             Predicate<MediaProbe> playsAsVideo) {
         this.ff = ff;
         this.captureIccProfiles = captureIccProfiles;
+        this.playsAsVideo = playsAsVideo;
         ff.init();
     }
 
@@ -167,8 +181,8 @@ final class FfmpegAv {
                 MemorySegment ctx = ff.derefFormatContext(ctxPtr);
                 MediaProbe probe = describe(ctx, file, fileSize);
                 return new VisualResult(probe,
-                        Optional.ofNullable(
-                                decodeFirstFrame(arena, ctx, -1, ThumbnailMode.FIT, lowres)));
+                        Optional.ofNullable(decodeFirstFrame(arena, ctx, -1, ThumbnailMode.FIT,
+                                lowres, playsAsVideo.test(probe))));
             } finally {
                 ff.closeInput(ctxPtr);
             }
@@ -193,7 +207,8 @@ final class FfmpegAv {
             try {
                 MemorySegment ctx = ff.derefFormatContext(ctxPtr);
                 MediaProbe probe = describe(ctx, file, -1);
-                RasterFrame poster = decodeFirstFrame(arena, ctx, maxEdge, mode, lowres);
+                RasterFrame poster = decodeFirstFrame(arena, ctx, maxEdge, mode, lowres,
+                        playsAsVideo.test(probe));
                 return new Thumbnail(Optional.ofNullable(poster), probe.kind(),
                         takeCapturedIccProfile());
             } finally {
@@ -205,20 +220,14 @@ final class FfmpegAv {
     /**
      * First frame of the best video stream as BGRA, or null when none. When
      * {@code maxEdge > 0} the frame is downscaled to fit within that box at its
-     * coded (stored) size; otherwise it is returned at coded size.
+     * coded (stored) size; otherwise it is returned at coded size. A non-zero
+     * {@code lowres} asks the decoder for a reduced frame: only Photo CD uses
+     * one today, to step down its pyramid when the top layer will not decode;
+     * see {@link FfmpegBindings#setLowres}. {@code video} applies playback's
+     * {@link UntaggedMatrix} decision to an untagged frame.
      */
     private RasterFrame decodeFirstFrame(Arena arena, MemorySegment ctx, int maxEdge,
-                                         ThumbnailMode mode) {
-        return decodeFirstFrame(arena, ctx, maxEdge, mode, 0);
-    }
-
-    /**
-     * As above, but asking the decoder for a {@code lowres}-reduced frame. Only
-     * Photo CD uses a non-zero value today, to step down its pyramid when the
-     * top layer will not decode; see {@link FfmpegBindings#setLowres}.
-     */
-    private RasterFrame decodeFirstFrame(Arena arena, MemorySegment ctx, int maxEdge,
-                                         ThumbnailMode mode, int lowres) {
+                                         ThumbnailMode mode, int lowres, boolean video) {
         MemorySegment cctxPtr = MemorySegment.NULL;
         MemorySegment pktPtr = MemorySegment.NULL;
         MemorySegment framePtr = MemorySegment.NULL;
@@ -260,7 +269,7 @@ final class FfmpegAv {
 
             if (!decodeOneFrame(ctx, cctx, pkt, frame, vIdx)) return null;
 
-            RasterFrame poster = scaleFrameToBgra(arena, frame, maxEdge, mode);
+            RasterFrame poster = scaleFrameToBgra(arena, frame, maxEdge, mode, video);
             if (poster == null) return null;
             // Bake the container/display orientation (rotation AND mirror —
             // imir on HEIF items) into the poster so it is upright, like the
@@ -283,7 +292,7 @@ final class FfmpegAv {
             if (rr == 0) return true;
             if (rr == ff.averrorEof()) return false;
             if (rr != ff.averrorEagain()) {
-                throw new MediaException("ffmpeg: decode failed: " + ff.errStr(rr));
+                throw FfmpegErrors.failure("ffmpeg: decode failed: " + ff.errStr(rr), rr);
             }
             if (draining) return false;
 
@@ -296,7 +305,7 @@ final class FfmpegAv {
                 } else if (sr != ff.averrorEagain()) {
                     packetPending = false;
                     ff.packetUnref(pkt);
-                    throw new MediaException("ffmpeg: send packet failed: " + ff.errStr(sr));
+                    throw FfmpegErrors.failure("ffmpeg: send packet failed: " + ff.errStr(sr), sr);
                 }
                 continue;
             }
@@ -308,7 +317,7 @@ final class FfmpegAv {
             }
             if (r < 0) {
                 // A read failure is an error, never a quietly empty poster.
-                throw new MediaException("ffmpeg: read failed: " + ff.errStr(r));
+                throw FfmpegErrors.failure("ffmpeg: read failed: " + ff.errStr(r), r);
             }
             if (ff.packetStreamIndex(pkt) == vIdx && ff.packetHasPayload(pkt)) {
                 int sr = ff.sendPacket(cctx, pkt);
@@ -318,7 +327,7 @@ final class FfmpegAv {
                 }
                 if (sr < 0 && sr != ff.averrorEof()) {
                     ff.packetUnref(pkt);
-                    throw new MediaException("ffmpeg: send packet failed: " + ff.errStr(sr));
+                    throw FfmpegErrors.failure("ffmpeg: send packet failed: " + ff.errStr(sr), sr);
                 }
             }
             ff.packetUnref(pkt);
@@ -453,7 +462,7 @@ final class FfmpegAv {
                     // Per-tile arena: the BGRA staging buffers would otherwise
                     // pile up in the decode arena for the whole compose.
                     try (Arena tileArena = Arena.ofConfined()) {
-                        RasterFrame tile = scaleFrameToBgra(tileArena, frame, -1, ThumbnailMode.FIT);
+                        RasterFrame tile = scaleFrameToBgra(tileArena, frame, -1, ThumbnailMode.FIT, false);
                         if (tile == null) {
                             throw new MediaException("ffmpeg: tile decoded with no pixels");
                         }
@@ -474,7 +483,7 @@ final class FfmpegAv {
                 }
                 if (rr == ff.averrorEof()) break;
                 if (rr != ff.averrorEagain()) {
-                    throw new MediaException("ffmpeg: tile decode failed: " + ff.errStr(rr));
+                    throw FfmpegErrors.failure("ffmpeg: tile decode failed: " + ff.errStr(rr), rr);
                 }
                 if (draining) break;
                 if (pendingStream >= 0) {
@@ -485,7 +494,8 @@ final class FfmpegAv {
                         ff.packetUnref(pkt);
                     } else if (sr != ff.averrorEagain()) {
                         ff.packetUnref(pkt);
-                        throw new MediaException("ffmpeg: send tile packet failed: " + ff.errStr(sr));
+                        throw FfmpegErrors.failure(
+                                "ffmpeg: send tile packet failed: " + ff.errStr(sr), sr);
                     }
                     continue;
                 }
@@ -496,7 +506,7 @@ final class FfmpegAv {
                     continue;
                 }
                 if (r < 0) {
-                    throw new MediaException("ffmpeg: tile read failed: " + ff.errStr(r));
+                    throw FfmpegErrors.failure("ffmpeg: tile read failed: " + ff.errStr(r), r);
                 }
                 int streamIndex = ff.packetStreamIndex(pkt);
                 if (!placements.containsKey(streamIndex) || !ff.packetHasPayload(pkt)) {
@@ -511,7 +521,7 @@ final class FfmpegAv {
                     pendingStream = streamIndex;   // retry after the next receive
                 } else {
                     ff.packetUnref(pkt);
-                    throw new MediaException("ffmpeg: send tile packet failed: " + ff.errStr(sr));
+                    throw FfmpegErrors.failure("ffmpeg: send tile packet failed: " + ff.errStr(sr), sr);
                 }
             }
             if (composed.size() < placements.size()) {
@@ -675,7 +685,7 @@ final class FfmpegAv {
             if (!decodeOneFrame(ctx, cctx, pkt, frame, streamIndex)) {
                 return null;
             }
-            return scaleFrameToBgra(arena, frame, maxEdge, mode);
+            return scaleFrameToBgra(arena, frame, maxEdge, mode, false);
         } finally {
             if (!framePtr.equals(MemorySegment.NULL)) ff.frameFree(framePtr);
             if (!pktPtr.equals(MemorySegment.NULL)) ff.packetFree(pktPtr);
@@ -766,9 +776,13 @@ final class FfmpegAv {
      * backend all present frames at their coded pixels, so SAR-correcting only
      * the poster made anamorphic media (e.g. a QCIF {@code .3gp} with SAR
      * 12:11) look stretched in the mosaic relative to its own viewer.</p>
+     *
+     * <p>With {@code video} an untagged frame takes the {@link UntaggedMatrix}
+     * matrix, as {@code FfmpegVideoStream} does in playback, so a video's
+     * poster matches its first played frame; a still keeps BT.601.</p>
      */
     private RasterFrame scaleFrameToBgra(Arena arena, MemorySegment frame, int maxEdge,
-                                         ThumbnailMode mode) {
+                                         ThumbnailMode mode, boolean video) {
         int w = ff.frameWidth(frame);
         int h = ff.frameHeight(frame);
         int fmt = ff.frameFormat(frame);
@@ -812,7 +826,9 @@ final class FfmpegAv {
                     + ff.pixFmtName(fmt) + " " + w + "x" + h);
         }
         try {
-            ff.swsSetSourceColor(sws, ff.frameColorspace(frame), ff.frameColorRange(frame));
+            int colorspace = ff.frameColorspace(frame);
+            if (video) colorspace = UntaggedMatrix.resolve(colorspace, w, h);
+            ff.swsSetSourceColor(sws, colorspace, ff.frameColorRange(frame));
             // Padded so swscale's SIMD tail over-write stays inside the
             // allocation (see Ffm.allocateSwscaleBgraDst); only the exact
             // dstW*dstH*4 prefix is read back into the frame.

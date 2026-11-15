@@ -197,6 +197,9 @@ public final class ImageSequences {
      *       file was classified {@link MediaKind#VIDEO}, and a frozen first
      *       frame standing in for a failed decode is exactly the silent
      *       degrade this must not produce.</li>
+     *   <li>an {@code animationTrack} that <em>throws</em> (the engine could
+     *       not answer at all: I/O or native failure) is recorded as failed
+     *       and propagates; it is not read as "no track".</li>
      * </ul>
      *
      * @param file               the file a native still loader already matched
@@ -219,7 +222,15 @@ public final class ImageSequences {
             return stillPath.get();
         }
         long started = trace.beginAttempt();
-        Optional<V> track = animationTrack.get();
+        Optional<V> track;
+        try {
+            track = animationTrack.get();
+        } catch (RuntimeException | Error e) {
+            // The engine failed to answer (I/O, native error) — not the same
+            // as "exposes no track": never decode the still in its place.
+            trace.failed(animationStrategy, started, e);
+            throw e;
+        }
         if (track.isEmpty()) {
             trace.declined(animationStrategy, started,
                     "Animated, but this engine exposes no playable animation track;"

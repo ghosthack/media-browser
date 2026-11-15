@@ -351,6 +351,9 @@ public final class ArchiveMounts {
                     ? IsoFileSystemProvider.instance().mounted(key)
                     : StreamFileSystemProvider.instance().mounted(key);
             return existing;
+        } catch (IOException e) {
+            // Same failure, labelled corrupt when the reader reported damage.
+            throw ArchiveCorruption.classify(format, key, e);
         }
     }
 

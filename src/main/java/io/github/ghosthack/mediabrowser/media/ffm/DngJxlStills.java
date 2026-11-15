@@ -5,6 +5,7 @@ import io.github.ghosthack.mediabrowser.media.RasterFrame;
 import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.Ffm;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegBindings;
+import io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegErrors;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -112,7 +113,7 @@ final class DngJxlStills {
                 ff.sendPacket(cctx, MemorySegment.NULL);   // drain: one packet per stream
                 int rr = ff.receiveFrame(cctx, frame);
                 if (rr < 0) {
-                    throw new MediaException("ffmpeg: DNG tile decode failed: " + ff.errStr(rr));
+                    throw FfmpegErrors.failure("ffmpeg: DNG tile decode failed: " + ff.errStr(rr), rr);
                 }
                 blit16(ff, frame, canvas, width, height, tx, ty);
             } finally {

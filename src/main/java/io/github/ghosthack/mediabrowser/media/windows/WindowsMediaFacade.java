@@ -15,6 +15,7 @@ import io.github.ghosthack.mediabrowser.media.Thumbnails;
 import io.github.ghosthack.mediabrowser.media.VideoStream;
 import io.github.ghosthack.mediabrowser.media.VisualResult;
 
+import io.github.ghosthack.panama.media.core.DecodeException;
 import io.github.ghosthack.panama.media.core.DecodedImage;
 import io.github.ghosthack.panama.media.core.Dimensions;
 import io.github.ghosthack.panama.media.core.PixelFormat;
@@ -144,9 +145,9 @@ public final class WindowsMediaFacade implements MediaFacade {
                 // Phase 6 (merged AV probe): a single probe() reads BOTH the
                 // video track and, best-effort, the first audio track so a
                 // video-with-sound reports audioCodec/sampleRate/channels on
-                // the SAME MediaProbe. audioInfo() swallows any failure to null,
-                // so a missing/undecodable audio track leaves those fields at
-                // the unknown sentinels and never changes the VIDEO result.
+                // the SAME MediaProbe. A silent video leaves those fields at
+                // the unknown sentinels; a failed audio read throws (the
+                // source reader just opened this file, so it is a real error).
                 return videoProbe(file, vi, audioInfo(file));
             }
         }
@@ -175,7 +176,13 @@ public final class WindowsMediaFacade implements MediaFacade {
         String ext = extension(file);
         if (VIDEO_EXTENSIONS.contains(ext)) {
             long probeStarted = trace.beginAttempt();
-            VideoInfo vi = videoInfo(file);
+            VideoInfo vi;
+            try {
+                vi = videoInfo(file);
+            } catch (RuntimeException e) {
+                trace.failed("Media Foundation video probe", probeStarted, e);
+                throw e;
+            }
             if (vi != null && vi.width() > 0 && vi.height() > 0) {
                 trace.succeeded("Media Foundation video probe", probeStarted,
                         vi.width() + "×" + vi.height());
@@ -202,7 +209,13 @@ public final class WindowsMediaFacade implements MediaFacade {
         // Audio: no cover art in v1 (matches AppleMediaFacade) -> empty visual.
         if (VIDEO_EXTENSIONS.contains(ext) || AUDIO_EXTENSIONS.contains(ext)) {
             long audioStarted = trace.beginAttempt();
-            AudioInfo ai = audioInfo(file);
+            AudioInfo ai;
+            try {
+                ai = audioInfo(file);
+            } catch (RuntimeException e) {
+                trace.failed("Media Foundation audio probe", audioStarted, e);
+                throw e;
+            }
             if (ai != null && ai.hasAudio()) {
                 trace.succeeded("Media Foundation audio probe", audioStarted,
                         "Audio-only visual (no cover art)");
@@ -409,8 +422,37 @@ public final class WindowsMediaFacade implements MediaFacade {
      * the still.
      */
     private static Optional<VideoInfo> animationTrack(Path file) {
-        return Optional.ofNullable(videoInfo(file))
+        VideoInfo info;
+        try {
+            info = videoInfo(file);
+        } catch (MediaException e) {
+            // WIC already matched this file as an AVIF/HEIC still. Media
+            // Foundation refusing to create a source for the avis/hevs
+            // container is the engine's capability gap (seen as a bare E_FAIL,
+            // not MF_E_UNSUPPORTED_BYTESTREAM_TYPE), so the caller declines to
+            // the still and records it. A file I/O error, or any failure after
+            // MF opened the container, is still this file's error.
+            if (rejectsAnimationContainer(e.getCause())) return Optional.empty();
+            throw e;
+        }
+        return Optional.ofNullable(info)
                 .filter(vi -> vi.width() > 0 && vi.height() > 0);
+    }
+
+    /**
+     * Whether Media Foundation declined to open an animated AVIF/HEIC
+     * container: {@code MFCreateSourceReaderFromURL} failed with an HRESULT
+     * outside the Win32 facility ({@code 0x8007xxxx}: path, access, sharing
+     * errors stay failures). Pure, so it is testable on any OS.
+     */
+    static boolean rejectsAnimationContainer(Throwable failure) {
+        if (!(failure instanceof DecodeException)) return false;
+        String message = failure.getMessage();
+        if (message == null || !message.startsWith("MFCreateSourceReaderFromURL failed")) return false;
+        Matcher m = HRESULT.matcher(message);
+        if (!m.find()) return false;
+        int hr = Integer.parseUnsignedInt(m.group(1), 16);
+        return (hr >>> 16) != 0x8007;
     }
 
     @Override
@@ -673,16 +715,44 @@ public final class WindowsMediaFacade implements MediaFacade {
 
     /**
      * Opens the asset once for a {@link VideoInfo} read in a fresh confined
-     * {@link Arena}, swallowing any failure (e.g. {@code DecodeException} for a
-     * missing Store codec) to {@code null} so {@code classify} can fall through
-     * to {@link Optional#empty()} without leaking a runtime decode error.
+     * {@link Arena}. {@code null} means "not applicable": Media Foundation
+     * has no source for this container or the file has no video stream
+     * ({@link #isNotApplicable}). Any other failure is this file's error and
+     * throws, rather than reading as "no video" and routing the file on to
+     * a path that then fails without the cause.
      */
     private static VideoInfo videoInfo(Path file) {
         try (Arena arena = Arena.ofConfined()) {
             return MediaFoundation.getVideoInfo(arena, file.toString());
         } catch (RuntimeException e) {
-            return null;
+            if (isNotApplicable(e)) return null;
+            throw new MediaException("windows-native: cannot read the video stream of "
+                    + file.getFileName() + ": " + e.getMessage(), e);
         }
+    }
+
+    /** {@code MF_E_INVALIDSTREAMNUMBER}: the reader has no stream of that type. */
+    static final int MF_E_INVALIDSTREAMNUMBER = 0xC00D36B3;
+    /** {@code MF_E_UNSUPPORTED_BYTESTREAM_TYPE}: no MF source handles the container. */
+    static final int MF_E_UNSUPPORTED_BYTESTREAM_TYPE = 0xC00D36C4;
+    private static final Pattern HRESULT = Pattern.compile("HRESULT 0x([0-9a-fA-F]{1,8})");
+
+    /**
+     * Whether a Media Foundation probe failure is the answer "not this
+     * format / no such stream" rather than a failure: only the two HRESULTs
+     * that say exactly that. Everything else — a corrupt container
+     * ({@code MF_E_INVALID_FILE_FORMAT}), an I/O error, MF unavailable — is
+     * a real failure. Pure (parses the binding's {@code "(HRESULT 0x…)"}
+     * message) so it is testable on any OS.
+     */
+    static boolean isNotApplicable(Throwable failure) {
+        if (!(failure instanceof DecodeException)) return false;
+        String message = failure.getMessage();
+        if (message == null) return false;
+        Matcher m = HRESULT.matcher(message);
+        if (!m.find()) return false;
+        int hr = Integer.parseUnsignedInt(m.group(1), 16);
+        return hr == MF_E_INVALIDSTREAMNUMBER || hr == MF_E_UNSUPPORTED_BYTESTREAM_TYPE;
     }
 
     /**
@@ -709,15 +779,18 @@ public final class WindowsMediaFacade implements MediaFacade {
 
     /**
      * Opens the asset once for an {@link AudioInfo} read in a fresh confined
-     * {@link Arena}, swallowing any failure (e.g. {@code DecodeException} for an
-     * undecodable container) to {@code null} so {@code classify} can fall
-     * through to {@link Optional#empty()} without leaking a runtime decode error.
+     * {@link Arena}. A file with no audio stream reports
+     * {@code hasAudio() == false}; {@code null} means Media Foundation has
+     * no source for the container ({@link #isNotApplicable}). Any other
+     * failure throws, as in {@link #videoInfo}.
      */
     private static AudioInfo audioInfo(Path file) {
         try (Arena arena = Arena.ofConfined()) {
             return MediaFoundation.getAudioInfo(arena, file.toString());
         } catch (RuntimeException e) {
-            return null;
+            if (isNotApplicable(e)) return null;
+            throw new MediaException("windows-native: cannot read the audio stream of "
+                    + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
 

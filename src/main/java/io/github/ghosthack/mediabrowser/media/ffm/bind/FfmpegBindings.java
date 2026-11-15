@@ -382,10 +382,13 @@ public interface FfmpegBindings {
 
     String errStr(int err);
 
-    /** Throws {@link MediaException} when {@code err < 0}. */
+    /**
+     * Throws {@link MediaException} when {@code err < 0}: corrupt for
+     * {@code AVERROR_INVALIDDATA}, per {@link FfmpegErrors#failure}.
+     */
     default void check(int err, String what) {
         if (err < 0) {
-            throw new MediaException("ffmpeg: " + what + " failed: " + errStr(err));
+            throw FfmpegErrors.failure("ffmpeg: " + what + " failed: " + errStr(err), err);
         }
     }
 }

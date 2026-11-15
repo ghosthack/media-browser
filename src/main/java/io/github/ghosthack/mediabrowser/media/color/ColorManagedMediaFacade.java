@@ -75,17 +75,17 @@ public final class ColorManagedMediaFacade implements MediaFacade {
         if (base.frame().isEmpty()) {
             if (trace != null) trace.declined("ICC color management", started,
                     "skipped (no still raster)");
-            return new VisualResult(probe, base.frame());
+            return base.withProbe(probe);
         }
         if (ColorPolicy.mode() == ColorPolicy.Mode.UNMANAGED) {
             if (trace != null) trace.declined("ICC color management", started,
                     bypassDetail(probe.colorProfile()));
-            return new VisualResult(probe, base.frame());
+            return base.withProbe(probe);
         }
         IccColorConverter.Decision decision =
                 IccColorConverter.convert(base.frame().orElseThrow(), probe.colorProfile());
         recordDecision(trace, started, decision);
-        return new VisualResult(probe, Optional.of(decision.frame()));
+        return base.withProbe(probe).withFrame(Optional.of(decision.frame()));
     }
 
     @Override
@@ -114,12 +114,13 @@ public final class ColorManagedMediaFacade implements MediaFacade {
         if (ColorPolicy.mode() == ColorPolicy.Mode.UNMANAGED) {
             if (trace != null) trace.declined("ICC color management", started,
                     bypassDetail(profile));
-            return new Thumbnail(base.frame(), base.kind(), profile);
+            return new Thumbnail(base.frame(), base.kind(), profile, base.corruption());
         }
         IccColorConverter.Decision decision =
                 IccColorConverter.convert(base.frame().orElseThrow(), profile);
         recordDecision(trace, started, decision);
-        return new Thumbnail(Optional.of(decision.frame()), base.kind(), profile);
+        return new Thumbnail(Optional.of(decision.frame()), base.kind(), profile,
+                base.corruption());
     }
 
     private static String bypassDetail(ColorProfile profile) {

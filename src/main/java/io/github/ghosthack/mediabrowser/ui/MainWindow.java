@@ -19,6 +19,7 @@ import io.github.ghosthack.mediabrowser.media.DetectionMode;
 import io.github.ghosthack.mediabrowser.media.DirEntry;
 import io.github.ghosthack.mediabrowser.media.MediaBackend;
 import io.github.ghosthack.mediabrowser.media.MediaException;
+import io.github.ghosthack.mediabrowser.media.MediaFailures;
 import io.github.ghosthack.mediabrowser.media.MediaItem;
 import io.github.ghosthack.mediabrowser.media.MediaKind;
 import io.github.ghosthack.mediabrowser.media.MediaService;
@@ -122,6 +123,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -134,6 +136,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
     static final String COMPUTER_LOCATION_NAME = "Computer";
+
+    /**
+     * A row's corrupt-data mark: a warning sign in amber, which no other row
+     * state uses — distinct from a plain failure, which a row never shows.
+     */
+    static final String CORRUPT_MARK = "⚠";
+    static final String CORRUPT_MARK_STYLE = "-fx-text-fill: #D29922; -fx-font-weight: bold;";
+
+    /** Coalesces corruption notifications into one list refresh per FX pulse. */
+    private final AtomicBoolean corruptRefreshQueued = new AtomicBoolean();
 
     /** The single-window shell hosting this view. */
     private final AppShell shell;
@@ -419,10 +431,18 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             private final Label icon = new Label();
             private final IconBinding iconBinding =
                     IconBinding.install(icon, null, "", "", null);
+            /** The corrupt-data mark, after the kind icon; see {@link MediaService#corruption}. */
+            private final Label corruptMark = new Label(CORRUPT_MARK);
+            private final HBox graphic = new HBox(2, icon, corruptMark);
+            private final Tooltip corruptTip = new Tooltip();
             private final ContextMenu menu = new ContextMenu();
             {
                 icon.setMinWidth(28);
                 icon.setAlignment(Pos.CENTER);
+                graphic.setAlignment(Pos.CENTER_LEFT);
+                corruptMark.setStyle(CORRUPT_MARK_STYLE);
+                corruptMark.setManaged(false);
+                corruptMark.setVisible(false);
                 var copyPath = new MenuItem("Copy Path");
                 copyPath.setOnAction(e -> copyPathToClipboard(getItem()));
                 var moveItem = new MenuItem("Move…");
@@ -483,13 +503,40 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     setText(null);
                     setGraphic(null);
                     setContextMenu(null);
+                    showCorrupt(null);
                 } else {
                     AppIcon role = iconFor(entry);
                     iconBinding.update(role, role == null ? "" : role.originalGlyph(), "");
-                    setGraphic(icon);
+                    setGraphic(graphic);
                     setText(entry.displayName());
                     setContextMenu(menu);
+                    showCorrupt(entry.type() == DirEntry.Type.PARENT
+                            ? null : service.corruption(entry.path()).orElse(null));
                 }
+            }
+            /** Marks the row corrupt (amber mark + tooltip with the decoder's message). */
+            private void showCorrupt(String message) {
+                boolean corrupt = message != null;
+                corruptMark.setVisible(corrupt);
+                corruptMark.setManaged(corrupt);
+                if (corrupt) {
+                    corruptTip.setText(MediaFailures.CORRUPT_PREFIX + message);
+                    setTooltip(corruptTip);
+                } else if (getTooltip() != null) {
+                    setTooltip(null);
+                }
+            }
+        });
+        // Corruption is learned by decodes elsewhere (mosaic tiles, the viewer,
+        // the info probe, opening an archive); repaint the rows once per burst.
+        service.addCorruptionListener(path -> {
+            // The Info panel's "Corrupt: …" row, when it shows this file.
+            Platform.runLater(() -> infoPanel.refreshCorruption(path, service.corruption(path)));
+            if (corruptRefreshQueued.compareAndSet(false, true)) {
+                Platform.runLater(() -> {
+                    corruptRefreshQueued.set(false);
+                    listView.refresh();
+                });
             }
         });
         listView.getSelectionModel().selectedItemProperty()
@@ -547,7 +594,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         viewer.setOnItemProbed(probe -> {
             DirEntry sel = listView.getSelectionModel().getSelectedItem();
             if (sel != null && sel.path().equals(probe.path())) {
-                infoPanel.show(probe);
+                infoPanel.show(probe, service.corruption(probe.path()));
             }
         });
 
@@ -1134,17 +1181,30 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         return currentDir == null ? null : BrowserLocation.directory(currentDir);
     }
 
-    /** @return whether the target was accepted (the listing itself is async) */
+    /** @return whether the target was accepted now (the listing itself is async) */
     private boolean navigate(Path dir) {
-        // An archive browsed earlier may have been evicted under the mount cap;
-        // reviving re-opens it so history and pending selections keep working.
-        Path target;
-        try {
-            target = ArchivePaths.revive(dir).toAbsolutePath().normalize();
-        } catch (IOException e) {
-            statusLabel.setText("Cannot open " + ArchivePaths.format(dir) + ": " + e.getMessage());
+        return navigate(dir, () -> {});
+    }
+
+    /**
+     * Moves the browser to {@code dir}, running {@code onAccepted} once it has.
+     *
+     * <p>An archive browsed earlier may have been evicted under the mount cap;
+     * reviving re-opens it so history and pending selections keep working. The
+     * re-open is real I/O, so it runs on the file-op thread like
+     * {@link #openArchive}, and the browser moves when it lands — unless a
+     * newer navigation has overtaken it ({@link NavigationRequests}).</p>
+     *
+     * @return whether the browser moved now; {@code false} when the target was
+     *         rejected (the status bar says why) or is still being re-opened
+     *         ({@code onAccepted} then runs if and when it lands)
+     */
+    private boolean navigate(Path dir, Runnable onAccepted) {
+        if (ArchivePaths.needsRevive(dir)) {
+            reviveThenNavigate(dir, onAccepted);
             return false;
         }
+        Path target = dir.toAbsolutePath().normalize();
         if (!ArchivePaths.isDirectory(target)) {
             statusLabel.setText("Not a folder: " + ArchivePaths.format(target));
             return false;
@@ -1214,7 +1274,43 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                         statusLabel.setText(ArchivePaths.format(target));
                     }));
         }
+        onAccepted.run();
         return true;
+    }
+
+    /**
+     * {@link #navigate} into an evicted archive mount: re-opens it off the FX
+     * thread, then navigates as the original call would have — same pending
+     * selection, same history mode — unless the user has moved on meanwhile.
+     */
+    private void reviveThenNavigate(Path dir, Runnable onAccepted) {
+        Path select = pendingSelection;
+        pendingSelection = null;
+        boolean fromHistory = traversingHistory;
+        statusLabel.setText("Opening " + ArchivePaths.format(dir) + "…");
+        navigationRequests.resolve(service.fileOp(() -> {
+            try {
+                return ArchivePaths.revive(dir);
+            } catch (IOException e) {
+                throw new MediaException(e.getMessage(), e);
+            }
+        }), Platform::runLater, (revived, error) -> {
+            if (error != null) {
+                Throwable cause = error instanceof CompletionException && error.getCause() != null
+                        ? error.getCause() : error;
+                statusLabel.setText("Cannot open " + ArchivePaths.format(dir) + ": "
+                        + MediaFailures.message(cause));
+                return;
+            }
+            pendingSelection = select;
+            boolean was = traversingHistory;
+            traversingHistory = fromHistory;
+            try {
+                navigate(revived, onAccepted);
+            } finally {
+                traversingHistory = was;
+            }
+        });
     }
 
     /**
@@ -1567,9 +1663,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             statusLabel.setText("Cannot open: " + text.trim());
             return;
         }
-        if (navigate(target)) {
-            listView.requestFocus();
-        }
+        navigate(target, listView::requestFocus);
     }
 
     /**
@@ -1588,9 +1682,21 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * filesystem only — the archive itself stays selected there instead.
      */
     private boolean navigateAndSync(Path dir) {
-        if (!navigate(dir)) return false;   // rejected: leave the tree where it is
-        mirrorLocationIntoTree(dir);
-        return true;
+        return navigateAndSync(dir, () -> {});
+    }
+
+    /**
+     * {@link #navigateAndSync(Path)}, running {@code onAccepted} once the
+     * browser has moved (later, when an evicted archive must be re-opened).
+     * A rejected target leaves the tree where it is.
+     *
+     * @return whether the browser moved now
+     */
+    private boolean navigateAndSync(Path dir, Runnable onAccepted) {
+        return navigate(dir, () -> {
+            mirrorLocationIntoTree(dir);
+            onAccepted.run();
+        });
     }
 
     /** Backspace / Enclosing Folder, and the viewer relaying parent navigation:
@@ -1622,7 +1728,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         BrowserLocation current = currentLocation();
         // A target that no longer opens (deleted folder, unmountable archive) is
         // dropped; only a move that happened earns the forward entry.
-        if (traverseHistory(target) && current != null) forwardStack.push(current);
+        traverseHistory(target, () -> {
+            if (current != null) forwardStack.push(current);
+            updateHistoryItems();
+        });
         updateHistoryItems();
     }
 
@@ -1630,18 +1739,30 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         if (forwardStack.isEmpty()) return;
         BrowserLocation target = forwardStack.pop();
         BrowserLocation current = currentLocation();
-        if (traverseHistory(target) && current != null) backStack.push(current);
+        traverseHistory(target, () -> {
+            if (current != null) backStack.push(current);
+            updateHistoryItems();
+        });
         updateHistoryItems();
     }
 
-    /** @return whether the browser moved to {@code target} */
-    private boolean traverseHistory(BrowserLocation target) {
+    /**
+     * Moves the browser to {@code target} without recording history, running
+     * {@code onMoved} once it has — at once, or when an evicted archive has
+     * been re-opened; never when the target is rejected or overtaken.
+     */
+    private void traverseHistory(BrowserLocation target, Runnable onMoved) {
         traversingHistory = true;
         try {
-            if (target.isComputer()) navigateToComputer();
-            else if (target.isAlbum()) navigateToAlbum(target.album());
-            else return navigateAndSync(target.directory());
-            return true;
+            if (target.isComputer()) {
+                navigateToComputer();
+                onMoved.run();
+            } else if (target.isAlbum()) {
+                navigateToAlbum(target.album());
+                onMoved.run();
+            } else {
+                navigateAndSync(target.directory(), onMoved);
+            }
         } finally {
             traversingHistory = false;
         }
@@ -2835,7 +2956,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     if (error != null) {
                         infoPanel.showMessage(rootMessage(error));
                     } else {
-                        infoPanel.show(probe);
+                        infoPanel.show(probe, service.corruption(entry.path()));
                     }
                 }));
     }
@@ -2890,8 +3011,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         service.archiveInfo(entry.path()).whenComplete((info, error) ->
                 Platform.runLater(() -> {
                     if (seq != probeSequence) return;
+                    Optional<String> corrupt = service.corruption(entry.path());
                     if (error != null) {
-                        infoPanel.showMessage(rootMessage(error));
+                        infoPanel.showMessage(corrupt
+                                .map(m -> MediaFailures.CORRUPT_PREFIX + m)
+                                .orElseGet(() -> rootMessage(error)));
                         return;
                     }
                     var rows = new ArrayList<InfoPanel.Row>();
@@ -2899,6 +3023,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     for (var field : info.fields()) {
                         rows.add(new InfoPanel.Row(field.name(), field.value()));
                     }
+                    // Learned when the container was entered; the tail/descriptor
+                    // read here can succeed on an archive whose body is damaged.
+                    corrupt.ifPresent(m -> rows.add(
+                            new InfoPanel.Row("Status", MediaFailures.CORRUPT_PREFIX + m)));
                     infoPanel.showDetailRows(rows);
                 }));
     }
@@ -2987,26 +3115,22 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * central directory or an image's descriptors is real I/O — then navigates
      * to its root. A container that cannot be opened (truncated, UDF-only,
      * unreadable) says so in the status bar and leaves the listing alone,
-     * rather than silently doing nothing.
+     * rather than silently doing nothing; a corrupt one is also marked on its
+     * row (see {@link MediaService#corruption}).
      */
     private void openArchive(Path archive) {
         statusLabel.setText("Opening " + archive.getFileName() + "…");
-        navigationRequests.resolve(service.fileOp(() -> {
-            try {
-                // Lands inside a solitary top-level folder, the shape almost
-                // every "compress this folder" archive has.
-                return ArchivePaths.browseRoot(archive);
-            } catch (IOException e) {
-                throw new MediaException(e.getMessage(), e);
-            }
-        }), Platform::runLater, (root, error) -> {
-            if (error != null) {
-                statusLabel.setText("Cannot open " + archive.getFileName() + ": "
-                        + rootMessage(error));
-                return;
-            }
-            navigateAndSync(root);
-        });
+        // Lands inside a solitary top-level folder, the shape almost every
+        // "compress this folder" archive has (ArchivePaths.browseRoot).
+        navigationRequests.resolve(service.enterArchive(archive), Platform::runLater,
+                (root, error) -> {
+                    if (error != null) {
+                        statusLabel.setText("Cannot open " + archive.getFileName() + ": "
+                                + rootMessage(error));
+                        return;
+                    }
+                    navigateAndSync(root);
+                });
     }
 
     /** The currently visible viewable media as a viewer/mosaic navigation list. */
@@ -4145,7 +4269,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     }
 
     private static String rootMessage(Throwable t) {
-        while (t.getCause() != null) t = t.getCause();
-        return t.getMessage() == null ? t.toString() : t.getMessage();
+        return MediaFailures.message(t);   // "Corrupt: …" for corrupt data
     }
 }

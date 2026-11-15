@@ -12,6 +12,9 @@ final class CurrentMosaicTileSet implements MosaicTileSet {
     @Override
     public void paint(MosaicTilePaintContext context) {
         context.paintCurrent();
+        // The legacy renderer marks only failed-corrupt tiles (centred sign);
+        // a thumbnail decoded from corrupt data gets the corner badge here.
+        if (MosaicCorruptMark.decodedButCorrupt(context)) MosaicCorruptMark.paintBadge(context);
     }
 
     @Override

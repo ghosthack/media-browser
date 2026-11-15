@@ -55,7 +55,7 @@ final class BlacklineMosaicTileSet implements MosaicTileSet {
 
             if (isMedia(c.identity()) && c.drawMediaThumbnail()) {
                 drawMediaCorner(c);
-                drawModifiers(c);
+                drawModifiers(c, true);
                 c.drawCaption();
                 return;
             }
@@ -73,7 +73,7 @@ final class BlacklineMosaicTileSet implements MosaicTileSet {
                 drawHeader(c, p);
                 drawPlate(c, p, primaryStamp(c));
             }
-            drawModifiers(c);
+            drawModifiers(c, false);
             c.drawCaption();
         } finally {
             g.restore();
@@ -490,7 +490,12 @@ final class BlacklineMosaicTileSet implements MosaicTileSet {
         }
     }
 
-    private static void drawModifiers(MosaicTilePaintContext c) {
+    /**
+     * {@code overThumbnail}: the tile shows a decoded picture, so a CORRUPT
+     * label (decoded from damaged data) is only the corner badge — the
+     * banner would hide the picture it labels.
+     */
+    private static void drawModifiers(MosaicTilePaintContext c, boolean overThumbnail) {
         GraphicsContext g = c.graphics();
         double x = c.x(), y = c.y(), s = c.size();
         boolean folderLike = c.identity() == MosaicTileIdentity.FOLDER
@@ -547,7 +552,12 @@ final class BlacklineMosaicTileSet implements MosaicTileSet {
         boolean failed = c.has(MosaicTileModifier.BROKEN_LINK)
                 || c.has(MosaicTileModifier.THUMBNAIL_FAILED);
         boolean unreadable = c.has(MosaicTileModifier.UNREADABLE) && !folderLike;
-        if (failed) {
+        if (c.has(MosaicTileModifier.CORRUPT)) {
+            // Corrupt data, not a plain failure: an amber banner plus the
+            // shared warning sign, never the oxide "NO PREVIEW".
+            if (!overThumbnail) stateBanner(c, "CORRUPT", MosaicCorruptMark.COLOR);
+            MosaicCorruptMark.paintBadge(c);
+        } else if (failed) {
             stateBanner(c, c.has(MosaicTileModifier.BROKEN_LINK)
                     ? "BROKEN" : "NO PREVIEW");
         } else if (unreadable) {
@@ -596,9 +606,13 @@ final class BlacklineMosaicTileSet implements MosaicTileSet {
     }
 
     private static void stateBanner(MosaicTilePaintContext c, String text) {
+        stateBanner(c, text, OXIDE);
+    }
+
+    private static void stateBanner(MosaicTilePaintContext c, String text, Color band) {
         GraphicsContext g = c.graphics();
         double x = c.x(), y = c.y(), s = c.size();
-        g.setFill(OXIDE);
+        g.setFill(band);
         g.fillRect(x, y + s * 0.43, s, s * 0.14);
         if (s >= 72) {
             g.setFill(SOOT);

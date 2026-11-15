@@ -17,6 +17,10 @@ public interface MediaFacade extends AutoCloseable {
      * Probe-based check whether the file can be opened as media, and as what
      * kind. Stills are detected with the libvips loader-sniffing API; AV
      * containers with the FFmpeg demuxer probing API.
+     *
+     * <p>Empty means "not media this backend recognizes". A file the backend
+     * does claim but fails on (I/O error, broken container, native failure)
+     * throws {@link MediaException} rather than answering empty.</p>
      */
     Optional<MediaKind> classify(Path file);
 
@@ -69,7 +73,7 @@ public interface MediaFacade extends AutoCloseable {
     default Thumbnail loadThumbnail(Path file, int maxEdge, ThumbnailMode mode) {
         VisualResult visual = loadVisual(file);
         return new Thumbnail(visual.frame().map(f -> Thumbnails.scale(f, maxEdge, mode)),
-                visual.probe().kind());
+                visual.probe().kind(), null, visual.corruption());
     }
 
     /** Diagnostic-aware thumbnail generation, including the actual output size. */

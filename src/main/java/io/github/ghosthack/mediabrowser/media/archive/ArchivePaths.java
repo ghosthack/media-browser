@@ -293,6 +293,16 @@ public final class ArchivePaths {
     }
 
     /**
+     * Whether {@code path} names a location in an archive whose mount has been
+     * closed (evicted under the cap, released), so {@link #revive} would have
+     * to re-open the container — real I/O a UI thread must hand off. Cheap:
+     * consults only the in-memory mount table.
+     */
+    public static boolean needsRevive(Path path) {
+        return path != null && inArchive(path) && !path.getFileSystem().isOpen();
+    }
+
+    /**
      * The same location, on a live mount: {@code path} unchanged when its
      * archive is still open, otherwise the equivalent path in a freshly
      * re-mounted copy.

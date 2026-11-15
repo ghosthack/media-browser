@@ -18,6 +18,7 @@ import io.github.ghosthack.ffmpegffm.ffmpeg.FFmpeg;
 import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.Ffm;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegBindings;
+import io.github.ghosthack.mediabrowser.media.ffm.bind.FfmpegErrors;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.Rational;
 import io.github.ghosthack.mediabrowser.media.ffm.bind.TileGrid;
 
@@ -58,14 +59,15 @@ public final class BundledFfmpegBindings implements FfmpegBindings {
         int err = FFmpeg.avformat_open_input(ctxPtr, arena.allocateFrom(file.toString()),
                 inputFormat, MemorySegment.NULL);
         if (err < 0) {
-            throw new MediaException("ffmpeg: cannot open " + file.getFileName()
-                    + ": " + errStr(err));
+            throw FfmpegErrors.openFailure("ffmpeg: cannot open " + file.getFileName()
+                    + ": " + errStr(err), err, file);
         }
         err = FFmpeg.avformat_find_stream_info(derefFormatContext(ctxPtr), MemorySegment.NULL);
         if (err < 0) {
             FFmpeg.avformat_close_input(ctxPtr);
-            throw new MediaException("ffmpeg: no stream info in " + file.getFileName()
-                    + ": " + errStr(err));
+            // A demuxer already accepted the bytes: INVALIDDATA is the data's.
+            throw FfmpegErrors.failure("ffmpeg: no stream info in " + file.getFileName()
+                    + ": " + errStr(err), err);
         }
         return ctxPtr;
     }
