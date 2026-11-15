@@ -840,6 +840,9 @@ public final class MosaicWindow
             requestDraw();
             infoPanel.refreshCorruption(path, service.corruption(path));
         }));
+        // "Mark corrupt files" toggled in Settings: repaint the marks away (or
+        // back); the Info panel re-renders itself from the same property.
+        CorruptMarking.property().addListener((o, was, v) -> requestDraw());
 
         // Filter toggles: changing any triggers a rebuild so the grid reflects
         // the new type visibility. Directories and .. are always shown.
@@ -1942,7 +1945,7 @@ public final class MosaicWindow
                 Platform.runLater(() -> {
                     if (gen != probeSequence) return;
                     if (error != null) {
-                        infoPanel.showMessage(rootMessage(error));
+                        infoPanel.showFailure(error, Optional.empty());
                     } else {
                         infoPanel.show(probe, service.corruption(lead.path()));
                     }
@@ -1961,9 +1964,7 @@ public final class MosaicWindow
                     if (gen != probeSequence) return;
                     Optional<String> corrupt = service.corruption(lead.path());
                     if (error != null) {
-                        infoPanel.showMessage(corrupt
-                                .map(m -> MediaFailures.CORRUPT_PREFIX + m)
-                                .orElseGet(() -> rootMessage(error)));
+                        infoPanel.showFailure(error, corrupt);
                         return;
                     }
                     var rows = new ArrayList<InfoPanel.Row>();
@@ -1973,9 +1974,7 @@ public final class MosaicWindow
                     }
                     // Learned when the container was entered; the tail/descriptor
                     // read here can succeed on an archive whose body is damaged.
-                    corrupt.ifPresent(m -> rows.add(
-                            new InfoPanel.Row("Status", MediaFailures.CORRUPT_PREFIX + m)));
-                    infoPanel.showDetailRows(rows);
+                    infoPanel.showDetailRows(rows, corrupt);
                 }));
     }
 
@@ -2041,7 +2040,7 @@ public final class MosaicWindow
     }
 
     private static String rootMessage(Throwable t) {
-        return MediaFailures.message(t);   // "Corrupt: …" for corrupt data
+        return CorruptMarking.message(t);   // "Corrupt: …" for corrupt data, while marking is on
     }
 
     /**
@@ -3085,23 +3084,24 @@ public final class MosaicWindow
                 && folderPending.contains(item.path())) {
             modifiers |= MosaicTileModifier.THUMBNAIL_PENDING.mask();
         }
+        boolean mark = CorruptMarking.enabled();
         if (item.type() == DirEntry.Type.MEDIA) {
             if (pending.contains(item.path())) {
                 modifiers |= MosaicTileModifier.THUMBNAIL_PENDING.mask();
-            } else if (empties.contains(item.path())) {
+            } else {
                 // CORRUPT refines FAILED rather than replacing it, so a tile
-                // set that predates CORRUPT still draws its failure mark.
-                modifiers |= MosaicTileModifier.THUMBNAIL_FAILED.mask();
-                if (corruptThumbs.contains(item.path())) {
-                    modifiers |= MosaicTileModifier.CORRUPT.mask();
-                }
-            } else if (images.containsKey(item.path())
-                    && service.corruption(item.path()).isPresent()) {
-                // Decoded but labelled corrupt (a libjpeg-turbo data warning):
-                // the thumbnail is drawn, CORRUPT alone adds the corner badge.
-                modifiers |= MosaicTileModifier.CORRUPT.mask();
+                // set that predates CORRUPT still draws its failure mark; a
+                // decoded thumbnail labelled corrupt (a libjpeg-turbo data
+                // warning) gets CORRUPT alone, the corner badge. With marking
+                // off only FAILED remains: still a failure, just unlabelled.
+                boolean failed = empties.contains(item.path());
+                modifiers |= CorruptMarking.mediaTileModifiers(failed,
+                        failed && corruptThumbs.contains(item.path()),
+                        !failed && mark && images.containsKey(item.path())
+                                && service.corruption(item.path()).isPresent(),
+                        mark);
             }
-        } else if (item.type() == DirEntry.Type.ARCHIVE
+        } else if (item.type() == DirEntry.Type.ARCHIVE && mark
                 && service.corruption(item.path()).isPresent()) {
             modifiers |= MosaicTileModifier.CORRUPT.mask();
         }
@@ -3199,7 +3199,7 @@ public final class MosaicWindow
             // drawn (a decoded-but-corrupt badge is the tile set's, from CORRUPT)
         } else if (!thumbnailsVisible.get()) {
             drawMediaGlyph(g, item, cx, cy);
-        } else if (corruptThumbs.contains(item.path())) {
+        } else if (CorruptMarking.enabled() && corruptThumbs.contains(item.path())) {
             MosaicCorruptMark.paintCentred(g, cx, cy, tileSize, 0.42);
         } else {
             String glyph = empties.contains(item.path())
@@ -3308,7 +3308,7 @@ public final class MosaicWindow
     private void drawArchiveContent(GraphicsContext g, DirEntry item, double cx, double cy) {
         drawFolderGlyph(g, cx, cy);
         drawArchiveLabel(g, item.extension().toUpperCase(Locale.ROOT), cx, cy);
-        if (service.corruption(item.path()).isPresent()) {
+        if (CorruptMarking.enabled() && service.corruption(item.path()).isPresent()) {
             MosaicCorruptMark.paintBadge(g, cx, cy, tileSize);
         }
         if (dirLabelsVisible.get()) drawCaption(g, item.displayName(), cx, cy);

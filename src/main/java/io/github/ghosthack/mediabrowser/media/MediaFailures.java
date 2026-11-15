@@ -34,8 +34,19 @@ public final class MediaFailures {
      * message (what the views always showed).
      */
     public static String message(Throwable error) {
+        String plain = plainMessage(error);
+        return isCorrupt(error) ? CORRUPT_PREFIX + plain : plain;
+    }
+
+    /**
+     * {@link #message} without the "Corrupt: " label: the decoder's own
+     * message for corrupt data, otherwise the innermost cause's. What a view
+     * shows when the user turned corrupt marking off — still the failure,
+     * just unlabelled.
+     */
+    public static String plainMessage(Throwable error) {
         Optional<CorruptData> corrupt = corruption(error);
-        if (corrupt.isPresent()) return CORRUPT_PREFIX + text(corrupt.get().getMessage(), corrupt.get());
+        if (corrupt.isPresent()) return text(corrupt.get().getMessage(), corrupt.get());
         Throwable t = error;
         while (t.getCause() != null) t = t.getCause();
         return text(t.getMessage(), t);

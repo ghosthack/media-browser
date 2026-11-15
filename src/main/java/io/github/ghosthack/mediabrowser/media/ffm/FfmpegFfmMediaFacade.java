@@ -223,13 +223,18 @@ public final class FfmpegFfmMediaFacade implements MediaFacade {
      * read here from a 1/8-scale decode — entropy decoding in full, almost no
      * IDCT. FFmpeg's pixels stay the viewer image; only the label is added.
      * A JPEG the fast path declines (progressive, CMYK, …) gets no verdict,
-     * exactly as its thumbnail gets none.
+     * exactly as its thumbnail gets none. Skipped (and said so in the trace)
+     * while {@link JpegDataCheck} is off.
      */
     private VisualResult jpegDataVerdict(Path file, VisualResult result,
                                          MediaEngineTrace.Recorder trace) {
         if (!turboJpeg || !isJpeg(file) || result.frame().isEmpty()) return result;
         long started = trace.beginAttempt();
-        String label = "TurboJPEG data check";
+        String label = JpegDataCheck.LABEL;
+        if (!JpegDataCheck.enabled()) {
+            trace.declined(label, started, JpegDataCheck.SKIPPED);
+            return result;
+        }
         try {
             switch (TurboJpegStills.attempt(file, 1, ThumbnailMode.FIT, false)) {
                 case TurboJpegStills.Decoded decoded -> {

@@ -303,6 +303,13 @@ public final class ViewerWindow implements AppShell.ShellView {
     private static final double SCROLLBAR_BREADTH = 12;
     private final Label placeholder = new Label();
     private final Label statusLabel = new Label();
+    /**
+     * Re-renders the status line (and placeholder) of the last load whose text
+     * depends on {@link CorruptMarking}; re-run when the setting flips while
+     * that text is still the one showing ({@link #markedStatus}).
+     */
+    private Runnable markedRender;
+    private String markedStatus;
     /** Shows the active video presentation path while playing ("GL · CGL · LWJGL", "PixelBuffer · tiled", …). */
     private static final String PRESENTER_TOOLTIP = "Active video presentation path";
     private final Label presenterLabel = new Label();
@@ -925,6 +932,13 @@ public final class ViewerWindow implements AppShell.ShellView {
 
         infoPanel.addHeaderControl(infoPin);
         metadataPanel.addHeaderControl(metadataPin);
+        // "Mark corrupt files" toggled in Settings: the shown item's " — corrupt"
+        // status and error text follow at once (Info re-renders itself).
+        CorruptMarking.property().addListener((o, was, v) -> {
+            if (markedRender != null && statusLabel.getText().equals(markedStatus)) {
+                showMarked(markedRender);
+            }
+        });
 
         // The shared menu bar is inserted above the toolbar by installMenuBar(...).
         topBox = new VBox(toolBar);
@@ -2100,7 +2114,7 @@ public final class ViewerWindow implements AppShell.ShellView {
                     shownSequence = seq;
                     if (error != null) {
                         logError("Cannot display " + item.fileName(), error);
-                        infoPanel.showMessage(rootMessage(error));
+                        infoPanel.showFailure(error, Optional.empty());
                         // Live playback owns the viewport; only blank it for a
                         // still that itself failed to decode.
                         if (playback.player() == null) {
@@ -2109,10 +2123,12 @@ public final class ViewerWindow implements AppShell.ShellView {
                             updateSuperResolutionState();
                             updateCropButtonState();
                             imageView.setImage(null);
-                            placeholder.setText("Cannot display " + item.fileName()
-                                    + "\n" + rootMessage(error));
-                            statusLabel.setText(item.fileName() + (MediaFailures.isCorrupt(error)
-                                    ? " — corrupt" : " — error"));
+                            showMarked(() -> {
+                                placeholder.setText("Cannot display " + item.fileName()
+                                        + "\n" + rootMessage(error));
+                                statusLabel.setText(item.fileName()
+                                        + (CorruptMarking.isMarked(error) ? " — corrupt" : " — error"));
+                            });
                             service.markVisualPresented(item.path());
                         }
                         diagnosticsPanel.refresh();
@@ -2170,10 +2186,12 @@ public final class ViewerWindow implements AppShell.ShellView {
                         hideLoadingIndicator();
                         imageView.setImage(baked.image());
                         placeholder.setText("");
-                        statusLabel.setText(item.fileName() + " — "
+                        String corruption = result.corruption();
+                        showMarked(() -> statusLabel.setText(item.fileName() + " — "
                                 + shown.width() + " × " + shown.height()
                                 + " — " + item.kind()
-                                + (result.corruption() == null ? "" : " — corrupt"));
+                                + (corruption != null && CorruptMarking.enabled()
+                                        ? " — corrupt" : "")));
                         updateSuperResolutionState();
                         updateCropButtonState();
                     } else {
@@ -3733,7 +3751,14 @@ public final class ViewerWindow implements AppShell.ShellView {
     }
 
     private static String rootMessage(Throwable t) {
-        return MediaFailures.message(t);   // "Corrupt: …" for corrupt data
+        return CorruptMarking.message(t);   // "Corrupt: …" for corrupt data, while marking is on
+    }
+
+    /** Runs a {@link CorruptMarking}-dependent status render and remembers it for a toggle. */
+    private void showMarked(Runnable render) {
+        render.run();
+        markedRender = render;
+        markedStatus = statusLabel.getText();
     }
 
     /**
@@ -3743,7 +3768,7 @@ public final class ViewerWindow implements AppShell.ShellView {
      * actually need to diagnose a backend (e.g. Homebrew FFmpeg 8 / vips) blowup.
      */
     private static void logError(String context, Throwable error) {
-        System.err.println("[ViewerWindow] " + context + ": " + rootMessage(error));
+        System.err.println("[ViewerWindow] " + context + ": " + MediaFailures.message(error));
         error.printStackTrace();
     }
 }

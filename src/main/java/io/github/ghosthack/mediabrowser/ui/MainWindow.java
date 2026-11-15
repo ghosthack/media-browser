@@ -26,6 +26,7 @@ import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
+import io.github.ghosthack.mediabrowser.media.ffm.JpegDataCheck;
 import io.github.ghosthack.mediabrowser.media.ffm.UntaggedMatrix;
 import io.github.ghosthack.mediabrowser.media.move.SidecarCarrier;
 import io.github.ghosthack.mediabrowser.ui.icon.AppIcon;
@@ -510,8 +511,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     setGraphic(graphic);
                     setText(entry.displayName());
                     setContextMenu(menu);
-                    showCorrupt(entry.type() == DirEntry.Type.PARENT
-                            ? null : service.corruption(entry.path()).orElse(null));
+                    showCorrupt(entry.type() == DirEntry.Type.PARENT ? null
+                            : CorruptMarking.shown(service.corruption(entry.path())).orElse(null));
                 }
             }
             /** Marks the row corrupt (amber mark + tooltip with the decoder's message). */
@@ -539,6 +540,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 });
             }
         });
+        // "Mark corrupt files" toggled in Settings: the rows' ⚠ follow at once
+        // (the Info panel re-renders itself from the same property).
+        CorruptMarking.property().addListener((o, was, v) -> listView.refresh());
         listView.getSelectionModel().selectedItemProperty()
                 .addListener((obs, old, sel) -> onSelection(sel));
         // A vertical ListView's default behavior maps bare Left/Right to
@@ -1299,7 +1303,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 Throwable cause = error instanceof CompletionException && error.getCause() != null
                         ? error.getCause() : error;
                 statusLabel.setText("Cannot open " + ArchivePaths.format(dir) + ": "
-                        + MediaFailures.message(cause));
+                        + CorruptMarking.message(cause));
                 return;
             }
             pendingSelection = select;
@@ -2954,7 +2958,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 Platform.runLater(() -> {
                     if (seq != probeSequence) return;
                     if (error != null) {
-                        infoPanel.showMessage(rootMessage(error));
+                        infoPanel.showFailure(error, Optional.empty());
                     } else {
                         infoPanel.show(probe, service.corruption(entry.path()));
                     }
@@ -3013,9 +3017,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     if (seq != probeSequence) return;
                     Optional<String> corrupt = service.corruption(entry.path());
                     if (error != null) {
-                        infoPanel.showMessage(corrupt
-                                .map(m -> MediaFailures.CORRUPT_PREFIX + m)
-                                .orElseGet(() -> rootMessage(error)));
+                        infoPanel.showFailure(error, corrupt);
                         return;
                     }
                     var rows = new ArrayList<InfoPanel.Row>();
@@ -3025,9 +3027,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                     }
                     // Learned when the container was entered; the tail/descriptor
                     // read here can succeed on an archive whose body is damaged.
-                    corrupt.ifPresent(m -> rows.add(
-                            new InfoPanel.Row("Status", MediaFailures.CORRUPT_PREFIX + m)));
-                    infoPanel.showDetailRows(rows);
+                    infoPanel.showDetailRows(rows, corrupt);
                 }));
     }
 
@@ -3496,6 +3496,24 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var untaggedMatrixRow = new HBox(8, new Label("Untagged video colour:"), untaggedMatrixCombo);
         untaggedMatrixRow.setAlignment(Pos.CENTER_LEFT);
 
+        // The -turbojpeg viewer's extra libjpeg-turbo pass (JpegDataCheck):
+        // applies to the next viewer load.
+        var jpegDataCheckBox = new CheckBox("Check JPEGs for damaged data");
+        jpegDataCheckBox.setSelected(settings.jpegDataCheck());
+        jpegDataCheckBox.setTooltip(new Tooltip(
+                "After FFmpeg decodes a JPEG for the viewer, read it once more at "
+                + "1/8 scale through libjpeg-turbo to learn whether its data is "
+                + "damaged (FFmpeg hides that). Off skips the extra read; "
+                + "thumbnails still report what their own decode found."));
+        // Corrupt-data labelling in every view (CorruptMarking): applies live.
+        var markCorruptBox = new CheckBox("Mark corrupt files");
+        markCorruptBox.setSelected(settings.markCorrupt());
+        markCorruptBox.setTooltip(new Tooltip(
+                "Amber badges in the mosaic, a warning sign on browser rows and "
+                + "\"Corrupt:\" in Info and the viewer for files whose data is "
+                + "damaged. Off hides only the labels: a file that fails to decode "
+                + "still shows its failure mark and error."));
+
         // Video presentation (VideoPresentation): applies to the next playback
         // session, like the decode policy. GL library only matters when a GL
         // presenter can run, CPU rotation only when the CPU presenter can.
@@ -3666,6 +3684,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         hint.getStyleClass().add("settings-hint");
         var generalContent = new VBox(8, uiStyleRow, uiStyleHint,
                 themeRow, iconPackRow, buttonBordersBox, backendRow, decodeRow, untaggedMatrixRow,
+                jpegDataCheckBox, markCorruptBox,
                 presenterRow, glLibraryRow, glReadbackRow, cpuRotationRow, presenterHint,
                 actionLogBox, actionLogFileBox, extensionFixBox,
                 new Separator(), loadingIndicatorRow, loadingDelayRow,
@@ -3917,6 +3936,15 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                             composeRow("Untagged video colour", "The colour matrix for video "
                                     + "that does not state one. Tagged video always uses its "
                                     + "own.", untaggedMatrixCombo),
+                            composeCheckRow(jpegDataCheckBox, "After FFmpeg decodes a JPEG for "
+                                    + "the viewer, a 1/8-scale libjpeg-turbo pass reports damaged "
+                                    + "data. Off skips that extra read; thumbnails still report "
+                                    + "their own."),
+                            composeCheckRow(markCorruptBox, "Amber badges, the browser-row "
+                                    + "warning sign and \"Corrupt:\" in Info and the viewer. "
+                                    + "Off hides only the labels: a file that fails to decode "
+                                    + "still shows its failure mark and error. Applies "
+                                    + "immediately."),
                             composeRow("Video presenter", "Auto uses the GPU on macOS and for "
                                     + "rotated video, falling back to the CPU if OpenGL is "
                                     + "unavailable. GPU, CPU and vImage (macOS, no OpenGL) are "
@@ -4114,6 +4142,11 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         String untaggedMatrix = untaggedMatrixCombo.getValue().name().toLowerCase(java.util.Locale.ROOT);
         settings.setUntaggedMatrix(untaggedMatrix);
         UntaggedMatrix.configure(untaggedMatrix);
+        settings.setJpegDataCheck(jpegDataCheckBox.isSelected());
+        JpegDataCheck.configure(jpegDataCheckBox.isSelected());
+        // Live: every view listens to CorruptMarking and repaints/refreshes.
+        settings.setMarkCorrupt(markCorruptBox.isSelected());
+        CorruptMarking.configure(markCorruptBox.isSelected());
         var videoPresentation = new VideoPresentation.Config(presenterCombo.getValue(),
                 glLibraryCombo.getValue(), cpuRotationCombo.getValue(), glReadbackCombo.getValue());
         settings.setVideoPresentation(videoPresentation);
@@ -4269,6 +4302,6 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     }
 
     private static String rootMessage(Throwable t) {
-        return MediaFailures.message(t);   // "Corrupt: …" for corrupt data
+        return CorruptMarking.message(t);   // "Corrupt: …" for corrupt data, while marking is on
     }
 }

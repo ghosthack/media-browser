@@ -48,6 +48,8 @@ public final class AppSettings {
     private static final String BACKEND_KEY = "media.backend";
     private static final String DECODE_DEVICE_KEY = "decode.device";
     private static final String UNTAGGED_MATRIX_KEY = "video.untaggedMatrix";
+    private static final String JPEG_DATA_CHECK_KEY = "media.jpegDataCheck";
+    private static final String MARK_CORRUPT_KEY = "ui.markCorrupt";
     private static final String VIDEO_PRESENTER_KEY = "video.presenter";
     private static final String VIDEO_GL_LIBRARY_KEY = "video.glLibrary";
     private static final String VIDEO_CPU_ROTATION_KEY = "video.cpuRotation";
@@ -243,6 +245,8 @@ public final class AppSettings {
     private String mediaBackend;
     private String decodeDevice;
     private String untaggedMatrix;
+    private boolean jpegDataCheck;
+    private boolean markCorrupt;
     private VideoPresentation.Config videoPresentation;
     private String detectionMode;
     private Theme theme;
@@ -418,6 +422,10 @@ public final class AppSettings {
                 BACKEND_KEY, MediaBackend.defaultBackend().settingsValue());
         settings.decodeDevice = props.getProperty(DECODE_DEVICE_KEY, "auto");
         settings.untaggedMatrix = props.getProperty(UNTAGGED_MATRIX_KEY, "auto");
+        settings.jpegDataCheck =
+                Boolean.parseBoolean(props.getProperty(JPEG_DATA_CHECK_KEY, "true"));
+        settings.markCorrupt =
+                Boolean.parseBoolean(props.getProperty(MARK_CORRUPT_KEY, "true"));
         VideoPresentation.Config video = VideoPresentation.Config.DEFAULT;
         settings.videoPresentation = new VideoPresentation.Config(
                 VideoPresentation.parse(VideoPresentation.Presenter.class,
@@ -753,6 +761,8 @@ public final class AppSettings {
         props.setProperty(BACKEND_KEY, mediaBackend);
         props.setProperty(DECODE_DEVICE_KEY, decodeDevice);
         props.setProperty(UNTAGGED_MATRIX_KEY, untaggedMatrix);
+        props.setProperty(JPEG_DATA_CHECK_KEY, Boolean.toString(jpegDataCheck));
+        props.setProperty(MARK_CORRUPT_KEY, Boolean.toString(markCorrupt));
         props.setProperty(VIDEO_PRESENTER_KEY, videoPresentation.presenter().name());
         props.setProperty(VIDEO_GL_LIBRARY_KEY, videoPresentation.glLibrary().name());
         props.setProperty(VIDEO_CPU_ROTATION_KEY, videoPresentation.cpuRotation().name());
@@ -1147,6 +1157,37 @@ public final class AppSettings {
     public void setUntaggedMatrix(String untaggedMatrix) {
         this.untaggedMatrix = untaggedMatrix == null || untaggedMatrix.isBlank()
                 ? "auto" : untaggedMatrix;
+    }
+
+    /**
+     * "Check JPEGs for damaged data" (default {@code true}): whether the
+     * {@code -turbojpeg} viewer runs its extra 1/8-scale libjpeg-turbo pass
+     * after FFmpeg decodes a JPEG, to read libjpeg's damaged-data verdict.
+     * Off skips that pass (no extra read or decode); thumbnails TurboJPEG
+     * decodes still report their own warning. Applied by
+     * {@code media.ffm.JpegDataCheck}.
+     */
+    public boolean jpegDataCheck() {
+        return jpegDataCheck;
+    }
+
+    public void setJpegDataCheck(boolean enabled) {
+        this.jpegDataCheck = enabled;
+    }
+
+    /**
+     * "Mark corrupt files" (default {@code true}): whether the views label
+     * corrupt data — mosaic badges, the browser-row warning sign and the
+     * "Corrupt: …" text in Info and the viewer. Off changes presentation
+     * only: a failed decode still shows its failure mark and plain error.
+     * Applied by {@code ui.CorruptMarking}.
+     */
+    public boolean markCorrupt() {
+        return markCorrupt;
+    }
+
+    public void setMarkCorrupt(boolean enabled) {
+        this.markCorrupt = enabled;
     }
 
     /**

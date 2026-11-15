@@ -63,6 +63,10 @@ public final class App extends Application {
         // session already honours it.
         HwDecode.configure(settings.decodeDevice());
         io.github.ghosthack.mediabrowser.media.ffm.UntaggedMatrix.configure(settings.untaggedMatrix());
+        // The -turbojpeg viewer's extra libjpeg-turbo damaged-data pass.
+        io.github.ghosthack.mediabrowser.media.ffm.JpegDataCheck.configure(settings.jpegDataCheck());
+        // Corrupt-data labelling in the views ("Mark corrupt files").
+        io.github.ghosthack.mediabrowser.ui.CorruptMarking.configure(settings.markCorrupt());
         // Video presenter / GL library / CPU rotation, likewise per session.
         VideoPresentation.configure(settings.videoPresentation());
         // Bridge the media layer's telemetry seam to the app-wide mosaic

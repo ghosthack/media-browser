@@ -69,6 +69,19 @@ public final class InfoPanel extends VBox {
     private String message;
     /** The file whose probe rows are shown ({@link #show}), else null. */
     private Path probedPath;
+    /**
+     * The decoder's corrupt-data message for what is shown (probe, failure or
+     * archive detail), unlabelled; rendered as "Corrupt: …" only while
+     * {@link CorruptMarking} is on, so a Settings toggle just re-renders.
+     */
+    private String corruption;
+    /** The failure shown in the probe half ({@link #showFailure}), else null. */
+    private Throwable failure;
+    /** Whether {@link #corruption} goes in a "Status" detail row rather than a trailing message. */
+    private boolean corruptionAsStatusRow;
+    /** Held strongly here, registered weakly: a discarded panel is not kept alive. */
+    private final javafx.beans.value.ChangeListener<Boolean> markingListener =
+            (o, was, v) -> render();
 
     public InfoPanel() {
         header = SidePanelHeader.create("Info");
@@ -80,6 +93,8 @@ public final class InfoPanel extends VBox {
         getChildren().addAll(header, table);
         setPrefWidth(280);
         setMinWidth(160);
+        CorruptMarking.property().addListener(
+                new javafx.beans.value.WeakChangeListener<>(markingListener));
     }
 
     /**
@@ -156,6 +171,7 @@ public final class InfoPanel extends VBox {
                 .toList();
         probedPath = probe.path();
         message = null;
+        clearCorruption();
         render();
     }
 
@@ -168,7 +184,7 @@ public final class InfoPanel extends VBox {
     public void show(MediaProbe probe, Optional<String> corruption) {
         show(probe);
         if (corruption.isPresent()) {
-            message = MediaFailures.CORRUPT_PREFIX + corruption.get();
+            this.corruption = corruption.get();
             render();
         }
     }
@@ -181,7 +197,21 @@ public final class InfoPanel extends VBox {
      */
     public void refreshCorruption(Path path, Optional<String> corruption) {
         if (probedPath == null || !probedPath.equals(path) || probeRows.isEmpty()) return;
-        message = corruption.map(m -> MediaFailures.CORRUPT_PREFIX + m).orElse(null);
+        this.corruption = corruption.orElse(null);
+        render();
+    }
+
+    /**
+     * Shows a failed probe/read as the status message: the error's own text,
+     * labelled "Corrupt: …" for corrupt data while {@link CorruptMarking} is
+     * on — preferring {@code corruption} (a recorded verdict, e.g. from
+     * entering an archive) when present. With marking off the plain error
+     * message stays: a failure is never hidden.
+     */
+    public void showFailure(Throwable error, Optional<String> corruption) {
+        showMessage(null);
+        failure = error;
+        this.corruption = corruption.orElse(null);
         render();
     }
 
@@ -194,6 +224,7 @@ public final class InfoPanel extends VBox {
         probeRows = List.of();
         probedPath = null;
         this.message = message;
+        clearCorruption();
         render();
     }
 
@@ -207,7 +238,46 @@ public final class InfoPanel extends VBox {
         probeRows = List.copyOf(rows);
         probedPath = null;
         message = null;
+        clearCorruption();
         render();
+    }
+
+    /**
+     * {@link #showDetailRows(List)} plus a trailing "Status: Corrupt: …" row
+     * while {@link CorruptMarking} is on — an archive whose descriptor reads
+     * cleanly can still have been found damaged when it was entered.
+     */
+    public void showDetailRows(List<Row> rows, Optional<String> corruption) {
+        showDetailRows(rows);
+        this.corruption = corruption.orElse(null);
+        corruptionAsStatusRow = true;
+        render();
+    }
+
+    private void clearCorruption() {
+        corruption = null;
+        failure = null;
+        corruptionAsStatusRow = false;
+    }
+
+    /** The probe half's status text as currently shown (null when none). */
+    String statusText() {
+        boolean mark = CorruptMarking.enabled();
+        if (failure != null) {
+            return mark && corruption != null
+                    ? MediaFailures.CORRUPT_PREFIX + corruption
+                    : CorruptMarking.message(failure);
+        }
+        if (message != null) return message;
+        if (corruption != null && mark && !corruptionAsStatusRow) {
+            return MediaFailures.CORRUPT_PREFIX + corruption;
+        }
+        return null;
+    }
+
+    /** The table rows as currently rendered (for tests). */
+    List<Row> rows() {
+        return List.copyOf(table.getItems());
     }
 
     /**
@@ -252,10 +322,14 @@ public final class InfoPanel extends VBox {
         probeRows.stream()
                 .filter(row -> !alreadyShown.contains(row.property()))
                 .forEach(rows::add);
-        if (message != null && !rows.isEmpty()) {
-            rows.add(new Row("", message));
+        if (corruptionAsStatusRow && corruption != null && CorruptMarking.enabled()) {
+            rows.add(new Row("Status", MediaFailures.CORRUPT_PREFIX + corruption));
         }
-        placeholder.setText(message == null ? "No selection" : message);
+        String status = statusText();
+        if (status != null && !rows.isEmpty()) {
+            rows.add(new Row("", status));
+        }
+        placeholder.setText(status == null ? "No selection" : status);
         table.getItems().setAll(rows);
     }
 
