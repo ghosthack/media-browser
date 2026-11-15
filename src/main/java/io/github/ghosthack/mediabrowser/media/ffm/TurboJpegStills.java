@@ -262,13 +262,16 @@ final class TurboJpegStills {
      * still shown, and the file is labelled corrupt. Returns the warning when
      * it is a corrupt-data message ({@link #isCorruptDataMessage}), null
      * otherwise. One exception: JWRN_EXTRANEOUS_DATA ("Corrupt JPEG data: N
-     * extraneous bytes before marker 0x..") is common in camera files and
-     * usually harmless, so it stays a trace note only.
+     * extraneous bytes before marker 0x..") before a header or table marker
+     * is padding common in camera files and harmless, so it stays a trace
+     * note only. Before EOI ({@code 0xd9}) it is not: that is libjpeg
+     * skipping scan data it could not decode, so the picture is damaged.
      */
     static String corruptionOf(String warning) {
         if (!isCorruptDataMessage(warning)) return null;
         if (warning.startsWith("Corrupt JPEG data: ")
-                && warning.contains(" extraneous bytes before marker ")) {
+                && warning.contains(" extraneous bytes before marker ")
+                && !warning.toLowerCase(java.util.Locale.ROOT).endsWith("marker 0xd9")) {
             return null;
         }
         return warning;
