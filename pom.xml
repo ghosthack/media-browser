@@ -38,6 +38,8 @@
     <jcodec.version>0.2.5</jcodec.version>
     <!-- Runtime logging facade used transitively by the UnRAR reader. -->
     <slf4j.version>2.0.17</slf4j.version>
+    <!-- QR code for web mode's phone link (Nayuki qrcodegen, MIT). -->
+    <qrcodegen.version>1.8.0</qrcodegen.version>
     <!-- Test-fixture builder for PdfMediaBrowserIntegrationTest. Production PDF
          parsing is self-contained inside the pdf-media artifact. -->
     <pdfbox.version>3.0.8</pdfbox.version>
@@ -367,6 +369,13 @@
       <groupId>org.jcodec</groupId>
       <artifactId>jcodec-javase</artifactId>
       <version>${jcodec.version}</version>
+    </dependency>
+    <!-- Web mode's phone-link QR code (Phone Access dialog). MIT, pure Java,
+         no transitive dependencies; same library micro-harness-manager uses. -->
+    <dependency>
+      <groupId>io.nayuki</groupId>
+      <artifactId>qrcodegen</artifactId>
+      <version>${qrcodegen.version}</version>
     </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>

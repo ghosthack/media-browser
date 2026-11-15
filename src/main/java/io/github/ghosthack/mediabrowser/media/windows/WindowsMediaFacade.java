@@ -1,6 +1,7 @@
 package io.github.ghosthack.mediabrowser.media.windows;
 
 import io.github.ghosthack.mediabrowser.media.BgraAlpha;
+import io.github.ghosthack.mediabrowser.media.CorruptMediaException;
 import io.github.ghosthack.mediabrowser.media.ImageSequences;
 import io.github.ghosthack.mediabrowser.media.MediaException;
 import io.github.ghosthack.mediabrowser.media.MediaEngineTrace;
@@ -198,7 +199,7 @@ public final class WindowsMediaFacade implements MediaFacade {
                                     attempt -> recordMfAttempt(trace, attempt));
                     return new VisualResult(videoProbe(file, vi), Optional.of(videoRaster(frame)));
                 } catch (RuntimeException e) {
-                    throw new MediaException("windows-native: cannot decode video frame "
+                    throw failure("windows-native: cannot decode video frame "
                             + file.getFileName() + ": " + e.getMessage(), e);
                 }
             } else {
@@ -255,7 +256,7 @@ public final class WindowsMediaFacade implements MediaFacade {
                     RasterFrame raster = Thumbnails.scale(videoRaster(frame), maxEdge, mode);
                     return new Thumbnail(Optional.of(raster), MediaKind.VIDEO);
                 } catch (RuntimeException e) {
-                    throw new MediaException("windows-native: cannot thumbnail video "
+                    throw failure("windows-native: cannot thumbnail video "
                             + file.getFileName() + ": " + e.getMessage(), e);
                 }
             }
@@ -333,7 +334,7 @@ public final class WindowsMediaFacade implements MediaFacade {
             DecodedImage<PixelFormat> img = WIC.decodeFromPath(arena, file.toString());
             return new VisualResult(imageProbe(file), Optional.of(stillRaster(img)));
         } catch (RuntimeException e) {
-            throw new MediaException("windows-native: cannot decode image "
+            throw failure("windows-native: cannot decode image "
                     + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
@@ -346,7 +347,7 @@ public final class WindowsMediaFacade implements MediaFacade {
             if (mode == ThumbnailMode.FILL) frame = Thumbnails.fill(frame, maxEdge);
             return new Thumbnail(Optional.of(frame), MediaKind.IMAGE);
         } catch (RuntimeException e) {
-            throw new MediaException("windows-native: cannot thumbnail image "
+            throw failure("windows-native: cannot thumbnail image "
                     + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
@@ -366,7 +367,7 @@ public final class WindowsMediaFacade implements MediaFacade {
             return new VisualResult(videoProbe(file, vi, audioInfo(file)),
                     Optional.of(videoRaster(frame)));
         } catch (RuntimeException e) {
-            MediaException failure = new MediaException(
+            MediaException failure = failure(
                     "windows-native: cannot decode animation frame "
                     + file.getFileName() + ": " + e.getMessage(), e);
             trace.failed(ANIMATED_VISUAL, decodeStarted, failure);
@@ -411,7 +412,7 @@ public final class WindowsMediaFacade implements MediaFacade {
             RasterFrame raster = Thumbnails.scale(videoRaster(frame), maxEdge, mode);
             return new Thumbnail(Optional.of(raster), MediaKind.VIDEO);
         } catch (RuntimeException e) {
-            throw new MediaException("windows-native: cannot thumbnail animation "
+            throw failure("windows-native: cannot thumbnail animation "
                     + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
@@ -430,7 +431,10 @@ public final class WindowsMediaFacade implements MediaFacade {
             // Foundation refusing to create a source for the avis/hevs
             // container is the engine's capability gap (seen as a bare E_FAIL,
             // not MF_E_UNSUPPORTED_BYTESTREAM_TYPE), so the caller declines to
-            // the still and records it. A file I/O error, or any failure after
+            // the still and records it, even when the open failure reads as
+            // corrupt data: MF's MP4 source cannot tell an avis container it
+            // does not understand from a damaged one, and the WIC still then
+            // reports its own verdict. A file I/O error, or any failure after
             // MF opened the container, is still this file's error.
             if (rejectsAnimationContainer(e.getCause())) return Optional.empty();
             throw e;
@@ -483,7 +487,7 @@ public final class WindowsMediaFacade implements MediaFacade {
         try {
             raw = WIC.readMetadata(file.toString());
         } catch (RuntimeException e) {
-            throw new MediaException("windows-native: cannot read metadata of "
+            throw failure("windows-native: cannot read metadata of "
                     + file.getFileName() + ": " + e.getMessage(), e);
         }
         return buildStillMetadata(file, raw);
@@ -545,7 +549,7 @@ public final class WindowsMediaFacade implements MediaFacade {
         try {
             return new WindowsVideoStream(MediaFoundation.openVideo(file.toString()));
         } catch (RuntimeException e) {
-            throw new MediaException("windows-native: cannot open video "
+            throw failure("windows-native: cannot open video "
                     + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
@@ -642,6 +646,11 @@ public final class WindowsMediaFacade implements MediaFacade {
      * already opens the file, so the in-memory shortcut saves nothing here, and a
      * full-file probe matches the {@code loadVisual}/{@code loadThumbnail} decode
      * path exactly — a positive sniff means the real decode succeeds too.</p>
+     *
+     * <p>A probe that fails with a corrupt-data HRESULT ({@link #corruptData})
+     * also counts as an image: WIC picked a decoder by the file's signature
+     * and that decoder rejected the header, so the still path runs, fails the
+     * same way, and labels the file corrupt instead of "cannot probe".</p>
      */
     private static boolean sniffImage(Path file) {
         if (!WIC.isAvailable()) {
@@ -651,8 +660,87 @@ public final class WindowsMediaFacade implements MediaFacade {
             WIC.getSize(file.toString());
             return true;
         } catch (RuntimeException e) {
-            return false;
+            return corruptData(e) != null;
         }
+    }
+
+    // -- corrupt data ----------------------------------------------------------
+
+    static final int WINCODEC_ERR_BADIMAGE = 0x88982F60;
+    static final int WINCODEC_ERR_BADHEADER = 0x88982F61;
+    static final int WINCODEC_ERR_BADMETADATAHEADER = 0x88982F63;
+    static final int WINCODEC_ERR_BADSTREAMDATA = 0x88982F70;
+    static final int MF_E_INVALID_FILE_FORMAT = 0xC00D36BE;
+    static final int MF_E_INVALID_STREAM_DATA = 0xC00D36CB;
+    static final int MF_E_INVALID_POSITION = 0xC00D36E5;
+
+    /**
+     * The name of the HRESULT when it says the file's data is damaged, else
+     * {@code null}. {@code operation} is the binding's message, which names
+     * the failing call. Only codes whose meaning is invalid data count:
+     * WIC's bad image / header / metadata header / stream data, and Media
+     * Foundation's invalid file format / stream data. {@code
+     * MF_E_INVALID_POSITION} counts when the MP4 source raises it opening the
+     * file or reading a sample (its index points past the end of the data: a
+     * truncated or garbled container), not from a seek. Unsupported formats,
+     * missing codecs, I/O and access errors ({@code WINCODEC_ERR_STREAMREAD},
+     * {@code 0x8007xxxx}, …) are not corrupt. Pure, so it is testable on any OS.
+     */
+    static String corruptDataName(int hr, String operation) {
+        return switch (hr) {
+            case WINCODEC_ERR_BADIMAGE -> "WINCODEC_ERR_BADIMAGE";
+            case WINCODEC_ERR_BADHEADER -> "WINCODEC_ERR_BADHEADER";
+            case WINCODEC_ERR_BADMETADATAHEADER -> "WINCODEC_ERR_BADMETADATAHEADER";
+            case WINCODEC_ERR_BADSTREAMDATA -> "WINCODEC_ERR_BADSTREAMDATA";
+            case MF_E_INVALID_FILE_FORMAT -> "MF_E_INVALID_FILE_FORMAT";
+            case MF_E_INVALID_STREAM_DATA -> "MF_E_INVALID_STREAM_DATA";
+            case MF_E_INVALID_POSITION ->
+                    operation != null && (operation.startsWith("MFCreateSourceReaderFromURL")
+                            || operation.startsWith("ReadSample"))
+                            ? "MF_E_INVALID_POSITION" : null;
+            default -> null;
+        };
+    }
+
+    /**
+     * The corrupt-data HRESULT name a failure carries, searching its causes
+     * and suppressed exceptions (the binding's frame extraction keeps the
+     * Source Reader attempt as suppressed under the manual-pipeline one), or
+     * {@code null}. Only {@link DecodeException} messages of the binding's
+     * {@code "<call> … (HRESULT 0x…)"} form are read. Pure.
+     */
+    static String corruptData(Throwable failure) {
+        return corruptData(failure, 0);
+    }
+
+    private static String corruptData(Throwable t, int depth) {
+        if (t == null || depth > 8) return null;
+        if (t instanceof DecodeException && t.getMessage() != null) {
+            Matcher m = HRESULT.matcher(t.getMessage());
+            if (m.find()) {
+                String name = corruptDataName(
+                        Integer.parseUnsignedInt(m.group(1), 16), t.getMessage());
+                if (name != null) return name;
+            }
+        }
+        for (Throwable s : t.getSuppressed()) {
+            String name = corruptData(s, depth + 1);
+            if (name != null) return name;
+        }
+        return t.getCause() == t ? null : corruptData(t.getCause(), depth + 1);
+    }
+
+    /**
+     * The facade's failure for a binding exception: a
+     * {@link CorruptMediaException} naming the HRESULT when the decoder
+     * reported invalid data ({@link #corruptData}), else a plain
+     * {@link MediaException}. The cause is kept either way.
+     */
+    private static MediaException failure(String message, RuntimeException cause) {
+        String corrupt = corruptData(cause);
+        return corrupt == null
+                ? new MediaException(message, cause)
+                : new CorruptMediaException(message + " (" + corrupt + ")", cause);
     }
 
     /**
@@ -726,7 +814,7 @@ public final class WindowsMediaFacade implements MediaFacade {
             return MediaFoundation.getVideoInfo(arena, file.toString());
         } catch (RuntimeException e) {
             if (isNotApplicable(e)) return null;
-            throw new MediaException("windows-native: cannot read the video stream of "
+            throw failure("windows-native: cannot read the video stream of "
                     + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
@@ -789,7 +877,7 @@ public final class WindowsMediaFacade implements MediaFacade {
             return MediaFoundation.getAudioInfo(arena, file.toString());
         } catch (RuntimeException e) {
             if (isNotApplicable(e)) return null;
-            throw new MediaException("windows-native: cannot read the audio stream of "
+            throw failure("windows-native: cannot read the audio stream of "
                     + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
@@ -803,7 +891,7 @@ public final class WindowsMediaFacade implements MediaFacade {
                     -1, -1, dim.width(), dim.height(),
                     null, 0, null, -1, -1, pixelDescription(file));
         } catch (RuntimeException e) {
-            throw new MediaException("windows-native: cannot probe image "
+            throw failure("windows-native: cannot probe image "
                     + file.getFileName() + ": " + e.getMessage(), e);
         }
     }

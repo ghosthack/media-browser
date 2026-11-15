@@ -26,6 +26,7 @@ release where a release tag exists:
 | `GLFW-LICENSE.md` | GLFW | 3.4 |
 | `JCODEC-LICENSE` | JCodec | 0.2.5 release lineage |
 | `LWJGL-LICENSE.md` | LWJGL | 3.4.1 |
+| `QRCODEGEN-LICENSE.txt` | Nayuki QR Code generator (Java), `io.nayuki:qrcodegen` | 1.8.0 |
 | `TWELVEMONKEYS-LICENSE.txt` | TwelveMonkeys ImageIO | 3.13.1 |
 
 Native-component licenses and build/source coordinates come from their

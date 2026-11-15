@@ -5,12 +5,14 @@ import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.archive.ArchivePaths;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 import io.github.ghosthack.mediabrowser.media.move.FileOps;
+import io.github.ghosthack.mediabrowser.media.move.MoveBatch;
+import io.github.ghosthack.mediabrowser.media.move.MoveBatch.Execution;
+import io.github.ghosthack.mediabrowser.media.move.MoveBatch.Moved;
 import io.github.ghosthack.mediabrowser.media.move.MoveDialogIntents;
 import io.github.ghosthack.mediabrowser.media.move.MoveDialogLogic;
 import io.github.ghosthack.mediabrowser.media.move.MoveDialogModel;
 import io.github.ghosthack.mediabrowser.media.move.MovePlanner;
 import io.github.ghosthack.mediabrowser.media.move.SidecarCarrier;
-import io.github.ghosthack.mediabrowser.media.move.StrandedMoveException;
 import io.github.ghosthack.mediabrowser.media.move.TrashOps;
 import io.github.ghosthack.mediabrowser.media.move.TreeNode;
 
@@ -407,7 +409,7 @@ public final class MoveController implements MoveDialogIntents {
      * Off the FX thread: trash {@code moving}, writing each item's entry to the
      * on-disk log the moment the OS accepts it and before the next item is
      * tried — a crash or forced quit mid-batch then leaves a line for every
-     * item already in the Trash, as {@link #moveOne} does for moves. The FX
+     * item already in the Trash, as {@link MoveBatch} does for moves. The FX
      * thread only has to show the entries.
      *
      * <p>An unexpected failure of the bulk call itself still hands back the
@@ -419,7 +421,7 @@ public final class MoveController implements MoveDialogIntents {
         try {
             TrashOps.Result result = trash.apply(moving, accepted -> {
                 ActionLogEntry entry = ActionLogEntry.trashed(accepted);
-                // The item is in the Trash whatever the log does: like landed(),
+                // The item is in the Trash whatever the log does: like a landed move in MoveBatch,
                 // a logging failure is reported, not turned into a trash failure.
                 try {
                     ActionLog.get().persist(entry);
@@ -583,7 +585,7 @@ public final class MoveController implements MoveDialogIntents {
             }
             recordActions(execution);
 
-            List<String> failures = execution.failures();
+            List<String> failures = execution.failureTexts();
             List<Moved> succeeded = execution.moved();
             if (!succeeded.isEmpty()) {
                 host.refreshAfterMove(nextFocus);
@@ -793,115 +795,15 @@ public final class MoveController implements MoveDialogIntents {
         }
     }
 
-    /** Off-FX-thread move execution. */
+    /**
+     * Off-FX-thread move execution: {@link MoveBatch#execute}, which logs each
+     * relocation to the on-disk action log ({@link ActionLog#persist}) the
+     * moment it lands.
+     */
     private Execution execute(List<String> sources, String resolvedTarget, boolean rename,
                               String renameTarget, boolean createDir) {
-        // The archive-layer counterpart of Host#releaseBeforeMove: a source may
-        // be a container the user has browsed into (or a directory holding
-        // one), whose mounted reader keeps the file itself open. Held until the
-        // move is done, so an in-flight decode cannot re-mount it meanwhile.
-        try (var held = ArchivePaths.releaseForMutation(
-                sources.stream().map(Path::of).toList())) {
-            return executeReleased(sources, resolvedTarget, rename, renameTarget, createDir);
-        }
-    }
-
-    private Execution executeReleased(List<String> sources, String resolvedTarget,
-                                      boolean rename, String renameTarget, boolean createDir) {
-        List<Moved> moved = new ArrayList<>();
-        List<String> failures = new ArrayList<>();
-
-        if (createDir) {
-            try {
-                FileOps.createDirectoriesRecursive(Path.of(resolvedTarget));
-            } catch (IOException | RuntimeException e) {
-                return new Execution(moved, failures,
-                        "Failed to create directory: " + message(e));
-            }
-        }
-
-        if (rename) {
-            moveOne(sources.get(0), moved, failures, source ->
-                    FileOps.renameMove(source, Path.of(renameTarget), sidecars));
-        } else {
-            for (String source : sources) {
-                moveOne(source, moved, failures, path ->
-                        FileOps.moveWithAutoRename(path, Path.of(resolvedTarget), sidecars));
-            }
-        }
-        return new Execution(moved, failures, null);
-    }
-
-    /** One source's relocation, returning the path it landed at. */
-    @FunctionalInterface
-    private interface Relocation {
-        Path apply(Path source) throws IOException;
-    }
-
-    /**
-     * Relocate one source and account for it before the next one starts: a
-     * file that landed is written to the on-disk action log here, on the
-     * file-operation thread, the moment its move completes — so a crash or
-     * forced quit mid-batch leaves a line for every file already moved.
-     *
-     * <p>Nothing escapes: an unchecked failure (a path the filesystem rejects,
-     * a listing dying on a flaky share) is that source's failure alone, since
-     * letting it fail the whole future would discard the record of the sources
-     * already moved and skip their refresh. A file stranded at the destination
-     * ({@link StrandedMoveException}) is both: logged where it now is, and
-     * reported as a failure in the wording that says so.</p>
-     */
-    private static void moveOne(String source, List<Moved> moved, List<String> failures,
-                                Relocation relocation) {
-        String name = new File(source).getName();
-        Path sourcePath;
-        Path landedAt;
-        try {
-            sourcePath = Path.of(source);
-            landedAt = relocation.apply(sourcePath);
-        } catch (StrandedMoveException e) {
-            failures.add(name + ": " + e.getMessage());
-            moved.add(landed(Path.of(source), e.landedAt()));
-            return;
-        } catch (IOException e) {
-            failures.add(name + ": " + failureText(e));
-            return;
-        } catch (RuntimeException e) {
-            // Unexpected, so the trace goes to stderr as well as the status.
-            e.printStackTrace();
-            failures.add(name + ": " + message(e));
-            return;
-        }
-        moved.add(landed(sourcePath, landedAt));
-    }
-
-    /**
-     * Durably logs a relocation that just completed (off the FX thread). The
-     * file has moved whatever the log does, so an unexpected logging failure
-     * is reported to stderr and the move still counts — like the append
-     * failures {@link io.github.ghosthack.mediabrowser.media.move.ActionLogFile}
-     * reports itself, it must not turn a finished move into a failed one.
-     */
-    private static Moved landed(Path source, Path finalPath) {
-        ActionLogEntry entry = ActionLogEntry.moveOrRename(source, finalPath);
-        try {
-            ActionLog.get().persist(entry);
-        } catch (RuntimeException e) {
-            System.err.println("Cannot write the action log entry for " + source + ": " + e);
-            e.printStackTrace();
-        }
-        return new Moved(source, finalPath, entry);
-    }
-
-    /**
-     * A per-file move failure's text. {@link FileOps} wraps a sidecar failure
-     * in a message of its own that says what became of the file ("nothing was
-     * moved"), with the carrier's reason already quoted inside it; unwrapping
-     * that to the root cause, as {@link #message} does, would drop the half
-     * the user needs. Anything else keeps the root-cause wording.
-     */
-    private static String failureText(IOException e) {
-        return e.getCause() != null && e.getMessage() != null ? e.getMessage() : message(e);
+        return MoveBatch.execute(sources, resolvedTarget, rename, renameTarget, createDir,
+                sidecars, ActionLog.get()::persist);
     }
 
     /**
@@ -931,7 +833,7 @@ public final class MoveController implements MoveDialogIntents {
             }
             recordActions(execution);
 
-            List<String> failures = execution.failures();
+            List<String> failures = execution.failureTexts();
             List<Moved> succeeded = execution.moved();
 
             if (failures.isEmpty()) {
@@ -1114,21 +1016,11 @@ public final class MoveController implements MoveDialogIntents {
      * Show each completed relocation in the shared session {@link ActionLog}.
      * On the FX thread, from both finish handlers; a total failure shows
      * nothing. In-memory only: every entry was already written to the on-disk
-     * log by {@link #landed} as its move completed, and is not appended again.
+     * log by {@link MoveBatch} as its move completed, and is not appended again.
      */
     private static void recordActions(Execution execution) {
         for (Moved moved : execution.moved()) {
             ActionLog.get().recordPersisted(moved.entry());
         }
     }
-
-    /**
-     * One completed relocation: the source, its resolved on-disk result, and
-     * the action-log entry already persisted for it (classified move-vs-rename
-     * by whether the file left its directory).
-     */
-    private record Moved(Path source, Path finalPath, ActionLogEntry entry) {}
-
-    /** Outcome of the off-thread {@link #execute}. */
-    private record Execution(List<Moved> moved, List<String> failures, String createError) {}
 }

@@ -116,8 +116,32 @@ public final class MediaService implements AutoCloseable {
      * decoder's message — learned as a by-product of decodes the views already
      * asked for, never by a scan of its own. See {@link #corruption}.
      */
-    private final ConcurrentMap<Path, String> corruptFiles = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Path, CorruptMark> corruptFiles = new ConcurrentHashMap<>();
+
+    /**
+     * A corrupt verdict and the file state it was reached on. The mark is
+     * sticky: a later clean decode clears it only when the file has changed
+     * since (size or modified time), because views decode different parts
+     * of a file — a clean embedded-preview thumbnail says nothing about the
+     * damaged picture the viewer found.
+     */
+    private record CorruptMark(String message, FileStamp stamp) {}
+
+    /** Size + modified time of a file; null fields when it could not be read. */
+    private record FileStamp(long size, java.nio.file.attribute.FileTime modified) {
+        static FileStamp of(Path file) {
+            try {
+                BasicFileAttributes a = Files.readAttributes(file, BasicFileAttributes.class);
+                return new FileStamp(a.size(), a.lastModifiedTime());
+            } catch (IOException | RuntimeException e) {
+                return new FileStamp(-1, null);
+            }
+        }
+    }
     private final List<Consumer<Path>> corruptionListeners =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+    /** Closed first by {@link #close}, newest first: whatever serves this service's output. */
+    private final List<AutoCloseable> closeHooks =
             new java.util.concurrent.CopyOnWriteArrayList<>();
     /**
      * What the most recent {@link #scan} dropped, so a view can put a count on
@@ -923,12 +947,15 @@ public final class MediaService implements AutoCloseable {
      * corrupt data ({@link CorruptData}), or last decoded only with the
      * decoder warning the data is damaged (a thumbnail or visual carrying a
      * {@code corruption} message — the image is shown and labelled); empty
-     * when it never did or a later clean thumbnail/viewer decode or archive
-     * open succeeded. A map read, safe on
+     * when it never did, or a clean decode or archive open succeeded after
+     * the file changed (size or modified time; the mark is otherwise sticky).
+     * A map read, safe on
      * the FX thread: no file is read to answer it.
      */
     public Optional<String> corruption(Path file) {
-        return file == null ? Optional.empty() : Optional.ofNullable(corruptFiles.get(file));
+        if (file == null) return Optional.empty();
+        CorruptMark mark = corruptFiles.get(file);
+        return mark == null ? Optional.empty() : Optional.of(mark.message());
     }
 
     /**
@@ -945,12 +972,24 @@ public final class MediaService implements AutoCloseable {
         if (corrupt.isEmpty() || file == null) return;
         String message = MediaFailures.message(error)
                 .substring(MediaFailures.CORRUPT_PREFIX.length());
-        if (!message.equals(corruptFiles.put(file, message))) notifyCorruption(file);
+        mark(file, message);
     }
 
-    /** A decode or open of {@code file} succeeded: the data read clean this time. */
+    /**
+     * A decode or open of {@code file} succeeded clean. Clears its mark only
+     * when the file changed since the mark was set (repaired, replaced, or a
+     * copy that finished); otherwise the earlier corrupt verdict stands.
+     */
     private void noteDecoded(Path file) {
-        if (file != null && corruptFiles.remove(file) != null) notifyCorruption(file);
+        if (file == null) return;
+        CorruptMark mark = corruptFiles.get(file);
+        if (mark == null || mark.stamp().equals(FileStamp.of(file))) return;
+        if (corruptFiles.remove(file, mark)) notifyCorruption(file);
+    }
+
+    private void mark(Path file, String message) {
+        CorruptMark previous = corruptFiles.put(file, new CorruptMark(message, FileStamp.of(file)));
+        if (previous == null || !message.equals(previous.message())) notifyCorruption(file);
     }
 
     /**
@@ -960,7 +999,7 @@ public final class MediaService implements AutoCloseable {
      */
     void noteCorrupt(Path file, String message) {
         if (file == null || message == null) return;
-        if (!message.equals(corruptFiles.put(file, message))) notifyCorruption(file);
+        mark(file, message);
     }
 
     /** A completed decode's verdict: corrupt when it carries a message, else clean. */
@@ -1407,8 +1446,11 @@ public final class MediaService implements AutoCloseable {
         return UntaggedMatrix.pinned(untagged, () -> ColorPolicy.pinned(color, work));
     }
 
-    /** Stable cache identity for precisely the AAE geometry this service bakes. */
-    private static String aaeSignature(AaeSidecar aae) {
+    /**
+     * Stable cache identity for precisely the AAE geometry this service bakes
+     * ({@code ""} for none); web mode keys its encoded renditions by it too.
+     */
+    public static String aaeSignature(AaeSidecar aae) {
         if (aae == null || !aae.hasGeometry()) return "";
         StringBuilder out = new StringBuilder(80)
                 .append(aae.masterWidth()).append('x').append(aae.masterHeight())
@@ -1896,8 +1938,25 @@ public final class MediaService implements AutoCloseable {
         }
     }
 
+    /**
+     * Registers {@code hook} to be closed at the start of {@link #close}, before
+     * the executors stop: a consumer of this service (web mode's server) must
+     * stop taking requests before the work it would queue is refused.
+     */
+    public void addCloseHook(AutoCloseable hook) {
+        closeHooks.add(0, hook);
+    }
+
     @Override
     public void close() {
+        for (AutoCloseable hook : closeHooks) {
+            try {
+                hook.close();
+            } catch (Exception e) {
+                System.err.println("[MediaService] close hook failed: " + e);
+            }
+        }
+        closeHooks.clear();
         superResolution.cancelCurrent();
         executor.shutdownNow();
         fileOpExecutor.shutdownNow();

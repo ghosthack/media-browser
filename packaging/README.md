@@ -63,6 +63,7 @@ may not appear in a static dependency scan.
 | `jdk.unsupported` | current; added 2026-07-27 | LWJGL and native-memory dependencies use compatibility APIs such as `sun.misc.Unsafe`. |
 | `java.desktop` | current; added 2026-08-05 | Still-image decoding, color management, and the shared raster bridge use AWT and ImageIO. The package smoke exercises a synthetic BGRA conversion. |
 | `java.net.http` | current; added 2026-08-15 | The opt-in local super-resolution feature uses `HttpClient` to download its pinned runtime and models after first-use consent. The package smoke constructs the downloader without accessing the network. |
+| `jdk.httpserver` | current; added 2026-11-15 | Web mode serves the phone page with `com.sun.net.httpserver`. The package smoke binds a loopback server and stops it. |
 | `jdk.zipfs` | removed 2026-08-09 | It was added 2026-07-29 for ZIP filesystem access, then became unnecessary when archive handling moved to the bounded `ZipInputStream` reader. |
 
 When a class-path feature starts using another non-transitive JDK module, add

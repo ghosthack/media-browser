@@ -7,6 +7,8 @@ import io.github.ghosthack.librawffm.libraw.libraw_imgother_t;
 import io.github.ghosthack.librawffm.libraw.libraw_iparams_t;
 import io.github.ghosthack.librawffm.libraw.libraw_output_params_t;
 import io.github.ghosthack.librawffm.libraw.libraw_processed_image_t;
+import io.github.ghosthack.librawffm.libraw.libraw_thumbnail_item_t;
+import io.github.ghosthack.librawffm.libraw.libraw_thumbnail_list_t;
 import io.github.ghosthack.librawffm.libraw.libraw_thumbnail_t;
 import io.github.ghosthack.mediabrowser.media.CorruptMediaException;
 import io.github.ghosthack.mediabrowser.media.MediaException;
@@ -15,9 +17,12 @@ import io.github.ghosthack.mediabrowser.media.RasterFrames;
 import io.github.ghosthack.mediabrowser.media.ThumbnailMode;
 import io.github.ghosthack.mediabrowser.media.Thumbnails;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
 
@@ -174,17 +179,70 @@ final class LibRawStills {
     }
 
     /**
-     * A LibRaw call's failure. Only {@code LIBRAW_DATA_ERROR} ("Corrupted data
-     * or unexpected EOF", raised by LibRaw's raw/JPEG decoders) is corrupt;
-     * {@code LIBRAW_IO_ERROR} is not, though LibRaw also reports a file cut
-     * short that way — it shares the code with genuine read failures.
+     * LibRaw reads this many header bytes before identifying a file and fails
+     * any shorter file with {@code LIBRAW_IO_ERROR} whatever its bytes (0.22.2,
+     * pinned by a test): on such a file the code says nothing about the data.
+     */
+    static final int IDENTIFY_HEADER_LENGTH = 64;
+
+    /**
+     * A LibRaw call's failure. {@code LIBRAW_DATA_ERROR} ("Corrupted data or
+     * unexpected EOF", raised by LibRaw's raw/JPEG decoders) is corrupt.
+     * {@code LIBRAW_IO_ERROR} is shared between a file cut short (LibRaw's
+     * EOF and out-of-bounds exceptions) and a genuine read failure, so
+     * {@link #ioFailure} tells them apart by reading the file itself.
      */
     private static MediaException failure(Path file, String call, int rc) {
-        String message = "LibRaw cannot decode " + file.getFileName()
-                + ": " + call + " failed: " + describe(rc);
-        return rc == LibRaw.LIBRAW_DATA_ERROR()
-                ? new CorruptMediaException(message)
-                : new MediaException(message);
+        String what = call + " failed: " + describe(rc);
+        if (rc == LibRaw.LIBRAW_DATA_ERROR()) {
+            return new CorruptMediaException("LibRaw cannot decode " + file.getFileName()
+                    + ": " + what);
+        }
+        if (rc == LibRaw.LIBRAW_IO_ERROR()) {
+            return ioFailure(file, what);
+        }
+        return new MediaException("LibRaw cannot decode " + file.getFileName() + ": " + what);
+    }
+
+    /**
+     * Splits a {@code LIBRAW_IO_ERROR} deterministically, on the failure path
+     * only (no cost for a good file). The file is read start to end with
+     * plain Java I/O: if that read fails, it is a read error, reported with
+     * the {@link IOException} as cause. If it succeeds, the bytes were all
+     * there and LibRaw still ran out of them — the data ends before the
+     * structure it describes, so the file is truncated or damaged. A file
+     * shorter than {@link #IDENTIFY_HEADER_LENGTH} is the one exception: LibRaw
+     * rejected it unread, so the code is no evidence about its data (like
+     * unrecognised bytes). An archive entry is checked the same way, on the
+     * temp file it was materialised to.
+     */
+    static MediaException ioFailure(Path file, String what) {
+        long length;
+        try {
+            length = readThrough(file);
+        } catch (IOException e) {
+            return new MediaException("LibRaw cannot read " + file.getFileName()
+                    + ": " + what + "; " + e, e);
+        }
+        if (length < IDENTIFY_HEADER_LENGTH) {
+            return new MediaException("LibRaw cannot decode " + file.getFileName()
+                    + ": " + what + " (" + length + " bytes, shorter than LibRaw's "
+                    + IDENTIFY_HEADER_LENGTH + "-byte identification header)");
+        }
+        return new CorruptMediaException("LibRaw cannot decode " + file.getFileName()
+                + ": file is truncated or damaged (LibRaw: " + what + ")");
+    }
+
+    /** Reads {@code file} to its end, returning the byte count. */
+    private static long readThrough(Path file) throws IOException {
+        try (InputStream in = Files.newInputStream(file)) {
+            byte[] buffer = new byte[1 << 16];
+            long total = 0;
+            for (int n; (n = in.read(buffer)) >= 0; ) {
+                total += n;
+            }
+            return total;
+        }
     }
 
     /** LibRaw's own text for a return code; positive codes are errno values. */
@@ -368,7 +426,8 @@ final class LibRawStills {
      * can hand over as JPEG.
      *
      * @throws MediaException on any other unpack_thumb verdict (I/O, corrupt
-     *         data, out of memory)
+     *         data, out of memory); a {@link CorruptMediaException} when the
+     *         preview runs past the end of the file
      */
     private static Declined unpackThumb(Path file, MemorySegment lr) {
         int rc = LibRaw.libraw_unpack_thumb(lr);
@@ -380,12 +439,60 @@ final class LibRawStills {
         if (rc != LibRaw.LIBRAW_SUCCESS()) {
             throw failure(file, "libraw_unpack_thumb", rc);
         }
-        MemorySegment thumb = libraw_data_t.thumbnail(lr.reinterpret(libraw_data_t.sizeof()));
+        MemorySegment data = lr.reinterpret(libraw_data_t.sizeof());
+        MemorySegment thumb = libraw_data_t.thumbnail(data);
         if (libraw_thumbnail_t.tformat(thumb) != LibRaw.LIBRAW_THUMBNAIL_JPEG()
                 || libraw_thumbnail_t.tlength(thumb) <= 0) {
             return new Declined("it is not JPEG");
         }
+        requirePreviewInsideFile(file, data, thumb);
         return null;
+    }
+
+    /**
+     * LibRaw's {@code unpack_thumb} succeeds on a preview the file was cut
+     * inside: it keeps the declared length and leaves the missing tail as
+     * whatever the allocation held, so decoding it would give a different
+     * verdict run to run. The preview's extent comes from LibRaw's own
+     * thumbnail list ({@code thumbs_list}: offset + length of the entries with
+     * this preview's dimensions and length); when every such entry ends
+     * past the end of the file, the file is truncated — reported before any
+     * of those bytes are decoded. No matching entry: nothing to compare.
+     */
+    private static void requirePreviewInsideFile(Path file, MemorySegment data,
+                                                 MemorySegment thumb) {
+        MemorySegment list = libraw_data_t.thumbs_list(data);
+        int count = Math.min(libraw_thumbnail_list_t.thumbcount(list),
+                (int) libraw_thumbnail_list_t.thumblist$dimensions()[0]);
+        MemorySegment items = libraw_thumbnail_list_t.thumblist(list);
+        long size;
+        try {
+            size = Files.size(file);
+        } catch (IOException e) {
+            throw new MediaException("LibRaw cannot read " + file.getFileName()
+                    + ": embedded preview; " + e, e);
+        }
+        long end = -1;
+        for (int i = 0; i < count; i++) {
+            MemorySegment item = items.asSlice(i * libraw_thumbnail_item_t.sizeof(),
+                    libraw_thumbnail_item_t.sizeof());
+            if (libraw_thumbnail_item_t.tlength(item) != libraw_thumbnail_t.tlength(thumb)
+                    || libraw_thumbnail_item_t.twidth(item) != libraw_thumbnail_t.twidth(thumb)
+                    || libraw_thumbnail_item_t.theight(item) != libraw_thumbnail_t.theight(thumb)) {
+                continue;
+            }
+            long itemEnd = libraw_thumbnail_item_t.toffset(item)
+                    + Integer.toUnsignedLong(libraw_thumbnail_item_t.tlength(item));
+            if (itemEnd <= size) {
+                return;
+            }
+            end = itemEnd;
+        }
+        if (end > size) {
+            throw new CorruptMediaException("LibRaw cannot decode " + file.getFileName()
+                    + ": file is truncated or damaged (embedded preview ends at byte " + end
+                    + ", past the end of the " + size + "-byte file)");
+        }
     }
 
     /**

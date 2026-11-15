@@ -2,6 +2,7 @@ package io.github.ghosthack.mediabrowser;
 
 import io.github.ghosthack.mediabrowser.media.MediaBackend;
 import io.github.ghosthack.mediabrowser.media.MediaService;
+import io.github.ghosthack.mediabrowser.web.Passkeys;
 
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -145,6 +146,27 @@ public final class AppSettings {
     private static final String EXTENSION_FIX_KEY = "extensionFix.enabled";
     /** App-wide: width of the Info/Metadata/Diagnostics panel stack (dragged on its divider). */
     private static final String SIDE_PANEL_WIDTH_KEY = "ui.sidePanels.width";
+    /**
+     * Web mode (docs/web-mode.md): the phone page served on the local network.
+     * Off by default; on/off and the port apply on the next start, the root
+     * folder, JPEG quality and passkey apply at once.
+     */
+    private static final String WEB_ENABLED_KEY = "web.enabled";
+    private static final String WEB_PORT_KEY = "web.port";
+    private static final String WEB_ROOT_KEY = "web.root";
+    private static final String WEB_JPEG_QUALITY_KEY = "web.jpegQuality";
+    private static final String WEB_PASSKEY_KEY = "web.passkey";
+
+    /**
+     * Web mode defaults: port 7394 sits next to micro-harness-manager's MCP
+     * (7392) and phone page (7393) without clashing with either.
+     */
+    public static final int DEFAULT_WEB_PORT = 7394;
+    public static final int MIN_WEB_PORT = 1024;
+    public static final int MAX_WEB_PORT = 65535;
+    public static final int DEFAULT_WEB_JPEG_QUALITY = 85;
+    public static final int MIN_WEB_JPEG_QUALITY = 40;
+    public static final int MAX_WEB_JPEG_QUALITY = 100;
 
     /**
      * Side-panel stack default: the panels' own preferred width, clamped to
@@ -317,6 +339,17 @@ public final class AppSettings {
     private volatile boolean actionLogFileEnabled;
     private boolean extensionFixEnabled;
     private int sidePanelWidth = DEFAULT_SIDE_PANEL_WIDTH;
+    private boolean webEnabled;
+    private int webPort = DEFAULT_WEB_PORT;
+    /** The configured web root, or blank for the default ({@link #defaultWebRoot()}). */
+    private String webRoot = "";
+    private int webJpegQuality = DEFAULT_WEB_JPEG_QUALITY;
+    /**
+     * The phone passkey, or null until first asked for: {@link #webPasskey()}
+     * mints one then, and the next {@link #save} persists it (the baseline
+     * taken at load has none, so the new value counts as a change).
+     */
+    private String webPasskey;
     /**
      * The quick-move ({@code F1}–{@code F4}) toggle. Transient: shared
      * process-wide via this singleton so the checkbox state is consistent across
@@ -605,6 +638,15 @@ public final class AppSettings {
         settings.sidePanelWidth = parseBoundedInt(
                 props.getProperty(SIDE_PANEL_WIDTH_KEY), DEFAULT_SIDE_PANEL_WIDTH,
                 MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH);
+        settings.webEnabled = Boolean.parseBoolean(props.getProperty(WEB_ENABLED_KEY, "false"));
+        settings.webPort = parseBoundedInt(props.getProperty(WEB_PORT_KEY),
+                DEFAULT_WEB_PORT, MIN_WEB_PORT, MAX_WEB_PORT);
+        settings.webRoot = props.getProperty(WEB_ROOT_KEY, "").trim();
+        settings.webJpegQuality = parseBoundedInt(props.getProperty(WEB_JPEG_QUALITY_KEY),
+                DEFAULT_WEB_JPEG_QUALITY, MIN_WEB_JPEG_QUALITY, MAX_WEB_JPEG_QUALITY);
+        // A stored passkey that is not well-formed (hand-edited) is dropped,
+        // so a fresh one is minted rather than the page accepting a typo.
+        settings.webPasskey = Passkeys.canonical(props.getProperty(WEB_PASSKEY_KEY)).orElse(null);
         settings.baselineProperties = settings.canonicalProperties();
         return settings;
     }
@@ -849,6 +891,11 @@ public final class AppSettings {
         props.setProperty(ACTION_LOG_FILE_KEY, Boolean.toString(actionLogFileEnabled));
         props.setProperty(EXTENSION_FIX_KEY, Boolean.toString(extensionFixEnabled));
         props.setProperty(SIDE_PANEL_WIDTH_KEY, Integer.toString(sidePanelWidth));
+        props.setProperty(WEB_ENABLED_KEY, Boolean.toString(webEnabled));
+        props.setProperty(WEB_PORT_KEY, Integer.toString(webPort));
+        props.setProperty(WEB_ROOT_KEY, webRoot);
+        props.setProperty(WEB_JPEG_QUALITY_KEY, Integer.toString(webJpegQuality));
+        if (webPasskey != null) props.setProperty(WEB_PASSKEY_KEY, webPasskey);
         return props;
     }
 
@@ -2015,5 +2062,88 @@ public final class AppSettings {
     public void setSidePanelWidth(int width) {
         this.sidePanelWidth = Math.max(MIN_SIDE_PANEL_WIDTH,
                 Math.min(MAX_SIDE_PANEL_WIDTH, width));
+    }
+
+    // --- web mode (docs/web-mode.md) -----------------------------------------
+
+    /** Whether the phone page is served (default {@code false}; applies on the next start). */
+    public boolean webEnabled() {
+        return webEnabled;
+    }
+
+    public void setWebEnabled(boolean enabled) {
+        this.webEnabled = enabled;
+    }
+
+    /** TCP port the phone page listens on, on every interface (default 7394; next start). */
+    public int webPort() {
+        return webPort;
+    }
+
+    public void setWebPort(int port) {
+        this.webPort = Math.max(MIN_WEB_PORT, Math.min(MAX_WEB_PORT, port));
+    }
+
+    /** The configured root folder text; blank means {@link #defaultWebRoot()}. */
+    public String webRootSetting() {
+        return webRoot;
+    }
+
+    public void setWebRootSetting(String root) {
+        this.webRoot = root == null ? "" : root.trim();
+    }
+
+    /**
+     * The folder the phone page may browse: the configured one, or the default
+     * when none is set. Whether it exists is checked by the server, which
+     * refuses to start on a missing root rather than serving another folder.
+     */
+    public Path webRoot() {
+        if (webRoot.isBlank()) return defaultWebRoot();
+        try {
+            return Path.of(webRoot).toAbsolutePath().normalize();
+        } catch (InvalidPathException e) {
+            // Not a path at all: hand back the text as given, so the server's
+            // start fails on it loudly instead of serving a different folder.
+            return Path.of(webRoot.replace('\0', '_'));
+        }
+    }
+
+    /** {@code ~/Pictures} when it exists, else the home folder. */
+    public static Path defaultWebRoot() {
+        Path home = Path.of(System.getProperty("user.home"));
+        Path pictures = home.resolve("Pictures");
+        return Files.isDirectory(pictures) ? pictures : home;
+    }
+
+    /** JPEG quality for the phone page's tiles and full views (default 85, clamped 40..100). */
+    public int webJpegQuality() {
+        return webJpegQuality;
+    }
+
+    public void setWebJpegQuality(int quality) {
+        this.webJpegQuality = Math.max(MIN_WEB_JPEG_QUALITY, Math.min(MAX_WEB_JPEG_QUALITY, quality));
+    }
+
+    /**
+     * The phone passkey ({@code abcd-efgh-jkmn-pqrs}), minted on first use and
+     * persisted by the next {@link #save}.
+     */
+    public synchronized String webPasskey() {
+        if (webPasskey == null) {
+            webPasskey = Passkeys.generate();
+        }
+        return webPasskey;
+    }
+
+    /** Whether a passkey exists yet (loaded, or minted by {@link #webPasskey()}). */
+    public synchronized boolean hasWebPasskey() {
+        return webPasskey != null;
+    }
+
+    /** Replaces the passkey with a fresh one and returns it (save to persist). */
+    public synchronized String rotateWebPasskey() {
+        webPasskey = Passkeys.generate();
+        return webPasskey;
     }
 }

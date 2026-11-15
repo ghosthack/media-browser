@@ -37,10 +37,20 @@ public final class FileOps {
      */
     public static Path moveWithAutoRename(Path source, Path targetDir, SidecarCarrier sidecars)
             throws IOException {
+        return moveWithAutoRename(source, targetDir, source.getFileName().toString(), sidecars);
+    }
+
+    /**
+     * {@link #moveWithAutoRename(Path, Path, SidecarCarrier)} landing under
+     * {@code fileName} instead of the source's own name (so {@code fileName},
+     * else {@code fileName}'s {@code " (N)"} variant) — how an undo puts a
+     * file that was auto-renamed on its way out back under its original name.
+     */
+    public static Path moveWithAutoRename(Path source, Path targetDir, String fileName,
+                                          SidecarCarrier sidecars) throws IOException {
         if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Source does not exist: " + source);
         }
-        String fileName = source.getFileName().toString();
         Path directDestination = targetDir.resolve(fileName);
         if (Files.exists(directDestination, LinkOption.NOFOLLOW_LINKS)
                 && Files.isSameFile(source, directDestination)) {

@@ -111,6 +111,7 @@ for required in \
     "$BUNDLE/dependencies/declared/GLFW-LICENSE.md" \
     "$BUNDLE/dependencies/declared/JCODEC-LICENSE" \
     "$BUNDLE/dependencies/declared/LWJGL-LICENSE.md" \
+    "$BUNDLE/dependencies/declared/QRCODEGEN-LICENSE.txt" \
     "$BUNDLE/dependencies/declared/TWELVEMONKEYS-LICENSE.txt"; do
     [[ -s "$required" ]] || {
         echo "error: declared dependency license is missing: $required" >&2

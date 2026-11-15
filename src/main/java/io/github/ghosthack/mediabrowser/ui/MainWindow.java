@@ -1007,6 +1007,19 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         return mosaic;
     }
 
+    /** Web mode, for File ▸ Phone Access… and Settings ▸ Web; set once by App. */
+    private io.github.ghosthack.mediabrowser.web.WebMode webMode;
+
+    public void setWebMode(io.github.ghosthack.mediabrowser.web.WebMode webMode) {
+        this.webMode = webMode;
+    }
+
+    /** File ▸ Phone Access…: the QR code, link and passkey for web mode. */
+    private void showPhoneAccess() {
+        if (webMode == null) return;
+        new PhoneAccessDialog(stage(), webMode, settings.webRoot()).showAndWait();
+    }
+
     // --- ShellView ------------------------------------------------------------
 
     /** The stage hosting this view: the single window, or the browser's own. */
@@ -1951,7 +1964,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                 buildTrashItem(owner),
                 buildExportMenu(owner),
                 new SeparatorMenuItem(),
-                action("_Settings\u2026", keys.mod1(KeyCode.COMMA), this::showSettings)));
+                action("_Settings\u2026", keys.mod1(KeyCode.COMMA), this::showSettings),
+                action("_Phone Access\u2026", null, this::showPhoneAccess)));
         if (io.github.ghosthack.panama.media.core.Platform.IS_WINDOWS) {
             fileItems.add(action("File _Associations\u2026", null, this::showFileAssociations));
         }
@@ -3237,6 +3251,38 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
     }
 
     /**
+     * A move made from the phone page (web mode): release whatever the viewer
+     * holds open on {@code moving}, as every desktop move host does. FX thread.
+     */
+    public CompletableFuture<Void> releaseBeforeExternalMove(List<Path> moving) {
+        return viewer.releaseBeforeMove(moving);
+    }
+
+    /**
+     * After a move made from the phone page: re-list when this window — and
+     * with it the mosaic, which follows its listing — shows one of
+     * {@code affectedDirs} (or an album, whose members may have moved),
+     * keeping the selection unless it was one of {@code moved}. FX thread.
+     */
+    public void refreshAfterExternalMove(List<Path> moved, Set<Path> affectedDirs) {
+        if (currentAlbum == null && (currentDir == null || !showsAnyOf(affectedDirs))) return;
+        DirEntry sel = listView.getSelectionModel().getSelectedItem();
+        boolean keep = sel != null && sel.type() != DirEntry.Type.PARENT && !moved.contains(sel.path());
+        refreshAfterMove(keep ? sel.path() : nextFocusAfterMove(moved));
+    }
+
+    /** Whether the current folder is one of {@code dirs} (which are real paths). */
+    private boolean showsAnyOf(Set<Path> dirs) {
+        if (dirs.contains(currentDir)) return true;
+        if (ArchivePaths.inArchive(currentDir)) return false;
+        try {
+            return dirs.contains(currentDir.toRealPath());
+        } catch (IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
      * Refresh the listing after a move and land selection on {@code focusPath}.
      * Sets {@link #pendingSelection} so the post-listing hook in {@link #navigate}
      * re-selects it once the async scan returns (the ported "refresh → then
@@ -3899,6 +3945,50 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         var keysContent = new VBox(8, mod1Row, mod2Row, new Separator(), keysHint);
         keysContent.setPadding(new Insets(12));
 
+        // --- Web tab: web mode (docs/web-mode.md) --------------------------------
+        var webEnabledBox = new CheckBox("Serve the phone page (web mode)");
+        webEnabledBox.setSelected(settings.webEnabled());
+        var webPortSpinner = new Spinner<Integer>(AppSettings.MIN_WEB_PORT, AppSettings.MAX_WEB_PORT,
+                settings.webPort(), 1);
+        webPortSpinner.setEditable(true);
+        webPortSpinner.setPrefWidth(110);
+        var webRootField = new TextField(settings.webRootSetting());
+        webRootField.setPromptText(AppSettings.defaultWebRoot().toString());
+        webRootField.setPrefColumnCount(18);
+        var webRootChoose = new Button("Choose\u2026");
+        webRootChoose.setOnAction(e -> {
+            var chooser = new javafx.stage.DirectoryChooser();
+            chooser.setTitle("Web Root Folder");
+            java.io.File start = settings.webRoot().toFile();
+            if (start.isDirectory()) chooser.setInitialDirectory(start);
+            java.io.File picked = chooser.showDialog(webRootField.getScene() == null
+                    ? stage() : webRootField.getScene().getWindow());
+            if (picked != null) webRootField.setText(picked.getAbsolutePath());
+        });
+        var webRootRow = new HBox(6, webRootField, webRootChoose);
+        webRootRow.setAlignment(Pos.CENTER_LEFT);
+        var webQualitySpinner = new Spinner<Integer>(AppSettings.MIN_WEB_JPEG_QUALITY,
+                AppSettings.MAX_WEB_JPEG_QUALITY, settings.webJpegQuality(), 5);
+        webQualitySpinner.setEditable(true);
+        webQualitySpinner.setPrefWidth(90);
+        var webAccessButton = new Button("Phone Access\u2026");
+        webAccessButton.setOnAction(e -> showPhoneAccess());
+        var webHint = new Label("Serves a phone-friendly mosaic of the root folder on this "
+                + "network (plain HTTP, every interface), behind a passkey. Turning it on or "
+                + "off and changing the port apply after restarting Media Browser; the root "
+                + "folder and JPEG quality apply on Save.");
+        webHint.getStyleClass().add("settings-hint");
+        webHint.setWrapText(true);
+        var webPortRow = new HBox(8, new Label("Port:"), webPortSpinner);
+        webPortRow.setAlignment(Pos.CENTER_LEFT);
+        var webRootLabelRow = new HBox(8, new Label("Root folder:"), webRootRow);
+        webRootLabelRow.setAlignment(Pos.CENTER_LEFT);
+        var webQualityRow = new HBox(8, new Label("JPEG quality:"), webQualitySpinner);
+        webQualityRow.setAlignment(Pos.CENTER_LEFT);
+        var webContent = new VBox(8, webEnabledBox, webPortRow, webRootLabelRow, webQualityRow,
+                webAccessButton, new Separator(), webHint);
+        webContent.setPadding(new Insets(12));
+
         var generalTab = new Tab("General", generalContent);
         generalTab.setClosable(false);
         var browserTab = new Tab("Browser", browserContent);
@@ -3909,7 +3999,9 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         mosaicTab.setClosable(false);
         var keysTab = new Tab("Keys", keysContent);
         keysTab.setClosable(false);
-        var tabs = new TabPane(generalTab, browserTab, viewerTab, mosaicTab, keysTab);
+        var webTab = new Tab("Web", webContent);
+        webTab.setClosable(false);
+        var tabs = new TabPane(generalTab, browserTab, viewerTab, mosaicTab, keysTab, webTab);
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
         // --- UiStyle.COMPOSE: left-rail pages over the same controls above ------
@@ -4043,14 +4135,31 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                                     mod2Combo)));
             keysPageCompose.setPadding(new Insets(12, 16, 12, 16));
 
+            var webPageCompose = new VBox(0,
+                    composeGroup("Web mode",
+                            composeCheckRow(webEnabledBox, "A phone-friendly mosaic of the root "
+                                    + "folder for phones on this network: plain HTTP on every "
+                                    + "interface, behind a passkey. Applies after restarting "
+                                    + "Media Browser."),
+                            composeRow("Port", "Applies after restarting Media Browser.",
+                                    webPortSpinner),
+                            composeRow("Root folder", "Blank = " + AppSettings.defaultWebRoot()
+                                    + ". Applies on Save.", webRootRow),
+                            composeRow("JPEG quality", "Tiles and full views sent to the phone. "
+                                    + "Applies on Save.", webQualitySpinner),
+                            composeRow("Phone access", "QR code, link and passkey.",
+                                    webAccessButton)));
+            webPageCompose.setPadding(new Insets(12, 16, 12, 16));
+
             var railGroup = new ToggleGroup();
             var generalRailItem = composeRailItem("General", railGroup);
             var browserRailItem = composeRailItem("Browser", railGroup);
             var viewerRailItem = composeRailItem("Viewer", railGroup);
             var mosaicRailItem = composeRailItem("Mosaic", railGroup);
             var keysRailItem = composeRailItem("Keys", railGroup);
+            var webRailItem = composeRailItem("Web", railGroup);
             var rail = new VBox(generalRailItem, browserRailItem, viewerRailItem,
-                    mosaicRailItem, keysRailItem);
+                    mosaicRailItem, keysRailItem, webRailItem);
             rail.getStyleClass().add("settings-rail");
 
             var railDivider = new Region();
@@ -4065,6 +4174,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
             composePages.put(viewerRailItem, viewerPageCompose);
             composePages.put(mosaicRailItem, mosaicPageCompose);
             composePages.put(keysRailItem, keysPageCompose);
+            composePages.put(webRailItem, webPageCompose);
 
             var composeScroll = new ScrollPane();
             composeScroll.setFitToWidth(true);
@@ -4235,6 +4345,21 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // --- Keys: applied to the menu bar on the next start -------------------
         settings.setKeysModifier1(mod1Combo.getValue().token());
         settings.setKeysModifier2(mod2Combo.getValue().token());
+
+        // --- Web: on/off and port wait for a restart; root and quality go live --
+        settings.setWebEnabled(webEnabledBox.isSelected());
+        settings.setWebPort(webPortSpinner.getValue());
+        settings.setWebRootSetting(webRootField.getText());
+        settings.setWebJpegQuality(webQualitySpinner.getValue());
+        if (webMode != null) {
+            // Re-rooting resolves the folder on disk: off the FX thread, and a
+            // root that cannot be served is said in the status bar.
+            var web = webMode;
+            java.util.concurrent.CompletableFuture.supplyAsync(web::applyLiveSettings)
+                    .thenAccept(problem -> {
+                        if (problem != null) Platform.runLater(() -> statusLabel.setText(problem));
+                    });
+        }
         try {
             settings.save();
             statusLabel.setText("Settings saved \u2014 some changes apply after restart");

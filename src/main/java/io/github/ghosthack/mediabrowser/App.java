@@ -5,6 +5,7 @@ import io.github.ghosthack.mediabrowser.media.MediaBackend;
 import io.github.ghosthack.mediabrowser.media.MediaService;
 import io.github.ghosthack.mediabrowser.media.RotationStore;
 import io.github.ghosthack.mediabrowser.media.ffm.HwDecode;
+import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogFile;
 import io.github.ghosthack.mediabrowser.ui.ActionLog;
 import io.github.ghosthack.mediabrowser.ui.AppShell;
@@ -13,6 +14,8 @@ import io.github.ghosthack.mediabrowser.ui.MainWindow;
 import io.github.ghosthack.mediabrowser.ui.ThemeManager;
 import io.github.ghosthack.mediabrowser.ui.ViewerWindow;
 import io.github.ghosthack.mediabrowser.ui.icon.IconPackManager;
+import io.github.ghosthack.mediabrowser.web.MoveHooks;
+import io.github.ghosthack.mediabrowser.web.WebMode;
 import io.github.ghosthack.mediabrowser.win.LaunchInvocation;
 import io.github.ghosthack.mediabrowser.win.SingleInstanceGuard;
 
@@ -25,6 +28,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Media Browser entry point. Optional first program argument: either the
@@ -43,6 +49,7 @@ public final class App extends Application {
     private static SingleInstanceGuard instanceGuard;
 
     private MediaService service;
+    private WebMode webMode;
 
     @Override
     public void start(Stage primaryStage) {
@@ -148,6 +155,25 @@ public final class App extends Application {
         shell.register(AppShell.AppView.MOSAIC, main.mosaic());
         shell.register(AppShell.AppView.VIEWER, viewer);
 
+        // Web mode (docs/web-mode.md): serves the phone page when web.enabled
+        // is on, started off the FX thread and stopped before the service. A
+        // rotation made from a phone repaints the desktop's tile and viewer
+        // exactly as a rotation made in the mosaic does.
+        webMode = WebMode.start(settings, service, rotationStore, aaeStore,
+                path -> Platform.runLater(() -> {
+                    main.mosaic().mirrorViewerAdjustments(path);
+                    viewer.refreshAdjustments(path);
+                }),
+                failure -> Platform.runLater(() -> {
+                    var alert = new Alert(Alert.AlertType.WARNING);
+                    alert.setTitle("Media Browser");
+                    alert.setHeaderText("Web mode did not start");
+                    alert.setContentText(failure);
+                    alert.show();
+                }),
+                phoneMoveHooks(main));
+        main.setWebMode(webMode);
+
         Path argPath = launchArgPath();
         AppShell.AppView initial = (argPath != null && Files.isRegularFile(argPath))
                 ? main.openInitialFile(argPath)
@@ -184,6 +210,46 @@ public final class App extends Application {
             Platform.runLater(() ->
                     MacApplicationMenu.setApplicationName(App.class.getName(), APP_NAME));
         }
+    }
+
+    /**
+     * A move made from the phone page, wired like a desktop move host: each
+     * landed item persisted to the action log at once, the viewer's handles
+     * released on the FX thread first (awaited by the move), and afterwards
+     * the entries shown in the action log panel and the browser/mosaic
+     * re-listed when they show an affected folder.
+     */
+    private static MoveHooks phoneMoveHooks(MainWindow main) {
+        return new MoveHooks() {
+            @Override
+            public void persist(ActionLogEntry entry) {
+                ActionLog.get().persist(entry);
+            }
+
+            @Override
+            public CompletableFuture<Void> releaseBeforeMove(List<Path> moving) {
+                var released = new CompletableFuture<Void>();
+                Platform.runLater(() -> {
+                    try {
+                        main.releaseBeforeExternalMove(moving).whenComplete((v, e) -> {
+                            if (e != null) released.completeExceptionally(e);
+                            else released.complete(null);
+                        });
+                    } catch (RuntimeException e) {
+                        released.completeExceptionally(e);
+                    }
+                });
+                return released;
+            }
+
+            @Override
+            public void afterMove(List<ActionLogEntry> entries, List<Path> moved, Set<Path> affectedDirs) {
+                Platform.runLater(() -> {
+                    entries.forEach(ActionLog.get()::recordPersisted);
+                    main.refreshAfterExternalMove(moved, affectedDirs);
+                });
+            }
+        };
     }
 
     /**
@@ -236,6 +302,9 @@ public final class App extends Application {
         // The guard first: a file forwarded while the service closes would
         // be acknowledged and then lost behind the toolkit's exit.
         if (instanceGuard != null) instanceGuard.close();
+        // Web mode before the service it reads from (the service's close hook
+        // would stop it too; this keeps the order explicit).
+        if (webMode != null) webMode.close();
         if (service != null) service.close();
     }
 

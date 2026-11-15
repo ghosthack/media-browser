@@ -31,6 +31,7 @@ public final class SmokeTest {
     public static void main(String[] args) {
         verifyAwtRasterBridge();
         verifySuperResolutionDownloader();
+        verifyWebMode();
         var backend = MediaBackend.fromSettings(System.getProperty("media.backend"));
         // Playback decode policy, e.g. -Ddecode.device=hardware for the hw
         // playback smoke (FFM backends only; see media.ffm.HwDecode).
@@ -118,6 +119,27 @@ public final class SmokeTest {
      * a package cannot pass smoke testing and then fail when a user accepts the
      * first-use super-resolution download.
      */
+    /**
+     * Web mode's needs in the trimmed release runtime: the {@code jdk.httpserver}
+     * module (bound on loopback only, then stopped), the ImageIO JPEG writer,
+     * and the QR encoder.
+     */
+    private static void verifyWebMode() {
+        try {
+            var server = com.sun.net.httpserver.HttpServer.create(
+                    new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0), 0);
+            server.start();
+            server.stop(0);
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("web mode: jdk.httpserver unusable", e);
+        }
+        byte[] jpeg = new io.github.ghosthack.mediabrowser.web.JpegEncoder()
+                .encode(new RasterFrame(2, 2, new byte[16]), 85);
+        int qr = io.github.ghosthack.mediabrowser.web.QrCodes.modules("http://127.0.0.1:7394/").length;
+        System.out.println("Web mode: jdk.httpserver OK; JPEG " + jpeg.length + " bytes; QR "
+                + qr + " modules");
+    }
+
     private static void verifySuperResolutionDownloader() {
         SuperResolutionEngine engine =
                 new SuperResolutionEngine(AppSettings.appDir().resolve("super-resolution"));
