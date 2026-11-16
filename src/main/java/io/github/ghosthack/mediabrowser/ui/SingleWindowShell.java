@@ -79,6 +79,21 @@ final class SingleWindowShell extends AppShell {
             ShellView active = views.get(activeView.get());
             if (active != null) active.deactivate();
         });
+        // Closing the window quits, or hands over to the app's handler
+        // (background web mode); the toolkit's implicit exit is not relied on.
+        quitWhenClosed(stage.showingProperty(), this::mainClosed);
+    }
+
+    @Override
+    public void reopen() {
+        if (!stage.isShowing()) {
+            stage.show();
+            ShellView view = views.get(activeView.get());
+            if (view != null) view.activate();
+        }
+        stage.setIconified(false);
+        stage.toFront();
+        stage.requestFocus();
     }
 
     /**

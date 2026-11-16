@@ -152,6 +152,7 @@ public final class AppSettings {
      * folder, JPEG quality and passkey apply at once.
      */
     private static final String WEB_ENABLED_KEY = "web.enabled";
+    private static final String WEB_KEEP_SERVING_KEY = "web.keepServing";
     private static final String WEB_PORT_KEY = "web.port";
     private static final String WEB_ROOT_KEY = "web.root";
     private static final String WEB_JPEG_QUALITY_KEY = "web.jpegQuality";
@@ -340,6 +341,7 @@ public final class AppSettings {
     private boolean extensionFixEnabled;
     private int sidePanelWidth = DEFAULT_SIDE_PANEL_WIDTH;
     private boolean webEnabled;
+    private boolean webKeepServing = true;
     private int webPort = DEFAULT_WEB_PORT;
     /** The configured web root, or blank for the default ({@link #defaultWebRoot()}). */
     private String webRoot = "";
@@ -639,6 +641,7 @@ public final class AppSettings {
                 props.getProperty(SIDE_PANEL_WIDTH_KEY), DEFAULT_SIDE_PANEL_WIDTH,
                 MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH);
         settings.webEnabled = Boolean.parseBoolean(props.getProperty(WEB_ENABLED_KEY, "false"));
+        settings.webKeepServing = Boolean.parseBoolean(props.getProperty(WEB_KEEP_SERVING_KEY, "true"));
         settings.webPort = parseBoundedInt(props.getProperty(WEB_PORT_KEY),
                 DEFAULT_WEB_PORT, MIN_WEB_PORT, MAX_WEB_PORT);
         settings.webRoot = props.getProperty(WEB_ROOT_KEY, "").trim();
@@ -892,6 +895,7 @@ public final class AppSettings {
         props.setProperty(EXTENSION_FIX_KEY, Boolean.toString(extensionFixEnabled));
         props.setProperty(SIDE_PANEL_WIDTH_KEY, Integer.toString(sidePanelWidth));
         props.setProperty(WEB_ENABLED_KEY, Boolean.toString(webEnabled));
+        props.setProperty(WEB_KEEP_SERVING_KEY, Boolean.toString(webKeepServing));
         props.setProperty(WEB_PORT_KEY, Integer.toString(webPort));
         props.setProperty(WEB_ROOT_KEY, webRoot);
         props.setProperty(WEB_JPEG_QUALITY_KEY, Integer.toString(webJpegQuality));
@@ -2073,6 +2077,20 @@ public final class AppSettings {
 
     public void setWebEnabled(boolean enabled) {
         this.webEnabled = enabled;
+    }
+
+    /**
+     * Whether closing the main window while the phone page is being served
+     * keeps the app running in the background (a menu-bar / tray icon to
+     * reopen or quit) instead of quitting (default {@code true}; applies at
+     * once). Quit itself always quits.
+     */
+    public boolean webKeepServing() {
+        return webKeepServing;
+    }
+
+    public void setWebKeepServing(boolean keep) {
+        this.webKeepServing = keep;
     }
 
     /** TCP port the phone page listens on, on every interface (default 7394; next start). */

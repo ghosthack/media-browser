@@ -56,7 +56,8 @@ public final class FileOps {
                 && Files.isSameFile(source, directDestination)) {
             throw new IOException("Source is already in the target directory: " + source);
         }
-        Path destination = availableDestination(targetDir, fileName);
+        Path destination = availableDestination(targetDir, fileName,
+                Files.isDirectory(source, LinkOption.NOFOLLOW_LINKS));
         Files.move(source, destination);
         carrySidecars(source, destination, sidecars);
         return destination;
@@ -109,7 +110,8 @@ public final class FileOps {
         if (parent == null) {
             throw new IOException("Source has no parent directory: " + source);
         }
-        Path destination = availableDestination(parent, desiredName);
+        Path destination = availableDestination(parent, desiredName,
+                Files.isDirectory(source, LinkOption.NOFOLLOW_LINKS));
         Files.move(source, destination);
         carrySidecars(source, destination, sidecars);
         return destination;
@@ -200,9 +202,11 @@ public final class FileOps {
 
     /**
      * Find a non-existent destination in {@code targetDir} for {@code fileName},
-     * appending {@code " (N)"} before the extension on collision.
+     * appending {@code " (N)"} before the extension on collision. A folder has
+     * no extension: {@code "2024.06"} becomes {@code "2024.06 (1)"}.
      */
-    private static Path availableDestination(Path targetDir, String fileName) throws IOException {
+    private static Path availableDestination(Path targetDir, String fileName, boolean directory)
+            throws IOException {
         Path candidate = targetDir.resolve(fileName);
         if (!Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)) {
             return candidate;
@@ -210,7 +214,7 @@ public final class FileOps {
 
         String baseName;
         String ext;
-        int dot = fileName.lastIndexOf('.');
+        int dot = directory ? -1 : fileName.lastIndexOf('.');
         if (dot > 0) {
             baseName = fileName.substring(0, dot);
             ext = fileName.substring(dot);

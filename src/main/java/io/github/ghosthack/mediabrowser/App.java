@@ -9,6 +9,7 @@ import io.github.ghosthack.mediabrowser.media.move.ActionLogEntry;
 import io.github.ghosthack.mediabrowser.media.move.ActionLogFile;
 import io.github.ghosthack.mediabrowser.ui.ActionLog;
 import io.github.ghosthack.mediabrowser.ui.AppShell;
+import io.github.ghosthack.mediabrowser.ui.BackgroundIcon;
 import io.github.ghosthack.mediabrowser.ui.FileAssociationsDialog;
 import io.github.ghosthack.mediabrowser.ui.MainWindow;
 import io.github.ghosthack.mediabrowser.ui.ThemeManager;
@@ -50,10 +51,18 @@ public final class App extends Application {
 
     private MediaService service;
     private WebMode webMode;
+    private AppShell shell;
+    private AppSettings settings;
+    /** The menu-bar / tray icon while the window is closed and the phone page still served. */
+    private Runnable removeIcon;
+    private static final boolean MAC = System.getProperty("os.name", "").toLowerCase().contains("mac");
+    /** Whether the main window is closed with the phone page still served (the icon may still be on its way). */
+    private boolean inBackground;
 
     @Override
     public void start(Stage primaryStage) {
         var settings = AppSettings.load();
+        this.settings = settings;
         // Hook the session action log up to its optional on-disk JSONL mirror
         // (and, when enabled, seed the last few persisted entries back in) —
         // before any window exists, so no recorded move can miss the file.
@@ -149,6 +158,7 @@ public final class App extends Application {
         // window whose root swaps between them, or the classic separate
         // windows, per the persisted window-mode setting (see AppShell).
         var shell = AppShell.create(primaryStage, settings);
+        this.shell = shell;
         var viewer = new ViewerWindow(shell, service, settings, rotationStore, aaeStore);
         var main = new MainWindow(shell, service, viewer, settings, rotationStore, aaeStore);
         shell.register(AppShell.AppView.BROWSER, main);
@@ -173,6 +183,16 @@ public final class App extends Application {
                 }),
                 phoneMoveHooks(main));
         main.setWebMode(webMode);
+        // Closing the main window (and Quit, which closes it) quits — or,
+        // while the phone page is served and Settings › Web says to keep
+        // serving, hides the app behind a menu-bar / tray icon whose Quit
+        // stops it (docs/web-mode.md, "Lifecycle").
+        Platform.setImplicitExit(false);
+        shell.setMainClosedHandler(this::mainWindowClosed);
+        if (!MAC && settings.webEnabled() && settings.webKeepServing()) BackgroundIcon.prepare();
+        // A quit macOS asks for (logout, restart, shutdown, a script) always
+        // quits, even with the app already behind its menu-bar item.
+        if (MAC) MacStatusItem.quitOnSystemQuit(Platform::exit);
 
         Path argPath = launchArgPath();
         AppShell.AppView initial = (argPath != null && Files.isRegularFile(argPath))
@@ -188,6 +208,9 @@ public final class App extends Application {
         if (instanceGuard != null) {
             instanceGuard.onFileReceived(forwarded -> Platform.runLater(() -> {
                 Path abs = forwarded.toAbsolutePath().normalize();
+                if (inBackground && (Files.isRegularFile(abs) || Files.isDirectory(abs))) {
+                    leaveBackground();
+                }
                 if (Files.isRegularFile(abs)) {
                     main.openInitialFile(abs);
                 } else if (Files.isDirectory(abs)) {
@@ -297,8 +320,78 @@ public final class App extends Application {
         }
     }
 
+    /** Whether closing the main window keeps the app running for the phone page. */
+    static boolean keepsServing(WebMode web, AppSettings settings) {
+        return web != null && web.state() == WebMode.State.RUNNING && settings.webKeepServing();
+    }
+
+    /**
+     * Closing the main window — the window's own close, File › Exit, or
+     * macOS's Cmd+Q, which JavaFX delivers as "close every window" — keeps
+     * the phone page served behind the background icon when Settings › Web
+     * say so; the icon's Quit is the one that stops it. A quit the system
+     * asks for (logout, restart, shutdown, a script) always quits, so the
+     * app never holds one up.
+     */
+    private void mainWindowClosed() {
+        if (!keepsServing(webMode, settings) || MacQuitEvent.systemQuitInProgress()) {
+            Platform.exit();
+            return;
+        }
+        inBackground = true;
+        if (MAC) {
+            // AppKit's own menu-bar item: JavaFX owns the main event loop here,
+            // where an AWT tray icon's menu never opens. Built on this thread.
+            MacStatusItem item = MacStatusItem.show(webMode.port(), new MacStatusItem.Actions() {
+                @Override public void open() { leaveBackground(); }
+                @Override public void quit() { Platform.exit(); }
+            });
+            if (item == null) {
+                quitForLackOfIcon();
+            } else {
+                MacStatusItem.setInDock(false);
+                removeIcon = () -> {
+                    item.remove();
+                    MacStatusItem.setInDock(true);
+                };
+            }
+            return;
+        }
+        // Elsewhere AWT's tray, added without blocking this thread.
+        BackgroundIcon.show(webMode.port(), new BackgroundIcon.Actions() {
+            @Override public void open() { Platform.runLater(App.this::leaveBackground); }
+            @Override public void quit() { Platform.runLater(Platform::exit); }
+        }).thenAccept(icon -> Platform.runLater(() -> {
+            if (icon.isEmpty()) {
+                if (inBackground) quitForLackOfIcon();
+            } else if (inBackground) {
+                removeIcon = icon.get()::remove;
+            } else {
+                icon.get().remove();          // reopened before the icon arrived
+            }
+        }));
+    }
+
+    /** No icon to come back through: never leave an app running unseen. */
+    private void quitForLackOfIcon() {
+        System.err.println("[App] no menu-bar/tray icon available; quitting instead of serving"
+                + " the phone page in the background");
+        Platform.exit();
+    }
+
+    /** Back from the background: the icon goes, the main window returns. */
+    private void leaveBackground() {
+        inBackground = false;
+        if (removeIcon != null) {
+            removeIcon.run();
+            removeIcon = null;
+        }
+        if (shell != null) shell.reopen();
+    }
+
     @Override
     public void stop() {
+        if (removeIcon != null) removeIcon.run();
         // The guard first: a file forwarded while the service closes would
         // be acknowledged and then lost behind the toolkit's exit.
         if (instanceGuard != null) instanceGuard.close();

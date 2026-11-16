@@ -60,6 +60,9 @@ final class WebPaths {
      * The path {@code text} names, inside the root; the root itself for
      * {@code null} or blank text.
      */
+    /** Names go through Win32, which rewrites a trailing dot or space away. */
+    private static final boolean WIN32_NAMES = java.io.File.separatorChar == '\\';
+
     Path resolve(String text) throws WebException {
         if (text == null || text.isBlank()) return root;
         if (text.indexOf('\0') >= 0) throw WebException.badRequest("not a path");
@@ -74,6 +77,18 @@ final class WebPaths {
             String s = segment.toString();
             if (s.equals("..") || s.equals(".")) {
                 throw WebException.outside("not inside the web root");
+            }
+        }
+        if (WIN32_NAMES) {
+            // Win32 drops a trailing dot or space when it opens a name, so
+            // "Dots." would reach a sibling "Dots": such a name is unreachable
+            // here, never a stand-in for another.
+            for (Path segment : lexical) {
+                String s = segment.toString();
+                if (s.endsWith(".") || s.endsWith(" ")) {
+                    throw WebException.notFound("\"" + s + "\" ends in a dot or a space;"
+                            + " Windows cannot open it by that name");
+                }
             }
         }
         if (!lexical.startsWith(root)) throw WebException.outside("not inside the web root");
@@ -101,7 +116,9 @@ final class WebPaths {
             if (!contains(realPath(host.get()))) throw WebException.outside("not inside the web root");
             return path;
         }
-        Path real = realPath(path);
+        // parse() trims, as suits a typed address; a locator is exact ("Trip "
+        // and "Trip" are two folders), so a plain path is the text as sent.
+        Path real = realPath(lexical);
         if (!contains(real)) throw WebException.outside("not inside the web root");
         return real;
     }

@@ -1972,7 +1972,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         fileItems.addAll(List.of(
                 new SeparatorMenuItem(),
                 buildCloseWindowItem(owner),
-                action("E_xit", keys.mod1(KeyCode.Q), Platform::exit)));
+                action("E_xit", keys.mod1(KeyCode.Q), this::exitRequested)));
         var fileMenu = new Menu("_File", null, fileItems.toArray(MenuItem[]::new));
 
         var back = action("_Back", keys.mod1(KeyCode.LEFT), this::goBack);
@@ -2339,6 +2339,17 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
      * three copies never double-bind. The viewer copy moves the on-screen item
      * and is disabled while the viewer is hidden (it has nothing to move).
      */
+    /**
+     * File › Exit: closes the main window, whose close handler quits — or,
+     * while the phone page is kept served, leaves the app behind its
+     * background icon (docs/web-mode.md, "Lifecycle").
+     */
+    private void exitRequested() {
+        Stage main = shell.stageFor(AppShell.AppView.BROWSER);
+        if (main != null && main.isShowing()) main.hide();
+        else Platform.exit();
+    }
+
     /**
      * The {@code Close Window} item (Cmd/Ctrl+W): hides the bar's own window,
      * mirroring Escape in the viewer. Each window installs its own menu-bar
@@ -3948,6 +3959,8 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         // --- Web tab: web mode (docs/web-mode.md) --------------------------------
         var webEnabledBox = new CheckBox("Serve the phone page (web mode)");
         webEnabledBox.setSelected(settings.webEnabled());
+        var webKeepServingBox = new CheckBox("Keep serving after the window closes");
+        webKeepServingBox.setSelected(settings.webKeepServing());
         var webPortSpinner = new Spinner<Integer>(AppSettings.MIN_WEB_PORT, AppSettings.MAX_WEB_PORT,
                 settings.webPort(), 1);
         webPortSpinner.setEditable(true);
@@ -3985,8 +3998,13 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
         webRootLabelRow.setAlignment(Pos.CENTER_LEFT);
         var webQualityRow = new HBox(8, new Label("JPEG quality:"), webQualitySpinner);
         webQualityRow.setAlignment(Pos.CENTER_LEFT);
-        var webContent = new VBox(8, webEnabledBox, webPortRow, webRootLabelRow, webQualityRow,
-                webAccessButton, new Separator(), webHint);
+        var webKeepHint = new Label("Closing the window then leaves Media Browser running "
+                + "behind a menu-bar (macOS) or tray icon that reopens or quits it; Quit always "
+                + "quits. Applies at once.");
+        webKeepHint.getStyleClass().add("settings-hint");
+        webKeepHint.setWrapText(true);
+        var webContent = new VBox(8, webEnabledBox, webKeepServingBox, webPortRow, webRootLabelRow,
+                webQualityRow, webAccessButton, new Separator(), webHint, webKeepHint);
         webContent.setPadding(new Insets(12));
 
         var generalTab = new Tab("General", generalContent);
@@ -4141,6 +4159,10 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
                                     + "folder for phones on this network: plain HTTP on every "
                                     + "interface, behind a passkey. Applies after restarting "
                                     + "Media Browser."),
+                            composeCheckRow(webKeepServingBox, "Closing the window leaves "
+                                    + "Media Browser running behind a menu-bar (macOS) or tray "
+                                    + "icon that reopens or quits it, so phones keep their page. "
+                                    + "Quit always quits. Applies at once."),
                             composeRow("Port", "Applies after restarting Media Browser.",
                                     webPortSpinner),
                             composeRow("Root folder", "Blank = " + AppSettings.defaultWebRoot()
@@ -4348,6 +4370,7 @@ public final class MainWindow implements AppShell.ShellView, ViewerHost {
 
         // --- Web: on/off and port wait for a restart; root and quality go live --
         settings.setWebEnabled(webEnabledBox.isSelected());
+        settings.setWebKeepServing(webKeepServingBox.isSelected());
         settings.setWebPort(webPortSpinner.getValue());
         settings.setWebRootSetting(webRootField.getText());
         settings.setWebJpegQuality(webQualitySpinner.getValue());

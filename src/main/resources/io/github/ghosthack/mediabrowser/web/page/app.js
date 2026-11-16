@@ -26,10 +26,11 @@ const state = {
 // ------------------------------------------------------------------ errors
 
 class ApiError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, id) {
     super(message);
     this.status = status;
     this.code = code;
+    this.id = id || null;     // a move's undo id, when a refusal carries one (timeout)
   }
 }
 
@@ -44,10 +45,17 @@ const MAX_LOG = 100;
 let noticeTimer = 0;
 
 function loadLog() {
-  try { return JSON.parse(localStorage.getItem("mb.log") || "[]"); } catch (e) { return []; }
+  // anything but a list of messages (a damaged or foreign value) starts empty
+  try {
+    const list = JSON.parse(localStorage.getItem("mb.log") || "[]");
+    return Array.isArray(list) ? list.filter((m) => m && typeof m.text === "string").slice(-MAX_LOG) : [];
+  } catch (e) {
+    return [];
+  }
 }
 function saveLog(log) {
-  try { localStorage.setItem("mb.log", JSON.stringify(log.slice(-MAX_LOG))); } catch (e) { /* private mode */ }
+  if (log.length > MAX_LOG) log.splice(0, log.length - MAX_LOG);   // the inbox keeps the same 100
+  try { localStorage.setItem("mb.log", JSON.stringify(log)); } catch (e) { /* private mode */ }
 }
 const messageLog = loadLog();
 
@@ -138,7 +146,7 @@ async function errorOf(res) {
   let body = null;
   try { body = await res.json(); } catch (e) { /* not JSON */ }
   return new ApiError(res.status, (body && body.code) || "http",
-    (body && body.error) || ("HTTP " + res.status + " " + res.statusText));
+    (body && body.error) || ("HTTP " + res.status + " " + res.statusText), body && body.id);
 }
 
 /** JSON API call; a lost session shows the passkey form and rejects. */
@@ -710,6 +718,7 @@ const viewer = {
   slides: [],          // [prev, current, next] slide elements
   scale: 1, tx: 0, ty: 0,
   fullUrls: new Map(), // "path|v" -> blob URL (a few, most recent last)
+  step: null,          // the step animating: {land, timer}
 };
 const MAX_FULL_URLS = 8;
 
@@ -754,6 +763,10 @@ function closeViewer(viaHistory) {
   if (viaHistory && history.state && history.state.viewer) {
     history.back();          // popstate closes it
     return;
+  }
+  if (viewer.step) {           // land a step in flight, so the grid scrolls to where it ended
+    clearTimeout(viewer.step.timer);
+    viewer.step.land();
   }
   viewer.open = false;
   $("viewer").hidden = true;
@@ -869,6 +882,12 @@ async function loadFull(s, item, key) {
 
 /** Steps the viewer by {@code dir}, animating the track. */
 function go(dir) {
+  // A step still animating lands at once first, so quick taps each count and
+  // the slides never rotate twice for one index change.
+  if (viewer.step) {
+    clearTimeout(viewer.step.timer);
+    viewer.step.land();
+  }
   const next = viewer.index + dir;
   if (next < 0 || next >= state.items.length) {
     snapTrack(0);
@@ -877,7 +896,8 @@ function go(dir) {
   const track = $("track");
   track.style.transition = "transform 0.22s ease-out";
   track.style.transform = "translateX(" + (-dir * 100) + "%)";
-  setTimeout(() => {
+  const land = () => {
+    viewer.step = null;
     track.style.transition = "";
     track.style.transform = "";
     if (dir > 0) viewer.slides.push(viewer.slides.shift());
@@ -888,7 +908,8 @@ function go(dir) {
     fillSlide(viewer.slides[dir > 0 ? 2 : 0], next + dir);
     fillSlide(viewer.slides[1], next);
     updateChrome();
-  }, 230);
+  };
+  viewer.step = { land, timer: setTimeout(land, 230) };
 }
 
 function snapTrack(dx) {
@@ -1195,12 +1216,16 @@ $("move").addEventListener("click", () => setSelecting(true));
 $("selcancel").addEventListener("click", () => setSelecting(false));
 $("seladd").addEventListener("click", () => {
   let added = 0;
-  for (const e of sel.picked.values()) {
+  const picked = [...sel.picked.values()];
+  for (const e of picked) {
     if (!inBag(e.p)) { bag.push(e); added++; }
   }
   setSelecting(false);
   saveBag();
-  banner(added === 1 ? "1 item added to the bag." : added + " items added to the bag.", true);
+  const already = picked.length - added;
+  banner(added === 0 ? (already === 1 ? picked[0].n + " is already in the bag." : "Those are already in the bag.")
+    : (added === 1 ? "1 item added to the bag" : added + " items added to the bag")
+      + (already ? " (" + already + " already in it)." : "."), true);
 });
 
 function updateBag() {
@@ -1368,7 +1393,13 @@ async function moveHere() {
   try {
     res = await api("/api/move", itemsForm({ t: target.path }, bag.map((e) => e.p)));
   } catch (err) {
-    if (err.code !== "auth") banner(err.message);
+    if (err.code === "timeout" && err.id) {
+      // still moving on the desktop: what it finishes can be undone under this id
+      banner(err.message, false, { label: "Undo", run: () => undo(err.id) });
+      refreshAfterMove();
+    } else if (err.code !== "auth") {
+      banner(err.message);
+    }
     return;
   } finally {
     $("movehere").disabled = false;
@@ -1441,7 +1472,8 @@ async function undo(id) {
   } catch (err) {
     undone.delete(id);
     $("resundo").disabled = false;
-    if (err.code !== "auth") banner("Undo failed: " + err.message);
+    if (err.code === "moving") banner(err.message, false, { label: "Undo", run: () => undo(id) });
+    else if (err.code !== "auth") banner("Undo failed: " + err.message);
     return;
   }
   showResults("Undo", res, null);

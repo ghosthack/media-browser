@@ -129,7 +129,7 @@ public final class WebServer implements AutoCloseable {
     private final Semaphore fullDecodes = new Semaphore(FULL_DECODES);
     /** Media kinds of entries a listing showed, by locator: what the image endpoints may serve. */
     private final ConcurrentHashMap<String, MediaKind> mediaKinds = new ConcurrentHashMap<>();
-    private final WebMoves moves;
+    final WebMoves moves;   // package-private for tests (the move wait)
 
     private volatile WebPaths paths;
     private volatile int quality;
@@ -342,7 +342,7 @@ public final class WebServer implements AutoCloseable {
                 default -> throw WebException.notFound("no such endpoint");
             }
         } catch (WebException e) {
-            sendError(ex, e.status, e.code, e.getMessage());
+            sendError(ex, e.status, e.code, e.getMessage(), e.id);
         } catch (RuntimeException e) {
             System.err.println("[WebServer] " + method + " " + path + " failed: " + e);
             sendError(ex, 500, "internal", message(e));
@@ -824,10 +824,16 @@ public final class WebServer implements AutoCloseable {
 
     private static void sendError(HttpExchange ex, int status, String code, String message)
             throws IOException {
+        sendError(ex, status, code, message, null);
+    }
+
+    private static void sendError(HttpExchange ex, int status, String code, String message, String id)
+            throws IOException {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("ok", false);
         body.put("code", code);
         body.put("error", message);
+        if (id != null) body.put("id", id);
         sendJson(ex, status, body);
     }
 

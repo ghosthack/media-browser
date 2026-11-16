@@ -63,6 +63,8 @@ public abstract class AppShell {
 
     protected final Map<AppView, ShellView> views = new EnumMap<>(AppView.class);
     private final WindowMaximizer maximizer;
+    /** What closing the main window does; quitting unless the app says otherwise. */
+    private Runnable mainClosed = javafx.application.Platform::exit;
 
     protected AppShell(AppSettings settings) {
         this(settings.maximizeOverscan());
@@ -103,6 +105,34 @@ public abstract class AppShell {
     private static final class ApplicationIconHolder {
         private static final Image ICON = loadApplicationIcon();
     }
+
+    /**
+     * Replaces what closing the main window (the browser's, or the single
+     * window) does — by default quitting the app, after the shell has hidden
+     * its other windows. The app uses it to keep serving the phone page in
+     * the background (docs/web-mode.md).
+     */
+    public void setMainClosedHandler(Runnable handler) {
+        this.mainClosed = java.util.Objects.requireNonNull(handler);
+    }
+
+    /** Runs the main-window-closed handler. */
+    protected final void mainClosed() {
+        mainClosed.run();
+    }
+
+    /** Runs {@code onClose} each time {@code mainShowing} goes from shown to hidden. */
+    static void quitWhenClosed(javafx.beans.value.ObservableValue<Boolean> mainShowing, Runnable onClose) {
+        mainShowing.addListener((o, was, showing) -> {
+            if (was && !showing) onClose.run();
+        });
+    }
+
+    /**
+     * Brings the app back after its main window was closed into the
+     * background: shows the main window again on the view it had, active.
+     */
+    public abstract void reopen();
 
     /** The shell for the persisted {@code window.mode} setting. */
     public static AppShell create(Stage primaryStage, AppSettings settings) {

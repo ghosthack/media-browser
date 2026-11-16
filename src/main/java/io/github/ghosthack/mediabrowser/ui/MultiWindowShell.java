@@ -73,6 +73,7 @@ final class MultiWindowShell extends AppShell {
      */
     MultiWindowShell(Stage primaryStage, AppSettings settings, Runnable exit) {
         super(settings);
+        setMainClosedHandler(exit);
         this.settings = settings;
         this.stageStyle = WindowChrome.stageStyle(settings.windowDecorations());
         this.undecorated = stageStyle == StageStyle.UNDECORATED;
@@ -98,15 +99,14 @@ final class MultiWindowShell extends AppShell {
         quitWhenClosed(primaryStage.showingProperty(), () -> {
             stages.get(AppView.MOSAIC).hide();
             stages.get(AppView.VIEWER).hide();
-            exit.run();
+            mainClosed();
         });
     }
 
-    /** Runs {@code quit} each time {@code mainShowing} goes from shown to hidden. */
-    static void quitWhenClosed(ObservableValue<Boolean> mainShowing, Runnable quit) {
-        mainShowing.addListener((o, was, showing) -> {
-            if (was && !showing) quit.run();
-        });
+    @Override
+    public void reopen() {
+        showView(AppView.BROWSER);
+        stages.get(AppView.BROWSER).setIconified(false);
     }
 
     private void initStage(AppView v, int width, int height, String title) {

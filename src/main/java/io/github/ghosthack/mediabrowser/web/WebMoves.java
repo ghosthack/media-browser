@@ -7,13 +7,17 @@ import io.github.ghosthack.mediabrowser.media.move.FileOps;
 import io.github.ghosthack.mediabrowser.media.move.MoveBatch;
 import io.github.ghosthack.mediabrowser.media.move.SidecarCarrier;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -25,6 +29,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
 /**
  * The phone page's moves ({@code POST /api/move}) and their undo
@@ -67,8 +72,17 @@ final class WebMoves {
         void requireMedia(Path file) throws WebException;
     }
 
-    /** One moved item: where it was, where it is now. */
-    private record Undoable(Path original, Path now) {}
+    /**
+     * One moved item: where it was, where it is now, and its identity there
+     * ({@link #identity}), so an undo can tell it from a different file that
+     * took its name since.
+     */
+    private record Undoable(Path original, Path now, Object key) {}
+
+    /** Ids of moves that outlived their request's wait and are still running (guarded by records). */
+    private final Set<String> running = new HashSet<>();
+    /** How long a request waits for its batch; tests shorten it. */
+    Duration moveTimeout = MOVE_TIMEOUT;
 
     private final MediaService service;
     private final SidecarCarrier sidecars;
@@ -147,21 +161,22 @@ final class WebMoves {
             }
 
             List<Undoable> undo = new ArrayList<>();
+            String id = newId();
             if (!moving.isEmpty()) {
-                MoveBatch.Execution done = run(moving,
-                        src -> FileOps.moveWithAutoRename(src, dir, sidecars));
                 Set<Path> affected = new LinkedHashSet<>();
                 affected.add(dir);
                 moving.forEach(src -> affected.add(src.getParent()));
+                // A batch that outlives the wait still reports when it ends:
+                // the desktop refreshes and the move becomes undoable under id.
+                MoveBatch.Execution done = run(moving,
+                        src -> FileOps.moveWithAutoRename(src, dir, sidecars), id,
+                        late -> keep(id, report(late, pending, null, affected)));
                 undo = report(done, pending, null, affected);
             }
             var out = new LinkedHashMap<String, Object>();
             out.put("ok", true);
             if (!undo.isEmpty()) {
-                String id = newId();
-                synchronized (records) {
-                    records.put(id, List.copyOf(undo));
-                }
+                keep(id, undo);
                 out.put("id", id);
             }
             out.put("target", WebPaths.locator(dir));
@@ -228,6 +243,10 @@ final class WebMoves {
         synchronized (lock) {
             List<Undoable> record;
             synchronized (records) {
+                if (running.contains(id)) {
+                    throw new WebException(409, "moving",
+                            "That move is still running; Undo once it has finished");
+                }
                 record = records.remove(id);
             }
             if (record == null) {
@@ -260,14 +279,14 @@ final class WebMoves {
                 moving.add(u.now());
             }
             if (!moving.isEmpty()) {
-                MoveBatch.Execution done = run(moving, src -> FileOps.moveWithAutoRename(
-                        src, folders.get(src), back.get(src).original().getFileName().toString(),
-                        sidecars));
                 Set<Path> affected = new LinkedHashSet<>();
                 moving.forEach(now -> {
                     affected.add(now.getParent());
                     affected.add(folders.get(now));
                 });
+                MoveBatch.Execution done = run(moving, src -> FileOps.moveWithAutoRename(
+                        src, folders.get(src), back.get(src).original().getFileName().toString(),
+                        sidecars), null, late -> report(late, pending, back, affected));
                 report(done, pending, back, affected);
             }
             var out = new LinkedHashMap<String, Object>();
@@ -286,7 +305,8 @@ final class WebMoves {
         } catch (WebException e) {
             return e.status == 404 ? "It is no longer where it was moved to" : e.getMessage();
         }
-        if (!now.equals(u.now()) || Files.isSymbolicLink(u.now())) {
+        if (!now.equals(u.now()) || Files.isSymbolicLink(u.now())
+                || (u.key() != null && !u.key().equals(identity(u.now())))) {
             return "It has been replaced since the move";
         }
         Path folder;
@@ -306,8 +326,22 @@ final class WebMoves {
 
     // ------------------------------------------------------------------ the batch
 
-    /** Released handles, then {@code relocation} over {@code moving} on the file-op thread. */
-    private MoveBatch.Execution run(List<Path> moving, MoveBatch.Relocation relocation)
+    /** Records a finished move's undoable items under {@code id} (nothing when none moved). */
+    private void keep(String id, List<Undoable> undo) {
+        synchronized (records) {
+            running.remove(id);
+            if (!undo.isEmpty()) records.put(id, List.copyOf(undo));
+        }
+    }
+
+    /**
+     * Released handles, then {@code relocation} over {@code moving} on the
+     * file-op thread. A batch still running when the wait ends is handed to
+     * {@code late} once it finishes, and the 504 carries {@code lateId} (a
+     * move's future undo id, marked running meanwhile; null for an undo).
+     */
+    private MoveBatch.Execution run(List<Path> moving, MoveBatch.Relocation relocation,
+                                    String lateId, Consumer<MoveBatch.Execution> late)
             throws WebException {
         MoveHooks h = hooks;
         CompletableFuture<Void> released;
@@ -328,13 +362,27 @@ final class WebMoves {
             throw new WebException(503, "busy", "The desktop is closing; nothing was moved");
         }
         try {
-            return batch.get(MOVE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            return batch.get(moveTimeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new WebException(503, "busy", "server is stopping; the move may still finish");
         } catch (TimeoutException e) {
+            if (lateId != null) {
+                synchronized (records) {
+                    running.add(lateId);
+                }
+            }
+            batch.whenComplete((done, failure) -> {
+                if (failure != null) {
+                    System.err.println("[WebMoves] a move that outlived its request failed: " + failure);
+                    if (lateId != null) keep(lateId, List.of());
+                } else {
+                    late.accept(done);
+                }
+            });
             throw new WebException(504, "timeout", "The move is taking longer than "
-                    + MOVE_TIMEOUT.toMinutes() + " minutes; it carries on — look at the folder later");
+                    + describe(moveTimeout) + "; it carries on, and can be undone once it has finished")
+                    .withId(lateId);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause() == null ? e : e.getCause();
             if (cause instanceof NotReleased) throw new WebException(409, "in-use", cause.getMessage());
@@ -393,7 +441,7 @@ final class WebMoves {
             if (failedSources.contains(m.source().toString())) continue;   // stranded: said in its reason
             String wanted = back == null ? name(m.source()) : name(back.get(m.source()).original());
             row.put("status", wanted.equals(name(m.finalPath())) ? "moved" : "renamed");
-            undoable.add(new Undoable(m.source(), m.finalPath()));
+            undoable.add(new Undoable(m.source(), m.finalPath(), identity(m.finalPath())));
         }
         if (!entries.isEmpty()) {
             try {
@@ -403,6 +451,30 @@ final class WebMoves {
             }
         }
         return undoable;
+    }
+
+    private static String describe(Duration d) {
+        long minutes = d.toMinutes();
+        return minutes >= 1 ? minutes + (minutes == 1 ? " minute" : " minutes") : d.toMillis() + " ms";
+    }
+
+    /**
+     * What tells {@code path}'s file from another that later takes its name
+     * (not following a link): the file key (device + inode) where the
+     * filesystem has one; on Windows, where Java gives none, the creation
+     * time with — for a file — the modification time and size (Windows'
+     * name tunnelling can hand a replacement the old creation time, never
+     * the old modification time of a fresh write); null when unreadable.
+     */
+    private static Object identity(Path path) {
+        try {
+            BasicFileAttributes a = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (a.fileKey() != null) return a.fileKey();
+            return a.isDirectory() ? List.of(a.creationTime())
+                    : List.of(a.creationTime(), a.lastModifiedTime(), a.size());
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
     }
 
     // ------------------------------------------------------------------ rows

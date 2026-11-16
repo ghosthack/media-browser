@@ -37,3 +37,6 @@ nbactions.xml
 
 # Local Claude settings
 .claude/settings.local.json
+
+# Web page test tooling
+src/test/web/node_modules/
